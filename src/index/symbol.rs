@@ -1,0 +1,61 @@
+use serde::{Deserialize, Serialize};
+use tower_lsp::lsp_types::Url;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SymbolKind {
+    Module,
+    Controller,
+    Service,
+    Factory,
+    Directive,
+    Provider,
+    Filter,
+    Constant,
+    Value,
+    Method,
+}
+
+impl SymbolKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SymbolKind::Module => "module",
+            SymbolKind::Controller => "controller",
+            SymbolKind::Service => "service",
+            SymbolKind::Factory => "factory",
+            SymbolKind::Directive => "directive",
+            SymbolKind::Provider => "provider",
+            SymbolKind::Filter => "filter",
+            SymbolKind::Constant => "constant",
+            SymbolKind::Value => "value",
+            SymbolKind::Method => "method",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Symbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub uri: Url,
+    /// 定義位置（ジャンプ先）- 関数全体の開始位置など
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    /// シンボル名の位置（検索用）- シンボル名が記述されている正確な位置
+    pub name_start_line: u32,
+    pub name_start_col: u32,
+    pub name_end_line: u32,
+    pub name_end_col: u32,
+    pub docs: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolReference {
+    pub name: String,
+    pub uri: Url,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
