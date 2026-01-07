@@ -13,6 +13,10 @@ pub enum SymbolKind {
     Constant,
     Value,
     Method,
+    /// $scope プロパティ
+    ScopeProperty,
+    /// $scope メソッド（関数が格納されている）
+    ScopeMethod,
 }
 
 impl SymbolKind {
@@ -28,6 +32,8 @@ impl SymbolKind {
             SymbolKind::Constant => "constant",
             SymbolKind::Value => "value",
             SymbolKind::Method => "method",
+            SymbolKind::ScopeProperty => "scope property",
+            SymbolKind::ScopeMethod => "scope method",
         }
     }
 }

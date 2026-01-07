@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::Url;
 use tree_sitter::{Node, Tree};
 
 use super::JsParser;
-use crate::index::{Symbol, SymbolIndex, SymbolKind, SymbolReference};
+use crate::index::{ControllerScope, Symbol, SymbolIndex, SymbolKind, SymbolReference};
 
 /// ローカル変数/関数の定義位置
 #[derive(Clone)]
@@ -20,7 +20,6 @@ struct LocalVarLocation {
 #[derive(Clone, Debug)]
 struct DiScope {
     /// コンポーネント名
-    #[allow(dead_code)]
     component_name: String,
     /// DIされた依存サービス名のリスト
     injected_services: Vec<String>,
@@ -28,6 +27,8 @@ struct DiScope {
     body_start_line: u32,
     /// 関数本体の終了行
     body_end_line: u32,
+    /// $scope がDIされているかどうか
+    has_scope: bool,
 }
 
 /// 解析コンテキスト
@@ -38,6 +39,11 @@ struct AnalyzerContext {
     inject_map: HashMap<String, Vec<String>>,
     /// $inject パターン用: 関数名 -> 関数本体の範囲 (start_line, end_line)
     function_ranges: HashMap<String, (u32, u32)>,
+    /// $inject パターン用: 関数名 -> $scope がDIされているか
+    inject_has_scope: HashMap<String, bool>,
+    /// 既に定義済みの $scope プロパティ名（コントローラー名.プロパティ名 -> true）
+    /// 最初の定義のみを登録するために使用
+    defined_scope_properties: HashMap<String, bool>,
 }
 
 impl AnalyzerContext {
@@ -46,6 +52,8 @@ impl AnalyzerContext {
             di_scopes: Vec::new(),
             inject_map: HashMap::new(),
             function_ranges: HashMap::new(),
+            inject_has_scope: HashMap::new(),
+            defined_scope_properties: HashMap::new(),
         }
     }
 
@@ -76,8 +84,49 @@ impl AnalyzerContext {
     }
 
     /// DIスコープを削除
+    #[allow(dead_code)]
     fn pop_scope(&mut self) {
         self.di_scopes.pop();
+    }
+
+    /// 指定位置で $scope がDIされているかどうかをチェック
+    fn has_scope_at(&self, line: u32) -> bool {
+        // 1. di_scopes から現在位置のスコープを探す（内側から外側へ）
+        for scope in self.di_scopes.iter().rev() {
+            if line >= scope.body_start_line && line <= scope.body_end_line {
+                return scope.has_scope;
+            }
+        }
+
+        // 2. $inject パターンのスコープもチェック
+        for (func_name, range) in &self.function_ranges {
+            if line >= range.0 && line <= range.1 {
+                if let Some(&has_scope) = self.inject_has_scope.get(func_name) {
+                    return has_scope;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// 指定位置のコントローラー名を取得
+    fn get_controller_name_at(&self, line: u32) -> Option<String> {
+        // 1. di_scopes から現在位置のスコープを探す（内側から外側へ）
+        for scope in self.di_scopes.iter().rev() {
+            if line >= scope.body_start_line && line <= scope.body_end_line {
+                return Some(scope.component_name.clone());
+            }
+        }
+
+        // 2. $inject パターンのスコープもチェック
+        for (func_name, range) in &self.function_ranges {
+            if line >= range.0 && line <= range.1 {
+                return Some(func_name.clone());
+            }
+        }
+
+        None
     }
 }
 
@@ -114,7 +163,7 @@ impl AngularJsAnalyzer {
             let mut ctx = AnalyzerContext::new();
             // 事前収集: $inject パターン用の関数宣言と $inject パターンを収集
             self.collect_function_declarations_for_inject(tree.root_node(), source, &mut ctx);
-            self.collect_inject_patterns(tree.root_node(), source, &mut ctx);
+            self.collect_inject_patterns(tree.root_node(), source, uri, &mut ctx);
             self.traverse_tree(&tree, source, uri, &mut ctx);
         }
     }
@@ -129,8 +178,9 @@ impl AngularJsAnalyzer {
     ///
     /// 認識するノード:
     /// - `call_expression`: 関数呼び出し（angular.module(), .controller() 等）
-    /// - `member_expression`: プロパティアクセス（Service.method）
+    /// - `member_expression`: プロパティアクセス（Service.method, $scope.property）
     /// - `expression_statement`: 式文（$inject パターン）
+    /// - `assignment_expression`: 代入式（$scope.property = value）
     /// - `identifier`: 識別子（サービス名等の参照）
     fn visit_node(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         match node.kind() {
@@ -140,9 +190,13 @@ impl AngularJsAnalyzer {
             }
             "member_expression" => {
                 self.analyze_member_access(node, source, uri, ctx);
+                self.analyze_scope_member_access(node, source, uri, ctx);
             }
             "expression_statement" => {
                 self.analyze_inject_pattern(node, source, uri);
+            }
+            "assignment_expression" => {
+                self.analyze_scope_assignment(node, source, uri, ctx);
             }
             "identifier" => {
                 self.analyze_identifier(node, source, uri, ctx);
@@ -307,6 +361,164 @@ impl AngularJsAnalyzer {
         }
     }
 
+    /// $scope.property への代入を解析し、定義として登録する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// $scope.users = [];
+    /// $scope.loadUsers = function() { ... };
+    /// ```
+    ///
+    /// 一番最初の代入のみを定義として登録する
+    /// 右辺が関数の場合は ScopeMethod、それ以外は ScopeProperty として登録
+    fn analyze_scope_assignment(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
+        // $scope.xxx = ... パターンを検出
+        if let Some(left) = node.child_by_field_name("left") {
+            if left.kind() == "member_expression" {
+                if let Some(object) = left.child_by_field_name("object") {
+                    let obj_name = self.node_text(object, source);
+                    if obj_name == "$scope" {
+                        // $scope がDIされているかチェック
+                        let current_line = node.start_position().row as u32;
+                        if !ctx.has_scope_at(current_line) {
+                            return;
+                        }
+
+                        if let Some(property) = left.child_by_field_name("property") {
+                            let prop_name = self.node_text(property, source);
+
+                            // コントローラー名を取得
+                            let controller_name = ctx.get_controller_name_at(current_line)
+                                .unwrap_or_else(|| "UnknownController".to_string());
+
+                            // シンボル名を生成（コントローラー名.$scope.プロパティ名）
+                            let full_name = format!("{}.$scope.{}", controller_name, prop_name);
+
+                            // 既に定義済みの場合は参照として登録
+                            if ctx.defined_scope_properties.contains_key(&full_name) {
+                                // 代入の左辺も参照としてカウント
+                                let start = property.start_position();
+                                let end = property.end_position();
+
+                                let reference = SymbolReference {
+                                    name: full_name,
+                                    uri: uri.clone(),
+                                    start_line: start.row as u32,
+                                    start_col: start.column as u32,
+                                    end_line: end.row as u32,
+                                    end_col: end.column as u32,
+                                };
+
+                                self.index.add_reference(reference);
+                                return;
+                            }
+                            ctx.defined_scope_properties.insert(full_name.clone(), true);
+
+                            let prop_start = property.start_position();
+                            let prop_end = property.end_position();
+
+                            // JSDocを探す
+                            let docs = self.extract_jsdoc_for_line(node.start_position().row, source);
+
+                            // 右辺が関数かどうかを判定
+                            let is_function = if let Some(right) = node.child_by_field_name("right") {
+                                matches!(right.kind(), "function_expression" | "arrow_function")
+                            } else {
+                                false
+                            };
+
+                            let kind = if is_function {
+                                SymbolKind::ScopeMethod
+                            } else {
+                                SymbolKind::ScopeProperty
+                            };
+
+                            let symbol = Symbol {
+                                name: full_name,
+                                kind,
+                                uri: uri.clone(),
+                                // 定義位置はプロパティ名の位置
+                                start_line: prop_start.row as u32,
+                                start_col: prop_start.column as u32,
+                                end_line: prop_end.row as u32,
+                                end_col: prop_end.column as u32,
+                                // シンボル名の位置も同じ
+                                name_start_line: prop_start.row as u32,
+                                name_start_col: prop_start.column as u32,
+                                name_end_line: prop_end.row as u32,
+                                name_end_col: prop_end.column as u32,
+                                docs,
+                            };
+
+                            self.index.add_definition(symbol);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// $scope.property への参照を解析し、参照として登録する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// $scope.users
+    /// $scope.loadUsers()
+    /// ```
+    ///
+    /// 代入の左辺（定義箇所）は別途 analyze_scope_assignment で処理されるため、
+    /// ここでは代入の左辺以外の参照を登録する
+    /// 定義がなくても参照として登録する（非同期処理内での定義など）
+    fn analyze_scope_member_access(&self, node: Node, source: &str, uri: &Url, ctx: &AnalyzerContext) {
+        if let Some(object) = node.child_by_field_name("object") {
+            let obj_name = self.node_text(object, source);
+            if obj_name == "$scope" {
+                // $scope がDIされているかチェック
+                let current_line = node.start_position().row as u32;
+                if !ctx.has_scope_at(current_line) {
+                    return;
+                }
+
+                // 代入の左辺の場合はスキップ（定義として処理される）
+                if let Some(parent) = node.parent() {
+                    if parent.kind() == "assignment_expression" {
+                        if let Some(left) = parent.child_by_field_name("left") {
+                            if left.id() == node.id() {
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(property) = node.child_by_field_name("property") {
+                    let prop_name = self.node_text(property, source);
+
+                    // コントローラー名を取得
+                    let controller_name = ctx.get_controller_name_at(current_line)
+                        .unwrap_or_else(|| "UnknownController".to_string());
+
+                    // シンボル名を生成
+                    let full_name = format!("{}.$scope.{}", controller_name, prop_name);
+
+                    let start = property.start_position();
+                    let end = property.end_position();
+
+                    // 定義がなくても参照として登録（非同期処理内での定義など）
+                    let reference = SymbolReference {
+                        name: full_name,
+                        uri: uri.clone(),
+                        start_line: start.row as u32,
+                        start_col: start.column as u32,
+                        end_line: end.row as u32,
+                        end_col: end.column as u32,
+                    };
+
+                    self.index.add_reference(reference);
+                }
+            }
+        }
+    }
+
     /// AngularJSのコンポーネント定義呼び出しを解析する
     ///
     /// 認識パターン:
@@ -409,18 +621,31 @@ impl AngularJsAnalyzer {
                     let (start, end, docs_line) = if let Some(second_arg) = args.named_child(1) {
                         self.extract_dependencies(second_arg, source, uri);
 
-                        // DIスコープを追加（配列記法でDIサービスがある場合のみ）
+                        // DIスコープを追加（配列記法の場合）
                         // identifier（関数参照）の場合は$injectパターンで処理されるため、ここでは追加しない
                         let injected_services = self.collect_injected_services(second_arg, source);
-                        if !injected_services.is_empty() {
+                        let has_scope = self.has_scope_in_di_array(second_arg, source);
+                        // DIサービスがあるか、$scopeがある場合はスコープを追加
+                        if !injected_services.is_empty() || has_scope {
                             if let Some((body_start, body_end)) = self.find_function_body_range(second_arg, source) {
                                 let di_scope = DiScope {
                                     component_name: component_name.clone(),
                                     injected_services,
                                     body_start_line: body_start,
                                     body_end_line: body_end,
+                                    has_scope,
                                 };
                                 ctx.push_scope(di_scope);
+
+                                // コントローラーの場合はスコープ情報を SymbolIndex に登録
+                                if kind == SymbolKind::Controller {
+                                    self.index.add_controller_scope(ControllerScope {
+                                        name: component_name.clone(),
+                                        uri: uri.clone(),
+                                        start_line: body_start,
+                                        end_line: body_end,
+                                    });
+                                }
                             }
                         }
 
@@ -1143,6 +1368,22 @@ impl AngularJsAnalyzer {
         services
     }
 
+    /// DI配列に $scope が含まれているかチェックする
+    fn has_scope_in_di_array(&self, node: Node, source: &str) -> bool {
+        if node.kind() == "array" {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "string" {
+                    let dep_name = self.extract_string_value(child, source);
+                    if dep_name == "$scope" {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// 関数本体の行範囲を取得する
     ///
     /// DI配列または関数式から関数本体の開始行と終了行を抽出
@@ -1203,7 +1444,7 @@ impl AngularJsAnalyzer {
     /// ```javascript
     /// MyController.$inject = ['$scope', 'UserService'];
     /// ```
-    fn collect_inject_patterns(&self, node: Node, source: &str, ctx: &mut AnalyzerContext) {
+    fn collect_inject_patterns(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if node.kind() == "expression_statement" {
             if let Some(expr) = node.named_child(0) {
                 if expr.kind() == "assignment_expression" {
@@ -1216,8 +1457,23 @@ impl AngularJsAnalyzer {
                                         let func_name = self.node_text(object, source);
                                         if let Some(right) = expr.child_by_field_name("right") {
                                             let services = self.collect_injected_services(right, source);
-                                            if !services.is_empty() {
-                                                ctx.inject_map.insert(func_name, services);
+                                            let has_scope = self.has_scope_in_di_array(right, source);
+                                            // サービスまたは$scopeがある場合は記録
+                                            if !services.is_empty() || has_scope {
+                                                ctx.inject_map.insert(func_name.clone(), services);
+                                                ctx.inject_has_scope.insert(func_name.clone(), has_scope);
+
+                                                // $scope がDIされている場合、ControllerScope を登録
+                                                if has_scope {
+                                                    if let Some((start_line, end_line)) = ctx.function_ranges.get(&func_name) {
+                                                        self.index.add_controller_scope(ControllerScope {
+                                                            name: func_name,
+                                                            uri: uri.clone(),
+                                                            start_line: *start_line,
+                                                            end_line: *end_line,
+                                                        });
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1232,7 +1488,7 @@ impl AngularJsAnalyzer {
         // 子ノードを再帰的に走査
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.collect_inject_patterns(child, source, ctx);
+            self.collect_inject_patterns(child, source, uri, ctx);
         }
     }
 }
@@ -1387,11 +1643,10 @@ angular.module('app')
         let mut ctx = AnalyzerContext::new();
         let index = Arc::new(SymbolIndex::new());
         let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
 
         analyzer.collect_function_declarations_for_inject(tree.root_node(), source, &mut ctx);
-        analyzer.collect_inject_patterns(tree.root_node(), source, &mut ctx);
-
-        let uri = Url::parse("file:///test.js").unwrap();
+        analyzer.collect_inject_patterns(tree.root_node(), source, &uri, &mut ctx);
         // Pass 1: definitions
         analyzer.analyze_document_with_options(&uri, source, true);
         // Pass 2: references
@@ -1420,9 +1675,10 @@ angular.module('app')
 
         let index = Arc::new(SymbolIndex::new());
         let analyzer = AngularJsAnalyzer::new(index);
+        let uri = Url::parse("file:///test.js").unwrap();
 
         analyzer.collect_function_declarations_for_inject(tree.root_node(), source, &mut ctx);
-        analyzer.collect_inject_patterns(tree.root_node(), source, &mut ctx);
+        analyzer.collect_inject_patterns(tree.root_node(), source, &uri, &mut ctx);
 
         assert!(ctx.function_ranges.contains_key("TestController"), "TestController should be in function_ranges");
         assert!(ctx.inject_map.contains_key("TestController"), "TestController should be in inject_map");
@@ -1446,5 +1702,274 @@ angular.module('app')
         assert!(!ctx.is_injected_at("notifyService", 3), "notifyService should NOT be injected at line 3");
         // 存在しないサービス
         assert!(!ctx.is_injected_at("otherService", 5), "otherService should NOT be injected");
+    }
+
+    #[test]
+    fn test_scope_property_definition() {
+        // $scope.xxx = ... が定義として登録される
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', ['$scope', function($scope) {
+    $scope.users = [];
+    $scope.loadUsers = function() {
+        return [];
+    };
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // $scope.users の定義が登録されているはず（プロパティ）
+        let users_defs = index.get_definitions("TestCtrl.$scope.users");
+        assert!(!users_defs.is_empty(), "$scope.users の定義が登録されるべき");
+        assert_eq!(users_defs[0].kind, SymbolKind::ScopeProperty);
+
+        // $scope.loadUsers の定義が登録されているはず（メソッド）
+        let load_defs = index.get_definitions("TestCtrl.$scope.loadUsers");
+        assert!(!load_defs.is_empty(), "$scope.loadUsers の定義が登録されるべき");
+        assert_eq!(load_defs[0].kind, SymbolKind::ScopeMethod, "関数は ScopeMethod として登録されるべき");
+    }
+
+    #[test]
+    fn test_scope_property_reference() {
+        // $scope.xxx への参照が登録される
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', ['$scope', function($scope) {
+    $scope.users = [];
+    $scope.loadUsers = function() {
+        return $scope.users;
+    };
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // $scope.users への参照が登録されているはず（return $scope.users の部分）
+        let refs = index.get_references("TestCtrl.$scope.users");
+        assert!(!refs.is_empty(), "$scope.users への参照が登録されるべき");
+    }
+
+    #[test]
+    fn test_scope_first_definition_only() {
+        // 最初の代入のみが定義として登録される
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', ['$scope', function($scope) {
+    $scope.count = 0;
+    $scope.count = 1;
+    $scope.count = 2;
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+
+        // 定義は1つだけ
+        let defs = index.get_definitions("TestCtrl.$scope.count");
+        assert_eq!(defs.len(), 1, "最初の定義のみが登録されるべき");
+        // 最初の定義は行3（0-indexed）
+        assert_eq!(defs[0].start_line, 3, "最初の定義の行が正しくない");
+    }
+
+    #[test]
+    fn test_scope_inject_pattern() {
+        // $inject パターンでの $scope プロパティ
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', TestCtrl);
+
+TestCtrl.$inject = ['$scope'];
+
+function TestCtrl($scope) {
+    $scope.message = 'Hello';
+}
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+
+        // $scope.message の定義が登録されているはず
+        let defs = index.get_definitions("TestCtrl.$scope.message");
+        assert!(!defs.is_empty(), "$inject パターンでも $scope.message の定義が登録されるべき");
+    }
+
+    #[test]
+    fn test_scope_without_di() {
+        // $scope がDIされていない場合は定義が登録されない
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', ['$http', function($http) {
+    $scope.users = [];
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+
+        // $scope がDIされていないので、定義は登録されないはず
+        let defs = index.get_definitions("TestCtrl.$scope.users");
+        assert!(defs.is_empty(), "$scope がDIされていない場合は定義が登録されないべき");
+    }
+
+    #[test]
+    fn test_scope_reference_without_definition() {
+        // 定義がなくても参照が登録される（非同期処理内での定義など）
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', ['$scope', '$http', function($scope, $http) {
+    $http.get('/api/data').then(function(response) {
+        $scope.asyncData = response.data;
+    });
+
+    // asyncData を参照（定義は非同期処理内）
+    console.log($scope.asyncData);
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // 定義がなくても参照が登録されているはず
+        let refs = index.get_references("TestCtrl.$scope.asyncData");
+        assert!(!refs.is_empty(), "定義がなくても参照が登録されるべき");
+        // 2箇所の参照（代入の右辺とconsole.log内）
+        assert_eq!(refs.len(), 1, "console.log内の参照が登録されるべき（代入は定義として扱われる）");
+    }
+
+    #[test]
+    fn test_scope_find_all_references_without_definition() {
+        // 定義がなくても参照同士を検索できる
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', ['$scope', '$http', function($scope, $http) {
+    $http.get('/api').then(function(res) {
+        $scope.items = res.data;
+    });
+
+    $scope.items.forEach(function(item) {});
+    console.log($scope.items);
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // 参照が複数登録されているはず
+        let refs = index.get_references("TestCtrl.$scope.items");
+        assert!(refs.len() >= 2, "複数の参照が登録されるべき: {:?}", refs);
+
+        // 参照位置からシンボル名を取得できる
+        let symbol_name = index.find_symbol_at_position(&uri, refs[0].start_line, refs[0].start_col);
+        assert_eq!(symbol_name, Some("TestCtrl.$scope.items".to_string()), "参照位置からシンボル名を取得できるべき");
+    }
+
+    #[test]
+    fn test_scope_in_nested_function() {
+        // ネストされた関数内での $scope 参照
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', ['$scope', function($scope) {
+    $scope.count = 0;
+
+    function init() {
+        $scope.count = 10;
+        $scope.message = 'Hello';
+    }
+
+    function helper() {
+        return $scope.count + 1;
+    }
+
+    init();
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // ネストされた関数内での定義も登録されるはず
+        let message_defs = index.get_definitions("TestCtrl.$scope.message");
+        assert!(!message_defs.is_empty(), "$scope.message の定義が登録されるべき: {:?}", message_defs);
+
+        // ネストされた関数内での参照も登録されるはず
+        let count_refs = index.get_references("TestCtrl.$scope.count");
+        // helper内のreturn $scope.count + 1 (参照)
+        assert!(count_refs.len() >= 1, "helper内の$scope.count参照が登録されるべき: count={}, refs={:?}", count_refs.len(), count_refs);
+    }
+
+    #[test]
+    fn test_scope_in_callback() {
+        // コールバック関数内での $scope 参照
+        let source = r#"
+angular.module('app')
+.controller('TestCtrl', ['$scope', '$http', function($scope, $http) {
+    $scope.users = [];
+
+    $http.get('/api/users').then(function(response) {
+        $scope.users = response.data;
+        $scope.loaded = true;
+    });
+
+    $scope.refresh = function() {
+        $http.get('/api/users').then(function(res) {
+            $scope.users = res.data;
+        });
+    };
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // コールバック関数内での定義も登録されるはず
+        let loaded_defs = index.get_definitions("TestCtrl.$scope.loaded");
+        assert!(!loaded_defs.is_empty(), "コールバック内の$scope.loaded の定義が登録されるべき: {:?}", loaded_defs);
+
+        // コールバック関数内での参照も登録されるはず
+        let users_refs = index.get_references("TestCtrl.$scope.users");
+        // .then 内の2箇所の$scope.users
+        assert!(users_refs.len() >= 2, "コールバック内の$scope.users参照が登録されるべき: count={}, refs={:?}", users_refs.len(), users_refs);
     }
 }

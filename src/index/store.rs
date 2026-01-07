@@ -4,10 +4,21 @@ use tracing::debug;
 
 use super::symbol::{Symbol, SymbolReference};
 
+/// コントローラーのスコープ情報
+#[derive(Clone, Debug)]
+pub struct ControllerScope {
+    pub name: String,
+    pub uri: Url,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
 pub struct SymbolIndex {
     definitions: DashMap<String, Vec<Symbol>>,
     references: DashMap<String, Vec<SymbolReference>>,
     document_symbols: DashMap<Url, Vec<String>>,
+    /// コントローラーのスコープ情報（URI -> コントローラー名 -> スコープ）
+    controller_scopes: DashMap<Url, Vec<ControllerScope>>,
 }
 
 impl SymbolIndex {
@@ -16,7 +27,26 @@ impl SymbolIndex {
             definitions: DashMap::new(),
             references: DashMap::new(),
             document_symbols: DashMap::new(),
+            controller_scopes: DashMap::new(),
         }
+    }
+
+    /// コントローラーのスコープ情報を追加
+    pub fn add_controller_scope(&self, scope: ControllerScope) {
+        let uri = scope.uri.clone();
+        self.controller_scopes.entry(uri).or_default().push(scope);
+    }
+
+    /// 指定位置のコントローラー名を取得
+    pub fn get_controller_at(&self, uri: &Url, line: u32) -> Option<String> {
+        if let Some(scopes) = self.controller_scopes.get(uri) {
+            for scope in scopes.iter() {
+                if line >= scope.start_line && line <= scope.end_line {
+                    return Some(scope.name.clone());
+                }
+            }
+        }
+        None
     }
 
     pub fn add_definition(&self, symbol: Symbol) {
@@ -78,6 +108,15 @@ impl SymbolIndex {
             .collect()
     }
 
+    /// 参照のみ存在するシンボル名を取得（定義がないもの）
+    pub fn get_reference_only_names(&self) -> Vec<String> {
+        self.references
+            .iter()
+            .filter(|entry| !self.definitions.contains_key(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn clear_document(&self, uri: &Url) {
         if let Some((_, symbols)) = self.document_symbols.remove(uri) {
             for symbol_name in symbols {
@@ -89,6 +128,8 @@ impl SymbolIndex {
                 }
             }
         }
+        // コントローラースコープもクリア
+        self.controller_scopes.remove(uri);
     }
 
     pub fn remove_document(&self, uri: &Url) {

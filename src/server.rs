@@ -395,9 +395,18 @@ impl LanguageServer for Backend {
         // カーソル前のサービス名を取得（"ServiceName." パターン）
         let service_prefix = self.get_service_prefix_at_cursor(&params);
 
+        // $scope. の場合、カーソル位置のコントローラー名を取得
+        let controller_name = if service_prefix.as_deref() == Some("$scope") {
+            let uri = &params.text_document_position.text_document.uri;
+            let line = params.text_document_position.position.line;
+            self.index.get_controller_at(uri, line)
+        } else {
+            None
+        };
+
         // 1. AngularJS解析を試行
         let handler = CompletionHandler::new(Arc::clone(&self.index));
-        if let Some(completions) = handler.complete_with_context(service_prefix.as_deref()) {
+        if let Some(completions) = handler.complete_with_context(service_prefix.as_deref(), controller_name.as_deref()) {
             return Ok(Some(completions));
         }
 
