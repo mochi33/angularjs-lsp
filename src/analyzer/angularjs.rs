@@ -16,6 +16,71 @@ struct LocalVarLocation {
     end_col: u32,
 }
 
+/// コンポーネントのDIスコープ情報
+#[derive(Clone, Debug)]
+struct DiScope {
+    /// コンポーネント名
+    #[allow(dead_code)]
+    component_name: String,
+    /// DIされた依存サービス名のリスト
+    injected_services: Vec<String>,
+    /// 関数本体の開始行
+    body_start_line: u32,
+    /// 関数本体の終了行
+    body_end_line: u32,
+}
+
+/// 解析コンテキスト
+struct AnalyzerContext {
+    /// 現在有効なDIスコープのスタック
+    di_scopes: Vec<DiScope>,
+    /// $inject パターン用: 関数名 -> DI依存関係
+    inject_map: HashMap<String, Vec<String>>,
+    /// $inject パターン用: 関数名 -> 関数本体の範囲 (start_line, end_line)
+    function_ranges: HashMap<String, (u32, u32)>,
+}
+
+impl AnalyzerContext {
+    fn new() -> Self {
+        Self {
+            di_scopes: Vec::new(),
+            inject_map: HashMap::new(),
+            function_ranges: HashMap::new(),
+        }
+    }
+
+    /// 指定位置でサービスがDIされているかどうかをチェック
+    fn is_injected_at(&self, service_name: &str, line: u32) -> bool {
+        // 1. di_scopes から現在位置のスコープを探す（内側から外側へ）
+        for scope in self.di_scopes.iter().rev() {
+            if line >= scope.body_start_line && line <= scope.body_end_line {
+                return scope.injected_services.iter().any(|s| s == service_name);
+            }
+        }
+
+        // 2. $inject パターンのスコープもチェック
+        for (func_name, range) in &self.function_ranges {
+            if line >= range.0 && line <= range.1 {
+                if let Some(deps) = self.inject_map.get(func_name) {
+                    return deps.iter().any(|s| s == service_name);
+                }
+            }
+        }
+
+        false
+    }
+
+    /// DIスコープを追加
+    fn push_scope(&mut self, scope: DiScope) {
+        self.di_scopes.push(scope);
+    }
+
+    /// DIスコープを削除
+    fn pop_scope(&mut self) {
+        self.di_scopes.pop();
+    }
+}
+
 /// AngularJS 1.x のコードを解析し、シンボル定義と参照を抽出するアナライザー
 pub struct AngularJsAnalyzer {
     index: Arc<SymbolIndex>,
@@ -46,14 +111,18 @@ impl AngularJsAnalyzer {
             if clear {
                 self.index.clear_document(uri);
             }
-            self.traverse_tree(&tree, source, uri);
+            let mut ctx = AnalyzerContext::new();
+            // 事前収集: $inject パターン用の関数宣言と $inject パターンを収集
+            self.collect_function_declarations_for_inject(tree.root_node(), source, &mut ctx);
+            self.collect_inject_patterns(tree.root_node(), source, &mut ctx);
+            self.traverse_tree(&tree, source, uri, &mut ctx);
         }
     }
 
     /// AST全体を走査する
-    fn traverse_tree(&self, tree: &Tree, source: &str, uri: &Url) {
+    fn traverse_tree(&self, tree: &Tree, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         let root = tree.root_node();
-        self.visit_node(root, source, uri);
+        self.visit_node(root, source, uri, ctx);
     }
 
     /// ASTノードを訪問し、種類に応じた解析を行う
@@ -63,27 +132,27 @@ impl AngularJsAnalyzer {
     /// - `member_expression`: プロパティアクセス（Service.method）
     /// - `expression_statement`: 式文（$inject パターン）
     /// - `identifier`: 識別子（サービス名等の参照）
-    fn visit_node(&self, node: Node, source: &str, uri: &Url) {
+    fn visit_node(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         match node.kind() {
             "call_expression" => {
-                self.analyze_call_expression(node, source, uri);
-                self.analyze_method_call(node, source, uri);
+                self.analyze_call_expression(node, source, uri, ctx);
+                self.analyze_method_call(node, source, uri, ctx);
             }
             "member_expression" => {
-                self.analyze_member_access(node, source, uri);
+                self.analyze_member_access(node, source, uri, ctx);
             }
             "expression_statement" => {
                 self.analyze_inject_pattern(node, source, uri);
             }
             "identifier" => {
-                self.analyze_identifier(node, source, uri);
+                self.analyze_identifier(node, source, uri, ctx);
             }
             _ => {}
         }
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.visit_node(child, source, uri);
+            self.visit_node(child, source, uri, ctx);
         }
     }
 
@@ -150,7 +219,8 @@ impl AngularJsAnalyzer {
     /// ```
     ///
     /// `$xxx`, `this`, `console` はスキップ
-    fn analyze_method_call(&self, node: Node, source: &str, uri: &Url) {
+    /// DIされていないサービスへのアクセスは参照として登録しない
+    fn analyze_method_call(&self, node: Node, source: &str, uri: &Url, ctx: &AnalyzerContext) {
         if let Some(callee) = node.child_by_field_name("function") {
             if callee.kind() == "member_expression" {
                 if let Some(object) = callee.child_by_field_name("object") {
@@ -159,6 +229,12 @@ impl AngularJsAnalyzer {
                         let method_name = self.node_text(property, source);
 
                         if obj_name.starts_with('$') || obj_name == "this" || obj_name == "console" {
+                            return;
+                        }
+
+                        // DIチェック: このスコープでサービスがDIされているか確認
+                        let current_line = node.start_position().row as u32;
+                        if !ctx.is_injected_at(&obj_name, current_line) {
                             return;
                         }
 
@@ -192,13 +268,21 @@ impl AngularJsAnalyzer {
     /// var fn = UserService.getAll;  // 関数参照
     /// callback(AuthService.login);   // コールバック渡し
     /// ```
-    fn analyze_member_access(&self, node: Node, source: &str, uri: &Url) {
+    ///
+    /// DIされていないサービスへのアクセスは参照として登録しない
+    fn analyze_member_access(&self, node: Node, source: &str, uri: &Url, ctx: &AnalyzerContext) {
         if let Some(object) = node.child_by_field_name("object") {
             if let Some(property) = node.child_by_field_name("property") {
                 let obj_name = self.node_text(object, source);
                 let prop_name = self.node_text(property, source);
 
                 if obj_name.starts_with('$') || obj_name == "this" || obj_name == "console" {
+                    return;
+                }
+
+                // DIチェック: このスコープでサービスがDIされているか確認
+                let current_line = node.start_position().row as u32;
+                if !ctx.is_injected_at(&obj_name, current_line) {
                     return;
                 }
 
@@ -235,7 +319,7 @@ impl AngularJsAnalyzer {
     /// - `.filter('Name', ...)` - フィルター定義
     /// - `.constant('Name', ...)` - 定数定義
     /// - `.value('Name', ...)` - 値定義
-    fn analyze_call_expression(&self, node: Node, source: &str, uri: &Url) {
+    fn analyze_call_expression(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if let Some(callee) = node.child_by_field_name("function") {
             let callee_text = self.node_text(callee, source);
 
@@ -247,14 +331,14 @@ impl AngularJsAnalyzer {
                 if let Some(property) = callee.child_by_field_name("property") {
                     let method_name = self.node_text(property, source);
                     match method_name.as_str() {
-                        "controller" => self.extract_component_definition(node, source, uri, SymbolKind::Controller),
-                        "service" => self.extract_component_definition(node, source, uri, SymbolKind::Service),
-                        "factory" => self.extract_component_definition(node, source, uri, SymbolKind::Factory),
-                        "directive" => self.extract_component_definition(node, source, uri, SymbolKind::Directive),
-                        "provider" => self.extract_component_definition(node, source, uri, SymbolKind::Provider),
-                        "filter" => self.extract_component_definition(node, source, uri, SymbolKind::Filter),
-                        "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant),
-                        "value" => self.extract_component_definition(node, source, uri, SymbolKind::Value),
+                        "controller" => self.extract_component_definition(node, source, uri, SymbolKind::Controller, ctx),
+                        "service" => self.extract_component_definition(node, source, uri, SymbolKind::Service, ctx),
+                        "factory" => self.extract_component_definition(node, source, uri, SymbolKind::Factory, ctx),
+                        "directive" => self.extract_component_definition(node, source, uri, SymbolKind::Directive, ctx),
+                        "provider" => self.extract_component_definition(node, source, uri, SymbolKind::Provider, ctx),
+                        "filter" => self.extract_component_definition(node, source, uri, SymbolKind::Filter, ctx),
+                        "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant, ctx),
+                        "value" => self.extract_component_definition(node, source, uri, SymbolKind::Value, ctx),
                         "config" | "run" => {}
                         _ => {}
                     }
@@ -310,7 +394,8 @@ impl AngularJsAnalyzer {
     /// ```
     ///
     /// service/factory の場合は内部メソッドも抽出する
-    fn extract_component_definition(&self, node: Node, source: &str, uri: &Url, kind: SymbolKind) {
+    /// DIスコープを追加して、関数本体内でのDIチェックを可能にする
+    fn extract_component_definition(&self, node: Node, source: &str, uri: &Url, kind: SymbolKind, ctx: &mut AnalyzerContext) {
         if let Some(args) = node.child_by_field_name("arguments") {
             if let Some(first_arg) = args.named_child(0) {
                 if first_arg.kind() == "string" {
@@ -323,6 +408,21 @@ impl AngularJsAnalyzer {
                     // 定義位置は関数定義を優先する
                     let (start, end, docs_line) = if let Some(second_arg) = args.named_child(1) {
                         self.extract_dependencies(second_arg, source, uri);
+
+                        // DIスコープを追加（配列記法でDIサービスがある場合のみ）
+                        // identifier（関数参照）の場合は$injectパターンで処理されるため、ここでは追加しない
+                        let injected_services = self.collect_injected_services(second_arg, source);
+                        if !injected_services.is_empty() {
+                            if let Some((body_start, body_end)) = self.find_function_body_range(second_arg, source) {
+                                let di_scope = DiScope {
+                                    component_name: component_name.clone(),
+                                    injected_services,
+                                    body_start_line: body_start,
+                                    body_end_line: body_end,
+                                };
+                                ctx.push_scope(di_scope);
+                            }
+                        }
 
                         if matches!(kind, SymbolKind::Service | SymbolKind::Factory) {
                             self.extract_service_methods(second_arg, source, uri, &component_name);
@@ -913,7 +1013,8 @@ impl AngularJsAnalyzer {
     ///
     /// インデックスに存在するシンボル名と一致する識別子を参照として登録
     /// 短すぎる識別子やキーワードはスキップ
-    fn analyze_identifier(&self, node: Node, source: &str, uri: &Url) {
+    /// DIされていないサービスへの参照は登録しない
+    fn analyze_identifier(&self, node: Node, source: &str, uri: &Url, ctx: &AnalyzerContext) {
         let name = self.node_text(node, source);
 
         if name.len() < 2 || is_common_keyword(&name) {
@@ -921,6 +1022,12 @@ impl AngularJsAnalyzer {
         }
 
         if self.index.has_definition(&name) {
+            // DIチェック: このスコープでサービスがDIされているか確認
+            let current_line = node.start_position().row as u32;
+            if !ctx.is_injected_at(&name, current_line) {
+                return;
+            }
+
             let start = node.start_position();
             let end = node.end_position();
 
@@ -1011,6 +1118,123 @@ impl AngularJsAnalyzer {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// DI配列から依存サービス名（$以外）を収集する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// ['$scope', 'UserService', function($scope, UserService) {}]
+    /// ```
+    fn collect_injected_services(&self, node: Node, source: &str) -> Vec<String> {
+        let mut services = Vec::new();
+
+        if node.kind() == "array" {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "string" {
+                    let dep_name = self.extract_string_value(child, source);
+                    if !dep_name.starts_with('$') {
+                        services.push(dep_name);
+                    }
+                }
+            }
+        }
+
+        services
+    }
+
+    /// 関数本体の行範囲を取得する
+    ///
+    /// DI配列または関数式から関数本体の開始行と終了行を抽出
+    fn find_function_body_range(&self, node: Node, source: &str) -> Option<(u32, u32)> {
+        let func_node = match node.kind() {
+            "array" => {
+                let mut cursor = node.walk();
+                node.children(&mut cursor)
+                    .find(|c| c.kind() == "function_expression" || c.kind() == "arrow_function")
+            }
+            "function_expression" | "arrow_function" => Some(node),
+            "identifier" => {
+                // 変数参照の場合は関数宣言を探す
+                let func_name = self.node_text(node, source);
+                let root = {
+                    let mut current = node;
+                    while let Some(parent) = current.parent() {
+                        current = parent;
+                    }
+                    current
+                };
+                self.find_function_declaration(root, source, &func_name)
+            }
+            _ => None,
+        }?;
+
+        if let Some(body) = func_node.child_by_field_name("body") {
+            return Some((body.start_position().row as u32, body.end_position().row as u32));
+        }
+        None
+    }
+
+    /// $inject パターン用に関数宣言を収集する
+    ///
+    /// ファイル内の全関数宣言を収集し、関数名と本体の範囲を記録
+    fn collect_function_declarations_for_inject(&self, node: Node, source: &str, ctx: &mut AnalyzerContext) {
+        if node.kind() == "function_declaration" {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let func_name = self.node_text(name_node, source);
+                if let Some(body) = node.child_by_field_name("body") {
+                    let start = body.start_position().row as u32;
+                    let end = body.end_position().row as u32;
+                    ctx.function_ranges.insert(func_name, (start, end));
+                }
+            }
+        }
+
+        // 子ノードを再帰的に走査
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_function_declarations_for_inject(child, source, ctx);
+        }
+    }
+
+    /// $inject パターンを収集する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// MyController.$inject = ['$scope', 'UserService'];
+    /// ```
+    fn collect_inject_patterns(&self, node: Node, source: &str, ctx: &mut AnalyzerContext) {
+        if node.kind() == "expression_statement" {
+            if let Some(expr) = node.named_child(0) {
+                if expr.kind() == "assignment_expression" {
+                    if let Some(left) = expr.child_by_field_name("left") {
+                        if left.kind() == "member_expression" {
+                            if let Some(object) = left.child_by_field_name("object") {
+                                if let Some(property) = left.child_by_field_name("property") {
+                                    let prop_name = self.node_text(property, source);
+                                    if prop_name == "$inject" {
+                                        let func_name = self.node_text(object, source);
+                                        if let Some(right) = expr.child_by_field_name("right") {
+                                            let services = self.collect_injected_services(right, source);
+                                            if !services.is_empty() {
+                                                ctx.inject_map.insert(func_name, services);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 子ノードを再帰的に走査
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_inject_patterns(child, source, ctx);
+        }
+    }
 }
 
 /// JavaScriptの予約語・キーワードかどうかを判定する
@@ -1021,4 +1245,206 @@ fn is_common_keyword(name: &str) -> bool {
             | "return" | "true" | "false" | "null" | "undefined" | "this"
             | "new" | "typeof" | "instanceof" | "in" | "of"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::SymbolIndex;
+
+    #[test]
+    fn test_di_check_with_di() {
+        // DIされている場合は参照が登録される
+        let source = r#"
+angular.module('app')
+.service('MyService', function() {
+    this.doSomething = function() {};
+})
+.controller('TestCtrl', ['$scope', 'MyService', function($scope, MyService) {
+    MyService.doSomething();
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // MyService.doSomething への参照が登録されているはず
+        let refs = index.get_references("MyService.doSomething");
+        assert!(!refs.is_empty(), "DIされている場合は参照が登録されるべき");
+    }
+
+    #[test]
+    fn test_di_check_without_di() {
+        // DIされていない場合は参照が登録されない
+        let source = r#"
+angular.module('app')
+.service('MyService', function() {
+    this.doSomething = function() {};
+})
+.controller('TestCtrl', ['$scope', function($scope) {
+    MyService.doSomething();
+}]);
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // MyService.doSomething への参照が登録されていないはず
+        let refs = index.get_references("MyService.doSomething");
+        assert!(refs.is_empty(), "DIされていない場合は参照が登録されないべき");
+    }
+
+    #[test]
+    fn test_di_check_inject_pattern() {
+        // $inject パターンでDIされている場合は参照が登録される
+        let source = r#"
+angular.module('app')
+.service('MyService', function() {
+    this.doSomething = function() {};
+});
+
+function TestController($scope, MyService) {
+    MyService.doSomething();
+}
+TestController.$inject = ['$scope', 'MyService'];
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // MyService.doSomething への参照が登録されているはず
+        let refs = index.get_references("MyService.doSomething");
+        assert!(!refs.is_empty(), "$injectパターンでDIされている場合は参照が登録されるべき");
+    }
+
+    #[test]
+    fn test_di_check_inject_pattern_without_di() {
+        // $inject パターンでDIされていない場合は参照が登録されない
+        let source = r#"
+angular.module('app')
+.service('MyService', function() {
+    this.doSomething = function() {};
+});
+
+function TestController($scope) {
+    MyService.doSomething();
+}
+TestController.$inject = ['$scope'];
+"#;
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // MyService.doSomething への参照が登録されていないはず
+        let refs = index.get_references("MyService.doSomething");
+        assert!(refs.is_empty(), "$injectパターンでDIされていない場合は参照が登録されないべき");
+    }
+
+    #[test]
+    fn test_di_check_iife_inject_pattern() {
+        // IIFE内の$injectパターンでDIされている場合は参照が登録される
+        let source = r#"
+angular.module('app')
+.service('notifyService', function() {
+    this.showNotify = function() {};
+});
+
+(function() {
+    'use strict';
+    angular
+        .module('app')
+        .controller('TestController', TestController);
+
+    TestController.$inject = ['notifyService'];
+
+    function TestController(notifyService) {
+        notifyService.showNotify();
+    }
+})();
+"#;
+        let mut parser = super::super::JsParser::new();
+        let tree = parser.parse(source).unwrap();
+        let mut ctx = AnalyzerContext::new();
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index.clone());
+
+        analyzer.collect_function_declarations_for_inject(tree.root_node(), source, &mut ctx);
+        analyzer.collect_inject_patterns(tree.root_node(), source, &mut ctx);
+
+        let uri = Url::parse("file:///test.js").unwrap();
+        // Pass 1: definitions
+        analyzer.analyze_document_with_options(&uri, source, true);
+        // Pass 2: references
+        analyzer.analyze_document_with_options(&uri, source, false);
+
+        // notifyService.showNotify への参照が登録されているはず
+        let refs = index.get_references("notifyService.showNotify");
+        assert!(!refs.is_empty(), "IIFE内の$injectパターンでDIされている場合は参照が登録されるべき: refs={:?}", refs);
+    }
+
+    #[test]
+    fn test_collect_inject_patterns() {
+        // $inject パターンが正しく収集されているか確認
+        let source = r#"
+(function() {
+    TestController.$inject = ['notifyService'];
+
+    function TestController(notifyService) {
+        notifyService.showNotify();
+    }
+})();
+"#;
+        let mut parser = super::super::JsParser::new();
+        let tree = parser.parse(source).unwrap();
+        let mut ctx = AnalyzerContext::new();
+
+        let index = Arc::new(SymbolIndex::new());
+        let analyzer = AngularJsAnalyzer::new(index);
+
+        analyzer.collect_function_declarations_for_inject(tree.root_node(), source, &mut ctx);
+        analyzer.collect_inject_patterns(tree.root_node(), source, &mut ctx);
+
+        assert!(ctx.function_ranges.contains_key("TestController"), "TestController should be in function_ranges");
+        assert!(ctx.inject_map.contains_key("TestController"), "TestController should be in inject_map");
+
+        // is_injected_at のテスト
+        // 行5 (0-indexed: 4) は関数本体内
+        assert!(ctx.is_injected_at("notifyService", 5), "notifyService should be injected at line 5");
+        assert!(!ctx.is_injected_at("otherService", 5), "otherService should NOT be injected at line 5");
+    }
+
+    #[test]
+    fn test_is_injected_at_with_inject_pattern() {
+        // is_injected_at が $inject パターンで正しく動作するか確認
+        let mut ctx = AnalyzerContext::new();
+        ctx.function_ranges.insert("TestController".to_string(), (4, 6));
+        ctx.inject_map.insert("TestController".to_string(), vec!["notifyService".to_string()]);
+
+        // 行5は関数本体内 (4 <= 5 <= 6)
+        assert!(ctx.is_injected_at("notifyService", 5), "notifyService should be injected at line 5");
+        // 行3は関数本体外 (3 < 4)
+        assert!(!ctx.is_injected_at("notifyService", 3), "notifyService should NOT be injected at line 3");
+        // 存在しないサービス
+        assert!(!ctx.is_injected_at("otherService", 5), "otherService should NOT be injected");
+    }
 }
