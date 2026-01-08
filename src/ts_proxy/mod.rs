@@ -258,6 +258,27 @@ impl TsProxy {
         serde_json::from_value(result.clone()).ok()
     }
 
+    /// リネーム
+    pub async fn rename(&self, params: &RenameParams) -> Option<WorkspaceEdit> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = &params.text_document_position.position;
+
+        let request_params = json!({
+            "textDocument": { "uri": uri.to_string() },
+            "position": { "line": pos.line, "character": pos.character },
+            "newName": params.new_name
+        });
+
+        let response = self.send_request("textDocument/rename", request_params).await?;
+        let result = response.get("result")?;
+
+        if result.is_null() {
+            return None;
+        }
+
+        serde_json::from_value(result.clone()).ok()
+    }
+
     /// シャットダウン
     pub async fn shutdown(&self) {
         let _ = self.send_request("shutdown", json!(null)).await;

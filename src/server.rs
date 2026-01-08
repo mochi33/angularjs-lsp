@@ -8,14 +8,16 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::analyzer::AngularJsAnalyzer;
-use crate::handlers::{CompletionHandler, HoverHandler, ReferencesHandler};
+use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer};
+use crate::config::AjsConfig;
+use crate::handlers::{CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler};
 use crate::index::SymbolIndex;
 use crate::ts_proxy::TsProxy;
 
 pub struct Backend {
     client: Client,
     analyzer: Arc<AngularJsAnalyzer>,
+    html_analyzer: Arc<HtmlAngularJsAnalyzer>,
     index: Arc<SymbolIndex>,
     root_uri: RwLock<Option<Url>>,
     ts_proxy: RwLock<Option<TsProxy>>,
@@ -28,10 +30,12 @@ impl Backend {
     pub fn new(client: Client) -> Self {
         let index = Arc::new(SymbolIndex::new());
         let analyzer = Arc::new(AngularJsAnalyzer::new(Arc::clone(&index)));
+        let html_analyzer = Arc::new(HtmlAngularJsAnalyzer::new(Arc::clone(&index), Arc::clone(&analyzer)));
 
         Self {
             client,
             analyzer,
+            html_analyzer,
             index,
             root_uri: RwLock::new(None),
             ts_proxy: RwLock::new(None),
@@ -40,9 +44,26 @@ impl Backend {
         }
     }
 
+    /// ファイルがHTMLかどうか判定
+    fn is_html_file(uri: &Url) -> bool {
+        let path = uri.path().to_lowercase();
+        path.ends_with(".html") || path.ends_with(".htm")
+    }
+
+    /// ファイルがJSかどうか判定
+    fn is_js_file(uri: &Url) -> bool {
+        uri.path().ends_with(".js")
+    }
+
     async fn on_change(&self, uri: Url, text: String, version: i32) {
         self.documents.insert(uri.clone(), text.clone());
-        self.analyzer.analyze_document(&uri, &text);
+
+        // ファイルタイプに応じた解析
+        if Self::is_html_file(&uri) {
+            self.html_analyzer.analyze_document(&uri, &text);
+        } else if Self::is_js_file(&uri) {
+            self.analyzer.analyze_document(&uri, &text);
+        }
 
         // ts_proxyにも変更を通知
         if let Some(ref proxy) = *self.ts_proxy.read().await {
@@ -52,7 +73,13 @@ impl Backend {
 
     async fn on_open(&self, uri: Url, text: String) {
         self.documents.insert(uri.clone(), text.clone());
-        self.analyzer.analyze_document(&uri, &text);
+
+        // ファイルタイプに応じた解析
+        if Self::is_html_file(&uri) {
+            self.html_analyzer.analyze_document(&uri, &text);
+        } else if Self::is_js_file(&uri) {
+            self.analyzer.analyze_document(&uri, &text);
+        }
 
         // ts_proxyにも通知
         if let Some(ref proxy) = *self.ts_proxy.read().await {
@@ -85,16 +112,16 @@ impl Backend {
                     .await;
 
                 // Collect all JS files
-                let mut files: Vec<(Url, String)> = Vec::new();
-                self.collect_js_files(&path, &mut files);
+                let mut js_files: Vec<(Url, String)> = Vec::new();
+                self.collect_js_files(&path, &mut js_files);
 
-                let count = files.len();
+                let js_count = js_files.len();
 
                 // Pass 1: Index definitions
                 self.client
                     .log_message(MessageType::INFO, "Pass 1: Indexing definitions...")
                     .await;
-                for (uri, content) in &files {
+                for (uri, content) in &js_files {
                     self.analyzer.analyze_document_with_options(uri, content, true);
                 }
 
@@ -102,12 +129,29 @@ impl Backend {
                 self.client
                     .log_message(MessageType::INFO, "Pass 2: Indexing references...")
                     .await;
-                for (uri, content) in &files {
+                for (uri, content) in &js_files {
                     self.analyzer.analyze_document_with_options(uri, content, false);
                 }
 
                 self.client
-                    .log_message(MessageType::INFO, format!("Indexed {} JavaScript files", count))
+                    .log_message(MessageType::INFO, format!("Indexed {} JavaScript files", js_count))
+                    .await;
+
+                // Collect and analyze HTML files
+                let mut html_files: Vec<(Url, String)> = Vec::new();
+                self.collect_html_files(&path, &mut html_files);
+
+                let html_count = html_files.len();
+
+                self.client
+                    .log_message(MessageType::INFO, "Indexing HTML files...")
+                    .await;
+                for (uri, content) in &html_files {
+                    self.html_analyzer.analyze_document(uri, content);
+                }
+
+                self.client
+                    .log_message(MessageType::INFO, format!("Indexed {} HTML files", html_count))
                     .await;
             }
         }
@@ -128,6 +172,31 @@ impl Backend {
                 if path.is_dir() {
                     self.collect_js_files(&path, files);
                 } else if path.extension().map_or(false, |ext| ext == "js") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if let Ok(uri) = Url::from_file_path(&path) {
+                            files.push((uri, content));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_html_files(&self, dir: &Path, files: &mut Vec<(Url, String)>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip node_modules and hidden directories
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "build" {
+                        continue;
+                    }
+                }
+
+                if path.is_dir() {
+                    self.collect_html_files(&path, files);
+                } else if path.extension().map_or(false, |ext| ext == "html" || ext == "htm") {
                     if let Ok(content) = fs::read_to_string(&path) {
                         if let Ok(uri) = Url::from_file_path(&path) {
                             files.push((uri, content));
@@ -243,6 +312,11 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..Default::default()
             },
         })
@@ -253,9 +327,27 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "AngularJS Language Server initialized")
             .await;
 
+        // ajsconfig.json を読み込む
+        let root_uri = self.root_uri.read().await.clone();
+        if let Some(ref uri) = root_uri {
+            if let Ok(path) = uri.to_file_path() {
+                let config = AjsConfig::load_from_dir(&path);
+                self.html_analyzer.set_interpolate_config(config.interpolate.clone());
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "Interpolate symbols: {} ... {}",
+                            config.interpolate.start_symbol,
+                            config.interpolate.end_symbol
+                        ),
+                    )
+                    .await;
+            }
+        }
+
         // typescript-language-server を起動
         // tsconfig.json を探して、そのディレクトリをルートにする
-        let root_uri = self.root_uri.read().await.clone();
         let ts_root_uri = self.find_tsconfig_root(&root_uri).or(root_uri.clone());
 
         if let Some(ref uri) = ts_root_uri {
@@ -388,17 +480,52 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = &params.text_document.uri;
+
+        // AngularJS解析
+        let handler = DocumentSymbolHandler::new(Arc::clone(&self.index));
+        if let Some(symbols) = handler.document_symbols(uri) {
+            return Ok(Some(symbols));
+        }
+
+        Ok(None)
+    }
+
     async fn completion(
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let line = params.text_document_position.position.line;
+        let col = params.text_document_position.position.character;
+
+        // HTMLファイルの場合、Angularコンテキスト内かチェック
+        if Self::is_html_file(uri) {
+            if let Some(doc) = self.documents.get(uri) {
+                let source = doc.value();
+                if self.html_analyzer.is_in_angular_context(source, line, col) {
+                    // Angularコンテキスト内 → $scope補完を返す
+                    let controller_name = self.index.resolve_controller_for_html(uri, line);
+                    let handler = CompletionHandler::new(Arc::clone(&self.index));
+                    if let Some(completions) = handler.complete_with_context(Some("$scope"), controller_name.as_deref()) {
+                        return Ok(Some(completions));
+                    }
+                }
+            }
+            // HTMLファイルでAngularコンテキスト外の場合は補完なし
+            return Ok(None);
+        }
+
+        // JSファイルの場合
         // カーソル前のサービス名を取得（"ServiceName." パターン）
         let service_prefix = self.get_service_prefix_at_cursor(&params);
 
         // $scope. の場合、カーソル位置のコントローラー名を取得
         let controller_name = if service_prefix.as_deref() == Some("$scope") {
-            let uri = &params.text_document_position.text_document.uri;
-            let line = params.text_document_position.position.line;
             self.index.get_controller_at(uri, line)
         } else {
             None
@@ -413,6 +540,39 @@ impl LanguageServer for Backend {
         // 2. フォールバック: typescript-language-server
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.completion(&params).await);
+        }
+
+        Ok(None)
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+
+        // 1. AngularJS解析を試行
+        let handler = RenameHandler::new(Arc::clone(&self.index));
+        if let Some(edit) = handler.rename(params.clone()) {
+            return Ok(Some(edit));
+        }
+
+        // 2. フォールバック: typescript-language-server
+        self.ensure_ts_file_opened(uri).await;
+
+        if let Some(ref proxy) = *self.ts_proxy.read().await {
+            let result = proxy.rename(&params).await;
+            return Ok(result);
+        }
+
+        Ok(None)
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        // AngularJS解析を試行
+        let handler = RenameHandler::new(Arc::clone(&self.index));
+        if let Some(response) = handler.prepare_rename(params) {
+            return Ok(Some(response));
         }
 
         Ok(None)
