@@ -10,7 +10,7 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer};
 use crate::config::AjsConfig;
-use crate::handlers::{CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler};
+use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler};
 use crate::index::SymbolIndex;
 use crate::ts_proxy::TsProxy;
 
@@ -384,6 +384,9 @@ impl LanguageServer for Backend {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
                 ..Default::default()
             },
         })
@@ -643,5 +646,11 @@ impl LanguageServer for Backend {
         }
 
         Ok(None)
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let uri = &params.text_document.uri;
+        let handler = CodeLensHandler::new(Arc::clone(&self.index));
+        Ok(handler.code_lens(uri))
     }
 }

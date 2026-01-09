@@ -82,7 +82,7 @@ impl RenameHandler {
         }
 
         // Collect reference locations
-        for reference in self.index.get_references(symbol_name) {
+        for reference in self.index.get_all_references(symbol_name) {
             let edit = TextEdit {
                 range: Range {
                     start: Position {
@@ -183,7 +183,7 @@ impl RenameHandler {
         }
 
         // Then check references
-        for reference in self.index.get_references(symbol_name) {
+        for reference in self.index.get_all_references(symbol_name) {
             if reference.uri == *uri
                 && position.line >= reference.start_line
                 && position.line <= reference.end_line

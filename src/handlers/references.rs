@@ -58,27 +58,33 @@ impl ReferencesHandler {
             html_ref.property_path, position.line, position.character
         );
 
-        // 2. コントローラー名を解決
-        let controller_name = self.index.resolve_controller_for_html(uri, position.line)?;
+        // 2. コントローラー名を解決（複数の可能性あり）
+        let controllers = self.index.resolve_controllers_for_html(uri, position.line);
 
-        debug!(
-            "find_references_from_html: resolved controller '{}'",
-            controller_name
-        );
+        // 3. 各コントローラーを順番に試して、定義が見つかったものを返す
+        for controller_name in controllers {
+            debug!(
+                "find_references_from_html: trying controller '{}'",
+                controller_name
+            );
 
-        // 3. シンボル名を構築 "ControllerName.$scope.property"
-        let symbol_name = format!(
-            "{}.$scope.{}",
-            controller_name,
-            html_ref.property_path
-        );
+            let symbol_name = format!(
+                "{}.$scope.{}",
+                controller_name,
+                html_ref.property_path
+            );
 
-        debug!(
-            "find_references_from_html: looking up symbol '{}'",
-            symbol_name
-        );
+            debug!(
+                "find_references_from_html: looking up symbol '{}'",
+                symbol_name
+            );
 
-        self.collect_references(&symbol_name, include_declaration)
+            if let Some(locations) = self.collect_references(&symbol_name, include_declaration) {
+                return Some(locations);
+            }
+        }
+
+        None
     }
 
     /// シンボル名から定義と参照を収集
@@ -104,8 +110,8 @@ impl ReferencesHandler {
             }
         }
 
-        // Add reference locations
-        for reference in self.index.get_references(symbol_name) {
+        // Add reference locations (JS + HTML)
+        for reference in self.index.get_all_references(symbol_name) {
             locations.push(Location {
                 uri: reference.uri.clone(),
                 range: Range {
@@ -183,57 +189,57 @@ impl ReferencesHandler {
             html_ref.property_path, position.line, position.character
         );
 
-        // 2. コントローラー名を解決
-        // (ng-controller または templateBinding から)
-        let controller_name = self.index.resolve_controller_for_html(uri, position.line)?;
+        // 2. コントローラー名を解決（複数の可能性あり）
+        let controllers = self.index.resolve_controllers_for_html(uri, position.line);
 
-        debug!(
-            "goto_definition_from_html: resolved controller '{}'",
-            controller_name
-        );
+        // 3. 各コントローラーを順番に試して、定義が見つかったものを返す
+        for controller_name in controllers {
+            debug!(
+                "goto_definition_from_html: trying controller '{}'",
+                controller_name
+            );
 
-        // 3. シンボル名を構築 "ControllerName.$scope.property"
-        let symbol_name = format!(
-            "{}.$scope.{}",
-            controller_name,
-            html_ref.property_path
-        );
+            let symbol_name = format!(
+                "{}.$scope.{}",
+                controller_name,
+                html_ref.property_path
+            );
 
-        debug!(
-            "goto_definition_from_html: looking up symbol '{}'",
-            symbol_name
-        );
+            debug!(
+                "goto_definition_from_html: looking up symbol '{}'",
+                symbol_name
+            );
 
-        // 4. 定義を検索
-        let definitions = self.index.get_definitions(&symbol_name);
+            let definitions = self.index.get_definitions(&symbol_name);
 
-        if definitions.is_empty() {
-            debug!("goto_definition_from_html: no definitions found");
-            return None;
+            if !definitions.is_empty() {
+                let locations: Vec<Location> = definitions
+                    .into_iter()
+                    .map(|def| Location {
+                        uri: def.uri.clone(),
+                        range: Range {
+                            start: Position {
+                                line: def.start_line,
+                                character: def.start_col,
+                            },
+                            end: Position {
+                                line: def.end_line,
+                                character: def.end_col,
+                            },
+                        },
+                    })
+                    .collect();
+
+                debug!(
+                    "goto_definition_from_html: found {} locations",
+                    locations.len()
+                );
+
+                return Some(GotoDefinitionResponse::Array(locations));
+            }
         }
 
-        let locations: Vec<Location> = definitions
-            .into_iter()
-            .map(|def| Location {
-                uri: def.uri.clone(),
-                range: Range {
-                    start: Position {
-                        line: def.start_line,
-                        character: def.start_col,
-                    },
-                    end: Position {
-                        line: def.end_line,
-                        character: def.end_col,
-                    },
-                },
-            })
-            .collect();
-
-        debug!(
-            "goto_definition_from_html: found {} locations",
-            locations.len()
-        );
-
-        Some(GotoDefinitionResponse::Array(locations))
+        debug!("goto_definition_from_html: no definitions found in any controller");
+        None
     }
 }

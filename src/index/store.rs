@@ -158,6 +158,62 @@ impl SymbolIndex {
             .unwrap_or_default()
     }
 
+    /// シンボル名に対応するHTML内の参照を取得
+    /// シンボル名の形式: "ControllerName.$scope.propertyPath"
+    pub fn get_html_references_for_symbol(&self, symbol_name: &str) -> Vec<SymbolReference> {
+        // シンボル名からコントローラー名とプロパティパスを抽出
+        let (controller_name, property_path) = match self.parse_scope_symbol_name(symbol_name) {
+            Some(parsed) => parsed,
+            None => return Vec::new(),
+        };
+
+        let mut references = Vec::new();
+
+        // 全てのHTML参照を走査
+        for entry in self.html_scope_references.iter() {
+            let uri = entry.key();
+            let html_refs = entry.value();
+
+            for html_ref in html_refs {
+                // プロパティパスが一致するか確認
+                if html_ref.property_path != property_path {
+                    continue;
+                }
+
+                // このHTML参照がどのコントローラーに属するか確認
+                let controllers = self.resolve_controllers_for_html(uri, html_ref.start_line);
+                if controllers.contains(&controller_name.to_string()) {
+                    references.push(SymbolReference {
+                        name: symbol_name.to_string(),
+                        uri: uri.clone(),
+                        start_line: html_ref.start_line,
+                        start_col: html_ref.start_col,
+                        end_line: html_ref.end_line,
+                        end_col: html_ref.end_col,
+                    });
+                }
+            }
+        }
+
+        references
+    }
+
+    /// スコープシンボル名をパース: "ControllerName.$scope.propertyPath" -> (ControllerName, propertyPath)
+    fn parse_scope_symbol_name(&self, symbol_name: &str) -> Option<(String, String)> {
+        let scope_marker = ".$scope.";
+        let idx = symbol_name.find(scope_marker)?;
+        let controller_name = &symbol_name[..idx];
+        let property_path = &symbol_name[idx + scope_marker.len()..];
+        Some((controller_name.to_string(), property_path.to_string()))
+    }
+
+    /// JS参照とHTML参照を合わせて取得
+    pub fn get_all_references(&self, name: &str) -> Vec<SymbolReference> {
+        let mut refs = self.get_references(name);
+        refs.extend(self.get_html_references_for_symbol(name));
+        refs
+    }
+
     pub fn has_definition(&self, name: &str) -> bool {
         self.definitions.contains_key(name)
     }
@@ -205,17 +261,45 @@ impl SymbolIndex {
     // ========== テンプレートバインディング関連 ==========
 
     /// テンプレートバインディングを追加
+    /// テンプレートが親として持っているng-include bindingの継承情報も更新する
     pub fn add_template_binding(&self, binding: TemplateBinding) {
         let normalized_path = Self::normalize_template_path(&binding.template_path);
-        self.template_bindings.insert(normalized_path, binding);
+        let controller_name = binding.controller_name.clone();
+
+        // template_pathも正規化済みの値で保存
+        let normalized_binding = TemplateBinding {
+            template_path: normalized_path.clone(),
+            controller_name: binding.controller_name,
+            source: binding.source,
+        };
+        self.template_bindings.insert(normalized_path.clone(), normalized_binding);
+
+        // このテンプレートが親として持っているng-include bindingの継承情報を更新
+        // （$uibModalでバインドされたコントローラーをng-includeの子に伝播）
+        self.propagate_inheritance_to_children(&normalized_path, &[controller_name]);
     }
 
-    /// テンプレートパスを正規化（../などを解決、クエリパラメータを除去）
+    /// テンプレートパスを正規化（クエリパラメータを除去、`../`を除去）
+    /// 相対パスの`../`部分は除去し、残りのパスを返す
+    /// 例: "../foo/bar/baz.html" -> "foo/bar/baz.html"
+    /// 例: "/foo/bar/baz.html" -> "foo/bar/baz.html"
     fn normalize_template_path(path: &str) -> String {
         // クエリパラメータを除去
         let path = path.split('?').next().unwrap_or(path);
-        // ファイル名部分のみを抽出
-        path.rsplit('/').next().unwrap_or(path).to_string()
+
+        // 先頭の`../`や`./`や`/`を除去して、実際のパス部分を取得
+        let mut normalized = path;
+        while normalized.starts_with("../") {
+            normalized = &normalized[3..];
+        }
+        while normalized.starts_with("./") {
+            normalized = &normalized[2..];
+        }
+        if normalized.starts_with('/') {
+            normalized = &normalized[1..];
+        }
+
+        normalized.to_string()
     }
 
     /// URIからコントローラー名を取得（テンプレートバインディング経由）
@@ -223,23 +307,105 @@ impl SymbolIndex {
         let path = uri.path();
         let filename = path.rsplit('/').next()?;
 
+        // 方法1: 正規化パスでマッチング（パス末尾で比較）
+        for entry in self.template_bindings.iter() {
+            let normalized_path = entry.key();
+            if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
+                return Some(entry.value().controller_name.clone());
+            }
+        }
+
+        // 方法2: ファイル名のみでマッチング（フォールバック）
         if let Some(binding) = self.template_bindings.get(filename) {
             return Some(binding.controller_name.clone());
         }
         None
     }
 
+    /// コントローラー名からバインドされているHTMLテンプレートのパスを取得
+    pub fn get_templates_for_controller(&self, controller_name: &str) -> Vec<String> {
+        let mut templates = Vec::new();
+
+        // 1. テンプレートバインディングから検索（$routeProvider, $uibModal）
+        for entry in self.template_bindings.iter() {
+            if entry.value().controller_name == controller_name {
+                templates.push(entry.value().template_path.clone());
+            }
+        }
+
+        // 2. HTML内のng-controllerスコープから検索
+        for entry in self.html_controller_scopes.iter() {
+            for scope in entry.value() {
+                if scope.controller_name == controller_name {
+                    // URIからパスを抽出
+                    let path = entry.key().path().to_string();
+                    if !templates.contains(&path) {
+                        templates.push(path);
+                    }
+                }
+            }
+        }
+
+        templates
+    }
+
     // ========== ng-includeバインディング関連 ==========
 
     /// ng-includeバインディングを追加
+    /// 子ファイルが親として持っているng-include bindingの継承情報も更新する
     pub fn add_ng_include_binding(&self, binding: NgIncludeBinding) {
-        // ファイル名のみでインデックス（後で両方の方法でマッチング）
         let normalized_path = Self::normalize_template_path(&binding.template_path);
+        let inherited_controllers = binding.inherited_controllers.clone();
+
         debug!(
             "add_ng_include_binding: {} (resolved: {}) -> {:?}",
-            normalized_path, binding.resolved_filename, binding.inherited_controllers
+            normalized_path, binding.resolved_filename, inherited_controllers
         );
-        self.ng_include_bindings.insert(normalized_path, binding);
+        self.ng_include_bindings.insert(normalized_path.clone(), binding);
+
+        // 子ファイル（normalized_path）が親として登録しているng-include bindingがあれば、
+        // その継承情報を更新する（継承チェーンの伝播）
+        self.propagate_inheritance_to_children(&normalized_path, &inherited_controllers);
+    }
+
+    /// 継承情報を子ファイルのng-include bindingに伝播させる
+    fn propagate_inheritance_to_children(&self, child_path: &str, parent_controllers: &[String]) {
+        // child_pathをparent_uriとして持つng-include bindingを探す
+        let mut updates: Vec<(String, Vec<String>)> = Vec::new();
+
+        for entry in self.ng_include_bindings.iter() {
+            let binding = entry.value();
+            // parent_uriのパスがchild_pathで終わるかチェック
+            let parent_uri_path = binding.parent_uri.path();
+            if parent_uri_path.ends_with(&format!("/{}", child_path)) ||
+               parent_uri_path.ends_with(child_path) {
+                // 継承情報を更新（親のコントローラー + 現在のコントローラー）
+                let mut new_inherited = parent_controllers.to_vec();
+                // 現在のバインディングが持っているコントローラーを追加（重複除去）
+                for ctrl in &binding.inherited_controllers {
+                    if !new_inherited.contains(ctrl) {
+                        new_inherited.push(ctrl.clone());
+                    }
+                }
+                // 既に同じ場合は更新不要
+                if new_inherited != binding.inherited_controllers {
+                    updates.push((entry.key().clone(), new_inherited));
+                }
+            }
+        }
+
+        // 更新を適用
+        for (key, new_inherited) in updates {
+            if let Some(mut binding) = self.ng_include_bindings.get_mut(&key) {
+                debug!(
+                    "propagate_inheritance: {} -> {:?}",
+                    key, new_inherited
+                );
+                binding.inherited_controllers = new_inherited.clone();
+            }
+            // さらに子への伝播（再帰）
+            self.propagate_inheritance_to_children(&key, &new_inherited);
+        }
     }
 
     /// 親URIを起点として相対パスを解決し、ファイル名を取得
@@ -286,12 +452,23 @@ impl SymbolIndex {
             None => return Vec::new(),
         };
 
-        // 方法1: ファイル名で直接マッチング
+        // 方法1: 正規化パスでマッチング（パス末尾で比較）
+        // 例: URI "/Users/.../static/wf/views/foo.html" と
+        //     正規化パス "static/wf/views/foo.html" がマッチ
+        for entry in self.ng_include_bindings.iter() {
+            let normalized_path = entry.key();
+            // URIのパスが正規化パスで終わるかチェック
+            if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
+                return entry.value().inherited_controllers.clone();
+            }
+        }
+
+        // 方法2: ファイル名のみでマッチング（フォールバック）
         if let Some(binding) = self.ng_include_bindings.get(filename) {
             return binding.inherited_controllers.clone();
         }
 
-        // 方法2: resolved_filenameでマッチング（親ファイルを起点とした解決済みパス）
+        // 方法3: resolved_filenameでマッチング
         for entry in self.ng_include_bindings.iter() {
             if entry.value().resolved_filename == filename {
                 return entry.value().inherited_controllers.clone();
@@ -321,6 +498,14 @@ impl SymbolIndex {
     pub fn add_html_controller_scope(&self, scope: HtmlControllerScope) {
         let uri = scope.uri.clone();
         self.html_controller_scopes.entry(uri).or_default().push(scope);
+    }
+
+    /// 指定URIのHTML内の全ng-controllerスコープを取得
+    pub fn get_all_html_controller_scopes(&self, uri: &Url) -> Vec<HtmlControllerScope> {
+        self.html_controller_scopes
+            .get(uri)
+            .map(|scopes| scopes.value().clone())
+            .unwrap_or_default()
     }
 
     /// HTML内のスコープ参照を追加

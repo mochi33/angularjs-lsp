@@ -3,7 +3,7 @@ use tree_sitter::Node;
 
 use super::context::{AnalyzerContext, DiScope};
 use super::AngularJsAnalyzer;
-use crate::index::{ControllerScope, Symbol, SymbolKind};
+use crate::index::{BindingSource, ControllerScope, Symbol, SymbolKind, TemplateBinding};
 
 impl AngularJsAnalyzer {
     /// AngularJSのコンポーネント定義呼び出しを解析する
@@ -18,6 +18,7 @@ impl AngularJsAnalyzer {
     /// - `.filter('Name', ...)` - フィルター定義
     /// - `.constant('Name', ...)` - 定数定義
     /// - `.value('Name', ...)` - 値定義
+    /// - `$uibModal.open({...})` - モーダルバインディング
     pub(super) fn analyze_call_expression(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if let Some(callee) = node.child_by_field_name("function") {
             let callee_text = self.node_text(callee, source);
@@ -38,11 +39,77 @@ impl AngularJsAnalyzer {
                         "filter" => self.extract_component_definition(node, source, uri, SymbolKind::Filter, ctx),
                         "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant, ctx),
                         "value" => self.extract_component_definition(node, source, uri, SymbolKind::Value, ctx),
+                        "open" => self.extract_modal_binding(node, callee, source),
                         "config" | "run" => {}
                         _ => {}
                     }
                 }
             }
+        }
+    }
+
+    /// $uibModal.open() / $modal.open() からテンプレートバインディングを抽出
+    fn extract_modal_binding(&self, node: Node, callee: Node, source: &str) {
+        // オブジェクトが$uibModalや$modalかチェック
+        if let Some(object) = callee.child_by_field_name("object") {
+            let obj_text = self.node_text(object, source);
+            if !obj_text.ends_with("Modal") && !obj_text.ends_with("$uibModal") && !obj_text.ends_with("$modal") {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        // 引数からオブジェクトを取得
+        if let Some(args) = node.child_by_field_name("arguments") {
+            if let Some(first_arg) = args.named_child(0) {
+                if first_arg.kind() == "object" {
+                    self.extract_template_binding_from_object(first_arg, source, BindingSource::UibModal);
+                }
+            }
+        }
+    }
+
+    /// JSオブジェクトからcontrollerとtemplateUrlを抽出してバインディングを登録
+    fn extract_template_binding_from_object(&self, obj_node: Node, source: &str, binding_source: BindingSource) {
+        let mut controller_name: Option<String> = None;
+        let mut template_url: Option<String> = None;
+
+        let mut cursor = obj_node.walk();
+        for child in obj_node.children(&mut cursor) {
+            if child.kind() == "pair" {
+                if let Some(key) = child.child_by_field_name("key") {
+                    let key_name = self.node_text(key, source);
+                    // 識別子の場合はそのまま、文字列の場合はクォートを除去
+                    let key_name = key_name.trim_matches(|c| c == '"' || c == '\'');
+
+                    if let Some(value) = child.child_by_field_name("value") {
+                        match key_name {
+                            "controller" => {
+                                if value.kind() == "string" {
+                                    controller_name = Some(self.extract_string_value(value, source));
+                                }
+                            }
+                            "templateUrl" => {
+                                if value.kind() == "string" {
+                                    template_url = Some(self.extract_string_value(value, source));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // 両方揃っていればバインディングを登録
+        if let (Some(controller), Some(template)) = (controller_name, template_url) {
+            let binding = TemplateBinding {
+                template_path: template,
+                controller_name: controller,
+                source: binding_source,
+            };
+            self.index.add_template_binding(binding);
         }
     }
 
