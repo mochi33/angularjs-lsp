@@ -111,50 +111,117 @@ impl Backend {
                     .log_message(MessageType::INFO, format!("Scanning workspace: {:?}", path))
                     .await;
 
+                // 進捗トークンを作成
+                let token = NumberOrString::String("angularjs-indexing".to_string());
+                let _ = self.client.send_request::<request::WorkDoneProgressCreate>(
+                    WorkDoneProgressCreateParams { token: token.clone() }
+                ).await;
+
+                // 進捗開始を通知
+                self.send_progress(&token, WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                    title: "Indexing AngularJS".to_string(),
+                    cancellable: Some(false),
+                    message: Some("Collecting files...".to_string()),
+                    percentage: Some(0),
+                })).await;
+
                 // Collect all JS files
                 let mut js_files: Vec<(Url, String)> = Vec::new();
                 self.collect_js_files(&path, &mut js_files);
 
                 let js_count = js_files.len();
 
+                // Collect HTML files
+                let mut html_files: Vec<(Url, String)> = Vec::new();
+                self.collect_html_files(&path, &mut html_files);
+
+                let html_count = html_files.len();
+
                 // Pass 1: Index definitions
-                self.client
-                    .log_message(MessageType::INFO, "Pass 1: Indexing definitions...")
-                    .await;
-                for (uri, content) in &js_files {
+                self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message: Some(format!("Pass 1: Indexing definitions (0/{} files)", js_count)),
+                    percentage: Some(0),
+                })).await;
+
+                for (i, (uri, content)) in js_files.iter().enumerate() {
                     self.analyzer.analyze_document_with_options(uri, content, true);
+
+                    // 10ファイルごとに進捗更新（パフォーマンスのため）
+                    if i % 10 == 0 || i == js_count - 1 {
+                        let pct = ((i + 1) * 40 / js_count.max(1)) as u32; // 0-40%
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("Pass 1: Indexing definitions ({}/{} files)", i + 1, js_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
                 }
 
                 // Pass 2: Index references (now that all definitions are known)
-                self.client
-                    .log_message(MessageType::INFO, "Pass 2: Indexing references...")
-                    .await;
-                for (uri, content) in &js_files {
+                self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message: Some(format!("Pass 2: Indexing references (0/{} files)", js_count)),
+                    percentage: Some(40),
+                })).await;
+
+                for (i, (uri, content)) in js_files.iter().enumerate() {
                     self.analyzer.analyze_document_with_options(uri, content, false);
+
+                    if i % 10 == 0 || i == js_count - 1 {
+                        let pct = 40 + ((i + 1) * 40 / js_count.max(1)) as u32; // 40-80%
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("Pass 2: Indexing references ({}/{} files)", i + 1, js_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
                 }
 
                 self.client
                     .log_message(MessageType::INFO, format!("Indexed {} JavaScript files", js_count))
                     .await;
 
-                // Collect and analyze HTML files
-                let mut html_files: Vec<(Url, String)> = Vec::new();
-                self.collect_html_files(&path, &mut html_files);
+                // Index HTML files
+                self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message: Some(format!("Indexing HTML (0/{} files)", html_count)),
+                    percentage: Some(80),
+                })).await;
 
-                let html_count = html_files.len();
-
-                self.client
-                    .log_message(MessageType::INFO, "Indexing HTML files...")
-                    .await;
-                for (uri, content) in &html_files {
+                for (i, (uri, content)) in html_files.iter().enumerate() {
                     self.html_analyzer.analyze_document(uri, content);
+
+                    if i % 10 == 0 || i == html_count - 1 {
+                        let pct = 80 + ((i + 1) * 20 / html_count.max(1)) as u32; // 80-100%
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("Indexing HTML ({}/{} files)", i + 1, html_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
                 }
 
                 self.client
                     .log_message(MessageType::INFO, format!("Indexed {} HTML files", html_count))
                     .await;
+
+                // 進捗完了を通知
+                self.send_progress(&token, WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(format!("Indexed {} JS + {} HTML files", js_count, html_count)),
+                })).await;
             }
         }
+    }
+
+    /// 進捗通知を送信するヘルパー
+    async fn send_progress(&self, token: &NumberOrString, value: WorkDoneProgress) {
+        let params = ProgressParams {
+            token: token.clone(),
+            value: ProgressParamsValue::WorkDone(value),
+        };
+        // JSON-RPC通知として送信
+        self.client.send_notification::<notification::Progress>(params).await;
     }
 
     fn collect_js_files(&self, dir: &Path, files: &mut Vec<(Url, String)>) {
