@@ -102,12 +102,14 @@ impl AngularJsAnalyzer {
             "member_expression" => {
                 self.analyze_member_access(node, source, uri, ctx);
                 self.analyze_scope_member_access(node, source, uri, ctx);
+                self.analyze_root_scope_member_access(node, source, uri, ctx);
             }
             "expression_statement" => {
                 self.analyze_inject_pattern(node, source, uri);
             }
             "assignment_expression" => {
                 self.analyze_scope_assignment(node, source, uri, ctx);
+                self.analyze_root_scope_assignment(node, source, uri, ctx);
             }
             "identifier" => {
                 self.analyze_identifier(node, source, uri, ctx);

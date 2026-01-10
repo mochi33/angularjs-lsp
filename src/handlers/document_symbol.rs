@@ -73,6 +73,9 @@ impl DocumentSymbolHandler {
             AngularSymbolKind::Method => SymbolKind::METHOD,
             AngularSymbolKind::ScopeProperty => SymbolKind::PROPERTY,
             AngularSymbolKind::ScopeMethod => SymbolKind::METHOD,
+            AngularSymbolKind::RootScopeProperty => SymbolKind::PROPERTY,
+            AngularSymbolKind::RootScopeMethod => SymbolKind::METHOD,
+            AngularSymbolKind::FormBinding => SymbolKind::VARIABLE,
         }
     }
 }

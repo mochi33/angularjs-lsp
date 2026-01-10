@@ -33,6 +33,8 @@ pub struct TemplateBinding {
 #[derive(Clone, Debug)]
 pub struct HtmlControllerScope {
     pub controller_name: String,
+    /// "controller as alias"構文で指定されたalias名（例: "formCustomItem"）
+    pub alias: Option<String>,
     pub uri: Url,
     pub start_line: u32,
     pub end_line: u32,
@@ -49,6 +51,26 @@ pub struct HtmlScopeReference {
     pub end_col: u32,
 }
 
+/// ng-include経由で継承されるローカル変数
+#[derive(Clone, Debug)]
+pub struct InheritedLocalVariable {
+    /// 変数名
+    pub name: String,
+    /// 変数の定義元ディレクティブ
+    pub source: HtmlLocalVariableSource,
+    /// 定義元のURI（親ファイル）
+    pub uri: Url,
+    /// 親ファイル内でのスコープ開始行
+    pub scope_start_line: u32,
+    /// 親ファイル内でのスコープ終了行
+    pub scope_end_line: u32,
+    /// 変数名の定義位置（親ファイル内）
+    pub name_start_line: u32,
+    pub name_start_col: u32,
+    pub name_end_line: u32,
+    pub name_end_col: u32,
+}
+
 /// ng-includeによる親子HTML関係
 #[derive(Clone, Debug)]
 pub struct NgIncludeBinding {
@@ -60,6 +82,102 @@ pub struct NgIncludeBinding {
     pub line: u32,
     /// ng-includeがある位置での継承コントローラーリスト（外側から内側への順）
     pub inherited_controllers: Vec<String>,
+    /// ng-includeがある位置での継承ローカル変数リスト
+    pub inherited_local_variables: Vec<InheritedLocalVariable>,
+    /// ng-includeがある位置での継承フォームバインディングリスト
+    pub inherited_form_bindings: Vec<InheritedFormBinding>,
+}
+
+/// HTML内で定義されたローカル変数のソース
+#[derive(Clone, Debug, PartialEq)]
+pub enum HtmlLocalVariableSource {
+    /// ng-init="counter = 0" -> "counter"
+    NgInit,
+    /// ng-repeat="item in items" -> "item"
+    NgRepeatIterator,
+    /// ng-repeat="(key, value) in obj" -> "key", "value"
+    NgRepeatKeyValue,
+}
+
+impl HtmlLocalVariableSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HtmlLocalVariableSource::NgInit => "ng-init",
+            HtmlLocalVariableSource::NgRepeatIterator => "ng-repeat",
+            HtmlLocalVariableSource::NgRepeatKeyValue => "ng-repeat",
+        }
+    }
+}
+
+/// HTML内で定義されたローカル変数（ng-init, ng-repeat由来）
+#[derive(Clone, Debug)]
+pub struct HtmlLocalVariable {
+    /// 変数名（例: "item", "key", "value", "counter"）
+    pub name: String,
+    /// 変数の定義元ディレクティブ
+    pub source: HtmlLocalVariableSource,
+    /// 定義元のURI
+    pub uri: Url,
+    /// スコープの開始行（定義要素の開始）
+    pub scope_start_line: u32,
+    /// スコープの終了行（定義要素の終了）
+    pub scope_end_line: u32,
+    /// 変数名の定義位置（正確な位置）
+    pub name_start_line: u32,
+    pub name_start_col: u32,
+    pub name_end_line: u32,
+    pub name_end_col: u32,
+}
+
+/// HTML内のローカル変数への参照
+#[derive(Clone, Debug)]
+pub struct HtmlLocalVariableReference {
+    /// 参照している変数名
+    pub variable_name: String,
+    /// 参照位置のURI
+    pub uri: Url,
+    /// 参照位置
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
+/// HTML内の<form name="x">で定義されるフォームバインディング
+/// AngularJSは自動的に$scope.xにフォームコントローラーをバインドする
+#[derive(Clone, Debug)]
+pub struct HtmlFormBinding {
+    /// フォーム名（例: "userForm"）
+    pub name: String,
+    /// 定義元のURI
+    pub uri: Url,
+    /// スコープの開始行（form要素の開始）
+    pub scope_start_line: u32,
+    /// スコープの終了行（form要素の終了）
+    pub scope_end_line: u32,
+    /// name属性値の位置（正確な位置）
+    pub name_start_line: u32,
+    pub name_start_col: u32,
+    pub name_end_line: u32,
+    pub name_end_col: u32,
+}
+
+/// ng-include経由で継承されるフォームバインディング
+#[derive(Clone, Debug)]
+pub struct InheritedFormBinding {
+    /// フォーム名
+    pub name: String,
+    /// 定義元のURI（親ファイル）
+    pub uri: Url,
+    /// 親ファイル内でのスコープ開始行
+    pub scope_start_line: u32,
+    /// 親ファイル内でのスコープ終了行
+    pub scope_end_line: u32,
+    /// フォーム名の定義位置（親ファイル内）
+    pub name_start_line: u32,
+    pub name_start_col: u32,
+    pub name_end_line: u32,
+    pub name_end_col: u32,
 }
 
 pub struct SymbolIndex {
@@ -76,6 +194,12 @@ pub struct SymbolIndex {
     html_scope_references: DashMap<Url, Vec<HtmlScopeReference>>,
     /// ng-includeによる親子HTML関係（正規化されたtemplate_path -> binding）
     ng_include_bindings: DashMap<String, NgIncludeBinding>,
+    /// HTML内のローカル変数定義（URI -> Vec<HtmlLocalVariable>）
+    html_local_variables: DashMap<Url, Vec<HtmlLocalVariable>>,
+    /// HTML内のローカル変数参照（変数名 -> Vec<HtmlLocalVariableReference>）
+    html_local_variable_references: DashMap<String, Vec<HtmlLocalVariableReference>>,
+    /// HTML内のフォームバインディング（URI -> Vec<HtmlFormBinding>）
+    html_form_bindings: DashMap<Url, Vec<HtmlFormBinding>>,
 }
 
 impl SymbolIndex {
@@ -89,6 +213,9 @@ impl SymbolIndex {
             html_controller_scopes: DashMap::new(),
             html_scope_references: DashMap::new(),
             ng_include_bindings: DashMap::new(),
+            html_local_variables: DashMap::new(),
+            html_local_variable_references: DashMap::new(),
+            html_form_bindings: DashMap::new(),
         }
     }
 
@@ -159,12 +286,22 @@ impl SymbolIndex {
     }
 
     /// シンボル名に対応するHTML内の参照を取得
-    /// シンボル名の形式: "ControllerName.$scope.propertyPath"
+    /// シンボル名の形式: "ControllerName.$scope.propertyPath" または "ControllerName.methodName" または "ModuleName.$rootScope.propertyPath"
     pub fn get_html_references_for_symbol(&self, symbol_name: &str) -> Vec<SymbolReference> {
+        // $rootScope 形式を試す
+        if let Some((_, property_path)) = self.parse_root_scope_symbol_name(symbol_name) {
+            return self.get_html_references_for_root_scope(&property_path, symbol_name);
+        }
+
         // シンボル名からコントローラー名とプロパティパスを抽出
-        let (controller_name, property_path) = match self.parse_scope_symbol_name(symbol_name) {
-            Some(parsed) => parsed,
-            None => return Vec::new(),
+        // まず $scope 形式を試す
+        let (controller_name, property_path) = if let Some(parsed) = self.parse_scope_symbol_name(symbol_name) {
+            parsed
+        } else if let Some(parsed) = self.parse_controller_method_name(symbol_name) {
+            // controller as 構文の this.method パターン (ControllerName.methodName)
+            parsed
+        } else {
+            return Vec::new();
         };
 
         let mut references = Vec::new();
@@ -175,14 +312,37 @@ impl SymbolIndex {
             let html_refs = entry.value();
 
             for html_ref in html_refs {
-                // プロパティパスが一致するか確認
-                if html_ref.property_path != property_path {
+                // 直接のプロパティパスが一致するか確認（通常の$scope参照）
+                let direct_match = html_ref.property_path == property_path;
+
+                // alias.property形式のマッチング（controller as alias構文）
+                let alias_match = if html_ref.property_path.contains('.') {
+                    // "alias.property"形式をパース
+                    let parts: Vec<&str> = html_ref.property_path.splitn(2, '.').collect();
+                    if parts.len() == 2 {
+                        let alias = parts[0];
+                        let prop = parts[1];
+                        // aliasに対応するコントローラーを解決
+                        if let Some(resolved_controller) = self.resolve_controller_by_alias(uri, html_ref.start_line, alias) {
+                            // コントローラーとプロパティの両方が一致するか確認
+                            resolved_controller == controller_name && prop == property_path
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !direct_match && !alias_match {
                     continue;
                 }
 
                 // このHTML参照がどのコントローラーに属するか確認
                 let controllers = self.resolve_controllers_for_html(uri, html_ref.start_line);
-                if controllers.contains(&controller_name.to_string()) {
+                if controllers.contains(&controller_name.to_string()) || alias_match {
                     references.push(SymbolReference {
                         name: symbol_name.to_string(),
                         uri: uri.clone(),
@@ -198,6 +358,50 @@ impl SymbolIndex {
         references
     }
 
+    /// $rootScopeプロパティに対応するHTML参照を取得
+    /// $rootScopeはグローバルスコープなので、コントローラー制約なしでマッチング
+    /// ただし、同名の$scopeプロパティがある場合は$scopeが優先（除外）
+    fn get_html_references_for_root_scope(&self, property_path: &str, symbol_name: &str) -> Vec<SymbolReference> {
+        let mut references = Vec::new();
+
+        // 全てのHTML参照を走査
+        for entry in self.html_scope_references.iter() {
+            let uri = entry.key();
+            let html_refs = entry.value();
+
+            for html_ref in html_refs {
+                // プロパティパスが一致するか確認
+                if html_ref.property_path != property_path {
+                    continue;
+                }
+
+                // 同名の$scopeプロパティがあるコントローラーでは$scopeが優先
+                // そのHTML位置に対応するコントローラーの$scopeに同名プロパティがあればスキップ
+                let controllers = self.resolve_controllers_for_html(uri, html_ref.start_line);
+                let has_scope_property = controllers.iter().any(|ctrl| {
+                    let scope_symbol = format!("{}.$scope.{}", ctrl, property_path);
+                    self.has_definition(&scope_symbol)
+                });
+
+                if has_scope_property {
+                    // $scopeプロパティが優先されるのでスキップ
+                    continue;
+                }
+
+                references.push(SymbolReference {
+                    name: symbol_name.to_string(),
+                    uri: uri.clone(),
+                    start_line: html_ref.start_line,
+                    start_col: html_ref.start_col,
+                    end_line: html_ref.end_line,
+                    end_col: html_ref.end_col,
+                });
+            }
+        }
+
+        references
+    }
+
     /// スコープシンボル名をパース: "ControllerName.$scope.propertyPath" -> (ControllerName, propertyPath)
     fn parse_scope_symbol_name(&self, symbol_name: &str) -> Option<(String, String)> {
         let scope_marker = ".$scope.";
@@ -205,6 +409,34 @@ impl SymbolIndex {
         let controller_name = &symbol_name[..idx];
         let property_path = &symbol_name[idx + scope_marker.len()..];
         Some((controller_name.to_string(), property_path.to_string()))
+    }
+
+    /// $rootScopeシンボル名をパース: "ModuleName.$rootScope.propertyPath" -> (ModuleName, propertyPath)
+    fn parse_root_scope_symbol_name(&self, symbol_name: &str) -> Option<(String, String)> {
+        let marker = ".$rootScope.";
+        let idx = symbol_name.find(marker)?;
+        let module_name = &symbol_name[..idx];
+        let property_path = &symbol_name[idx + marker.len()..];
+        Some((module_name.to_string(), property_path.to_string()))
+    }
+
+    /// コントローラーメソッド名をパース: "ControllerName.methodName" -> (ControllerName, methodName)
+    /// controller as 構文で this.method パターンを使用した場合
+    fn parse_controller_method_name(&self, symbol_name: &str) -> Option<(String, String)> {
+        // $scope または $rootScope を含まない場合のみ処理
+        if symbol_name.contains(".$scope.") || symbol_name.contains(".$rootScope.") {
+            return None;
+        }
+        // 最初の . で分割
+        let idx = symbol_name.find('.')?;
+        let controller_name = &symbol_name[..idx];
+        let method_name = &symbol_name[idx + 1..];
+        // method_name が空でなく、さらに . を含まない場合のみ有効
+        // (ServiceName.methodName は OK、複雑なパスは除外)
+        if method_name.is_empty() {
+            return None;
+        }
+        Some((controller_name.to_string(), method_name.to_string()))
     }
 
     /// JS参照とHTML参照を合わせて取得
@@ -252,6 +484,14 @@ impl SymbolIndex {
         self.html_scope_references.remove(uri);
         // このURIが親のng-includeバインディングをクリア
         self.clear_ng_include_bindings_for_parent(uri);
+        // HTMLローカル変数もクリア
+        self.html_local_variables.remove(uri);
+        // このURIのローカル変数参照をクリア
+        for mut entry in self.html_local_variable_references.iter_mut() {
+            entry.value_mut().retain(|r| &r.uri != uri);
+        }
+        // HTMLフォームバインディングもクリア
+        self.html_form_bindings.remove(uri);
     }
 
     pub fn remove_document(&self, uri: &Url) {
@@ -478,6 +718,69 @@ impl SymbolIndex {
         Vec::new()
     }
 
+    /// ng-includeで継承されるローカル変数リストを取得
+    pub fn get_inherited_local_variables_for_template(&self, uri: &Url) -> Vec<InheritedLocalVariable> {
+        let path = uri.path();
+        let filename = match path.rsplit('/').next() {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+
+        // 方法1: 正規化パスでマッチング（パス末尾で比較）
+        for entry in self.ng_include_bindings.iter() {
+            let normalized_path = entry.key();
+            if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
+                return entry.value().inherited_local_variables.clone();
+            }
+        }
+
+        // 方法2: ファイル名のみでマッチング（フォールバック）
+        if let Some(binding) = self.ng_include_bindings.get(filename) {
+            return binding.inherited_local_variables.clone();
+        }
+
+        // 方法3: resolved_filenameでマッチング
+        for entry in self.ng_include_bindings.iter() {
+            if entry.value().resolved_filename == filename {
+                return entry.value().inherited_local_variables.clone();
+            }
+        }
+
+        Vec::new()
+    }
+
+    /// 特定のローカル変数を継承しているテンプレートの参照を取得
+    /// 親テンプレートで定義された変数に対して、子テンプレート内の参照も収集する
+    pub fn get_inherited_local_variable_references(
+        &self,
+        parent_uri: &Url,
+        var_name: &str,
+    ) -> Vec<HtmlLocalVariableReference> {
+        let mut result = Vec::new();
+
+        // 指定された変数名のすべての参照を取得
+        if let Some(refs) = self.html_local_variable_references.get(var_name) {
+            for var_ref in refs.iter() {
+                // 親URIと同じファイルはスキップ（すでに収集済み）
+                if &var_ref.uri == parent_uri {
+                    continue;
+                }
+
+                // このファイルが指定された変数を継承しているか確認
+                let inherited = self.get_inherited_local_variables_for_template(&var_ref.uri);
+                let inherits_var = inherited.iter().any(|v| {
+                    v.name == var_name && &v.uri == parent_uri
+                });
+
+                if inherits_var {
+                    result.push(var_ref.clone());
+                }
+            }
+        }
+
+        result
+    }
+
     /// 親URIに関連するng-includeバインディングをクリア
     fn clear_ng_include_bindings_for_parent(&self, parent_uri: &Url) {
         let keys_to_remove: Vec<String> = self
@@ -512,6 +815,12 @@ impl SymbolIndex {
     pub fn add_html_scope_reference(&self, reference: HtmlScopeReference) {
         let uri = reference.uri.clone();
         self.html_scope_references.entry(uri).or_default().push(reference);
+    }
+
+    /// テスト用: 指定URIの全HTMLスコープ参照を取得
+    #[cfg(test)]
+    pub fn html_scope_references_for_test(&self, uri: &Url) -> Option<Vec<HtmlScopeReference>> {
+        self.html_scope_references.get(uri).map(|v| v.value().clone())
     }
 
     /// 指定位置のHTML内コントローラー名を取得（ネストされた場合は最も内側のスコープ）
@@ -558,6 +867,52 @@ impl SymbolIndex {
         matching_scopes.iter().map(|s| s.controller_name.clone()).collect()
     }
 
+    /// 指定位置のHTML内でaliasに対応するコントローラー名を取得
+    /// 例: <div ng-controller="UserCtrl as vm">内で"vm"を渡すと"UserCtrl"を返す
+    pub fn resolve_controller_by_alias(&self, uri: &Url, line: u32, alias: &str) -> Option<String> {
+        if let Some(scopes) = self.html_controller_scopes.get(uri) {
+            // 最も内側のスコープを優先するため、逆順で探す
+            let mut best_match: Option<&HtmlControllerScope> = None;
+            for scope in scopes.iter() {
+                if line >= scope.start_line && line <= scope.end_line {
+                    if let Some(ref scope_alias) = scope.alias {
+                        if scope_alias == alias {
+                            if let Some(current_best) = best_match {
+                                // より狭いスコープを優先（ネストされたng-controller）
+                                if scope.start_line >= current_best.start_line
+                                    && scope.end_line <= current_best.end_line
+                                {
+                                    best_match = Some(scope);
+                                }
+                            } else {
+                                best_match = Some(scope);
+                            }
+                        }
+                    }
+                }
+            }
+            return best_match.map(|s| s.controller_name.clone());
+        }
+        None
+    }
+
+    /// 指定位置のHTML内の全aliasマッピングを取得（alias -> controller_name）
+    pub fn get_html_alias_mappings(&self, uri: &Url, line: u32) -> std::collections::HashMap<String, String> {
+        let mut mappings = std::collections::HashMap::new();
+
+        if let Some(scopes) = self.html_controller_scopes.get(uri) {
+            for scope in scopes.iter() {
+                if line >= scope.start_line && line <= scope.end_line {
+                    if let Some(ref alias) = scope.alias {
+                        mappings.insert(alias.clone(), scope.controller_name.clone());
+                    }
+                }
+            }
+        }
+
+        mappings
+    }
+
     /// 指定位置のHTMLスコープ参照を取得
     pub fn find_html_scope_reference_at(
         &self,
@@ -577,6 +932,295 @@ impl SymbolIndex {
             }
         }
         None
+    }
+
+    // ========== HTMLローカル変数関連 ==========
+
+    /// HTMLローカル変数定義を追加
+    pub fn add_html_local_variable(&self, variable: HtmlLocalVariable) {
+        let uri = variable.uri.clone();
+        let mut entry = self.html_local_variables.entry(uri).or_default();
+        // 重複チェック
+        let is_duplicate = entry.iter().any(|v| {
+            v.name == variable.name
+                && v.name_start_line == variable.name_start_line
+                && v.name_start_col == variable.name_start_col
+        });
+        if !is_duplicate {
+            entry.push(variable);
+        }
+    }
+
+    /// HTMLローカル変数参照を追加
+    pub fn add_html_local_variable_reference(&self, reference: HtmlLocalVariableReference) {
+        let var_name = reference.variable_name.clone();
+        let mut entry = self.html_local_variable_references.entry(var_name).or_default();
+        // 重複チェック
+        let is_duplicate = entry.iter().any(|r| {
+            r.uri == reference.uri
+                && r.start_line == reference.start_line
+                && r.start_col == reference.start_col
+        });
+        if !is_duplicate {
+            entry.push(reference);
+        }
+    }
+
+    /// 指定位置で有効なローカル変数を取得
+    pub fn get_local_variables_at(&self, uri: &Url, line: u32) -> Vec<HtmlLocalVariable> {
+        self.html_local_variables
+            .get(uri)
+            .map(|vars| {
+                vars.iter()
+                    .filter(|v| line >= v.scope_start_line && line <= v.scope_end_line)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// ローカル変数の定義を取得
+    /// 同名変数がネストしている場合は最も内側のスコープを優先
+    /// 継承されたローカル変数（ng-include経由）もチェック
+    pub fn find_local_variable_definition(
+        &self,
+        uri: &Url,
+        variable_name: &str,
+        line: u32,
+    ) -> Option<HtmlLocalVariable> {
+        // まず現在のファイル内のローカル変数をチェック
+        if let Some(var) = self.html_local_variables.get(uri).and_then(|vars| {
+            vars.iter()
+                .filter(|v| {
+                    v.name == variable_name
+                        && line >= v.scope_start_line
+                        && line <= v.scope_end_line
+                })
+                // 最も内側のスコープを優先（同名変数がネストしている場合）
+                .max_by_key(|v| v.scope_start_line)
+                .cloned()
+        }) {
+            return Some(var);
+        }
+
+        // 継承されたローカル変数をチェック（ng-include経由）
+        let inherited = self.get_inherited_local_variables_for_template(uri);
+        inherited
+            .into_iter()
+            .find(|v| v.name == variable_name)
+            .map(|v| HtmlLocalVariable {
+                name: v.name,
+                source: v.source,
+                uri: v.uri,
+                scope_start_line: v.scope_start_line,
+                scope_end_line: v.scope_end_line,
+                name_start_line: v.name_start_line,
+                name_start_col: v.name_start_col,
+                name_end_line: v.name_end_line,
+                name_end_col: v.name_end_col,
+            })
+    }
+
+    /// ローカル変数の全参照を取得（スコープ内のみ）
+    pub fn get_local_variable_references(
+        &self,
+        uri: &Url,
+        variable_name: &str,
+        scope_start_line: u32,
+        scope_end_line: u32,
+    ) -> Vec<HtmlLocalVariableReference> {
+        self.html_local_variable_references
+            .get(variable_name)
+            .map(|refs| {
+                refs.iter()
+                    .filter(|r| {
+                        &r.uri == uri
+                            && r.start_line >= scope_start_line
+                            && r.start_line <= scope_end_line
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 指定位置のローカル変数参照を検索
+    pub fn find_html_local_variable_at(
+        &self,
+        uri: &Url,
+        line: u32,
+        col: u32,
+    ) -> Option<HtmlLocalVariableReference> {
+        for entry in self.html_local_variable_references.iter() {
+            for r in entry.value() {
+                if &r.uri == uri
+                    && self.is_position_in_range(
+                        line,
+                        col,
+                        r.start_line,
+                        r.start_col,
+                        r.end_line,
+                        r.end_col,
+                    )
+                {
+                    return Some(r.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// 指定位置のローカル変数定義を検索（定義位置にカーソルがある場合）
+    pub fn find_html_local_variable_definition_at(
+        &self,
+        uri: &Url,
+        line: u32,
+        col: u32,
+    ) -> Option<HtmlLocalVariable> {
+        self.html_local_variables.get(uri).and_then(|vars| {
+            vars.iter()
+                .filter(|v| {
+                    self.is_position_in_range(
+                        line,
+                        col,
+                        v.name_start_line,
+                        v.name_start_col,
+                        v.name_end_line,
+                        v.name_end_col,
+                    )
+                })
+                .cloned()
+                .next()
+        })
+    }
+
+    // ========== HTMLフォームバインディング関連 ==========
+
+    /// HTMLフォームバインディングを追加
+    pub fn add_html_form_binding(&self, binding: HtmlFormBinding) {
+        let uri = binding.uri.clone();
+        let mut entry = self.html_form_bindings.entry(uri).or_default();
+        // 重複チェック
+        let is_duplicate = entry.iter().any(|b| {
+            b.name == binding.name
+                && b.name_start_line == binding.name_start_line
+                && b.name_start_col == binding.name_start_col
+        });
+        if !is_duplicate {
+            entry.push(binding);
+        }
+    }
+
+    /// 指定位置で有効なフォームバインディングを取得
+    pub fn get_form_bindings_at(&self, uri: &Url, line: u32) -> Vec<HtmlFormBinding> {
+        self.html_form_bindings
+            .get(uri)
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .filter(|b| line >= b.scope_start_line && line <= b.scope_end_line)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// フォームバインディングの定義を取得
+    /// 同名フォームがネストしている場合は最も内側のスコープを優先
+    /// 継承されたフォームバインディング（ng-include経由）もチェック
+    pub fn find_form_binding_definition(
+        &self,
+        uri: &Url,
+        form_name: &str,
+        line: u32,
+    ) -> Option<HtmlFormBinding> {
+        // まず現在のファイル内のフォームバインディングをチェック
+        if let Some(binding) = self.html_form_bindings.get(uri).and_then(|bindings| {
+            bindings
+                .iter()
+                .filter(|b| {
+                    b.name == form_name
+                        && line >= b.scope_start_line
+                        && line <= b.scope_end_line
+                })
+                // 最も内側のスコープを優先（同名フォームがネストしている場合）
+                .max_by_key(|b| b.scope_start_line)
+                .cloned()
+        }) {
+            return Some(binding);
+        }
+
+        // 継承されたフォームバインディングをチェック（ng-include経由）
+        let inherited = self.get_inherited_form_bindings_for_template(uri);
+        inherited
+            .into_iter()
+            .find(|b| b.name == form_name)
+            .map(|b| HtmlFormBinding {
+                name: b.name,
+                uri: b.uri,
+                scope_start_line: b.scope_start_line,
+                scope_end_line: b.scope_end_line,
+                name_start_line: b.name_start_line,
+                name_start_col: b.name_start_col,
+                name_end_line: b.name_end_line,
+                name_end_col: b.name_end_col,
+            })
+    }
+
+    /// 指定位置のフォームバインディング定義を検索（定義位置にカーソルがある場合）
+    pub fn find_html_form_binding_at(
+        &self,
+        uri: &Url,
+        line: u32,
+        col: u32,
+    ) -> Option<HtmlFormBinding> {
+        self.html_form_bindings.get(uri).and_then(|bindings| {
+            bindings
+                .iter()
+                .filter(|b| {
+                    self.is_position_in_range(
+                        line,
+                        col,
+                        b.name_start_line,
+                        b.name_start_col,
+                        b.name_end_line,
+                        b.name_end_col,
+                    )
+                })
+                .cloned()
+                .next()
+        })
+    }
+
+    /// ng-includeで継承されるフォームバインディングリストを取得
+    pub fn get_inherited_form_bindings_for_template(&self, uri: &Url) -> Vec<InheritedFormBinding> {
+        let path = uri.path();
+        let filename = match path.rsplit('/').next() {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+
+        // 方法1: 正規化パスでマッチング（パス末尾で比較）
+        for entry in self.ng_include_bindings.iter() {
+            let normalized_path = entry.key();
+            if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
+                return entry.value().inherited_form_bindings.clone();
+            }
+        }
+
+        // 方法2: ファイル名のみでマッチング（フォールバック）
+        if let Some(binding) = self.ng_include_bindings.get(filename) {
+            return binding.inherited_form_bindings.clone();
+        }
+
+        // 方法3: resolved_filenameでマッチング
+        for entry in self.ng_include_bindings.iter() {
+            if entry.value().resolved_filename == filename {
+                return entry.value().inherited_form_bindings.clone();
+            }
+        }
+
+        Vec::new()
     }
 
     /// HTMLファイルに対応するコントローラー名を解決
@@ -616,6 +1260,46 @@ impl SymbolIndex {
         controllers.retain(|c| seen.insert(c.clone()));
 
         controllers
+    }
+
+    /// テンプレートパスからURIを解決
+    /// 例: "static/wf/views/foo.html" -> "file:///path/to/project/static/wf/views/foo.html"
+    pub fn resolve_template_uri(&self, template_path: &str) -> Option<Url> {
+        let normalized_path = Self::normalize_template_path(template_path);
+
+        // html_controller_scopesのキー（URI）から検索
+        for entry in self.html_controller_scopes.iter() {
+            let uri = entry.key();
+            let path = uri.path();
+            if path.ends_with(&format!("/{}", normalized_path)) || path.ends_with(&normalized_path) {
+                return Some(uri.clone());
+            }
+        }
+
+        // html_scope_referencesのキー（URI）からも検索
+        for entry in self.html_scope_references.iter() {
+            let uri = entry.key();
+            let path = uri.path();
+            if path.ends_with(&format!("/{}", normalized_path)) || path.ends_with(&normalized_path) {
+                return Some(uri.clone());
+            }
+        }
+
+        // ng_include_bindingsから検索
+        if let Some(binding) = self.ng_include_bindings.get(&normalized_path) {
+            // parent_uriから相対パスを解決してURIを構築
+            let parent_uri = &binding.parent_uri;
+            let parent_path = parent_uri.path();
+            if let Some(last_slash) = parent_path.rfind('/') {
+                let parent_dir = &parent_path[..last_slash];
+                let resolved_path = format!("{}/{}", parent_dir, normalized_path);
+                if let Ok(uri) = Url::parse(&format!("{}://{}{}", parent_uri.scheme(), parent_uri.authority(), resolved_path)) {
+                    return Some(uri);
+                }
+            }
+        }
+
+        None
     }
 
     /// 指定URIのドキュメントシンボル一覧を取得

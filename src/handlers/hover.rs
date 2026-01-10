@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
-use crate::index::SymbolIndex;
+use crate::index::{HtmlFormBinding, HtmlLocalVariable, HtmlLocalVariableSource, SymbolIndex};
 
 pub struct HoverHandler {
     index: Arc<SymbolIndex>,
@@ -37,26 +37,110 @@ impl HoverHandler {
 
     /// HTMLファイルからのホバー
     fn hover_from_html(&self, uri: &Url, position: Position) -> Option<Hover> {
-        // 1. 位置からHTMLスコープ参照を取得
+        // 1. まずローカル変数をチェック（定義位置にカーソルがある場合）
+        if let Some(local_var_def) = self.index.find_html_local_variable_definition_at(
+            uri,
+            position.line,
+            position.character,
+        ) {
+            return self.build_hover_for_local_variable(&local_var_def);
+        }
+
+        // 2. ローカル変数参照をチェック
+        if let Some(local_var_ref) = self.index.find_html_local_variable_at(
+            uri,
+            position.line,
+            position.character,
+        ) {
+            if let Some(var_def) = self.index.find_local_variable_definition(
+                uri,
+                &local_var_ref.variable_name,
+                position.line,
+            ) {
+                return self.build_hover_for_local_variable(&var_def);
+            }
+        }
+
+        // 3. フォームバインディングをチェック（定義位置にカーソルがある場合）
+        if let Some(form_binding) = self.index.find_html_form_binding_at(
+            uri,
+            position.line,
+            position.character,
+        ) {
+            return self.build_hover_for_form_binding(&form_binding);
+        }
+
+        // 4. 位置からHTMLスコープ参照を取得
         let html_ref = self.index.find_html_scope_reference_at(
             uri,
             position.line,
             position.character,
         )?;
 
-        // 2. コントローラー名を解決（複数の可能性あり）
-        let controllers = self.index.resolve_controllers_for_html(uri, position.line);
+        // 4a. フォームバインディング参照かどうかをチェック
+        let base_name = html_ref.property_path.split('.').next().unwrap_or(&html_ref.property_path);
+        if let Some(form_binding) = self.index.find_form_binding_definition(uri, base_name, position.line) {
+            return self.build_hover_for_form_binding(&form_binding);
+        }
 
-        // 3. 各コントローラーを順番に試して、定義が見つかったものを返す
-        for controller_name in controllers {
+        // 4b. 継承されたローカル変数かどうかをチェック
+        // スコープ参照として登録されていても、実際は継承されたローカル変数の可能性がある
+        if let Some(var_def) = self.index.find_local_variable_definition(uri, base_name, position.line) {
+            return self.build_hover_for_local_variable(&var_def);
+        }
+
+        // 4c. alias.property形式かチェック（controller as alias構文）
+        let (resolved_controller, property_path) = if html_ref.property_path.contains('.') {
+            let parts: Vec<&str> = html_ref.property_path.splitn(2, '.').collect();
+            if parts.len() == 2 {
+                let alias = parts[0];
+                let prop = parts[1];
+                // aliasからコントローラーを解決
+                if let Some(controller) = self.index.resolve_controller_by_alias(uri, position.line, alias) {
+                    (Some(controller), prop.to_string())
+                } else {
+                    (None, html_ref.property_path.clone())
+                }
+            } else {
+                (None, html_ref.property_path.clone())
+            }
+        } else {
+            (None, html_ref.property_path.clone())
+        };
+
+        // 3. コントローラー名を解決
+        let controllers = if let Some(ref controller) = resolved_controller {
+            vec![controller.clone()]
+        } else {
+            self.index.resolve_controllers_for_html(uri, position.line)
+        };
+
+        // 4. 各コントローラーを順番に試して、定義が見つかったものを返す
+        for controller_name in &controllers {
             let symbol_name = format!(
                 "{}.$scope.{}",
                 controller_name,
-                html_ref.property_path
+                property_path
             );
 
             if let Some(hover) = self.build_hover_for_symbol(&symbol_name) {
                 return Some(hover);
+            }
+        }
+
+        // 5. controller as構文の場合、this.methodパターンも検索
+        // ControllerName.method形式で登録されている
+        if resolved_controller.is_some() {
+            for controller_name in &controllers {
+                let symbol_name = format!(
+                    "{}.{}",
+                    controller_name,
+                    property_path
+                );
+
+                if let Some(hover) = self.build_hover_for_symbol(&symbol_name) {
+                    return Some(hover);
+                }
             }
         }
 
@@ -96,6 +180,63 @@ impl HoverHandler {
         if reference_count > 0 {
             content.push_str(&format!("\nReferences: {}", reference_count));
         }
+
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: None,
+        })
+    }
+
+    /// ローカル変数用のホバー情報を構築
+    fn build_hover_for_local_variable(&self, var_def: &HtmlLocalVariable) -> Option<Hover> {
+        let source_str = match var_def.source {
+            HtmlLocalVariableSource::NgInit => "ng-init",
+            HtmlLocalVariableSource::NgRepeatIterator => "ng-repeat iterator",
+            HtmlLocalVariableSource::NgRepeatKeyValue => "ng-repeat key/value",
+        };
+
+        let reference_count = self.index.get_local_variable_references(
+            &var_def.uri,
+            &var_def.name,
+            var_def.scope_start_line,
+            var_def.scope_end_line,
+        ).len();
+
+        let content = format!(
+            "**{}** (*HTML local variable*)\n\n\
+            Source: `{}`\n\
+            Scope: lines {}-{}\n\n\
+            References: {}",
+            var_def.name,
+            source_str,
+            var_def.scope_start_line + 1,
+            var_def.scope_end_line + 1,
+            reference_count
+        );
+
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: None,
+        })
+    }
+
+    /// フォームバインディング用のホバー情報を構築
+    fn build_hover_for_form_binding(&self, form_binding: &HtmlFormBinding) -> Option<Hover> {
+        let content = format!(
+            "**{}** (*form binding*)\n\n\
+            AngularJS automatically binds this form to `$scope.{}`\n\n\
+            Scope: lines {}-{}",
+            form_binding.name,
+            form_binding.name,
+            form_binding.scope_start_line + 1,
+            form_binding.scope_end_line + 1,
+        );
 
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {

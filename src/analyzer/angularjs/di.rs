@@ -134,6 +134,194 @@ impl AngularJsAnalyzer {
         false
     }
 
+    /// DI配列に $rootScope が含まれているかチェックする
+    pub(super) fn has_root_scope_in_di_array(&self, node: Node, source: &str) -> bool {
+        if node.kind() == "array" {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "string" {
+                    let dep_name = self.extract_string_value(child, source);
+                    if dep_name == "$rootScope" {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// 関数パラメータに $scope が含まれているかチェックする
+    ///
+    /// 直接関数パターン用:
+    /// ```javascript
+    /// .controller('Ctrl', function($scope, $http) {})
+    /// function MyController($scope, $http) {}
+    /// ```
+    pub(super) fn has_scope_in_function_params(&self, node: Node, source: &str) -> bool {
+        let func_node = match node.kind() {
+            "function_expression" | "arrow_function" | "function_declaration" => Some(node),
+            _ => None,
+        };
+
+        if let Some(func) = func_node {
+            if let Some(params) = func.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                for child in params.children(&mut cursor) {
+                    if child.kind() == "identifier" {
+                        let param_name = self.node_text(child, source);
+                        if param_name == "$scope" {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// 関数パラメータに $rootScope が含まれているかチェックする
+    ///
+    /// 直接関数パターン用:
+    /// ```javascript
+    /// .run(function($rootScope) {})
+    /// function AppController($rootScope) {}
+    /// ```
+    pub(super) fn has_root_scope_in_function_params(&self, node: Node, source: &str) -> bool {
+        let func_node = match node.kind() {
+            "function_expression" | "arrow_function" | "function_declaration" => Some(node),
+            _ => None,
+        };
+
+        if let Some(func) = func_node {
+            if let Some(params) = func.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                for child in params.children(&mut cursor) {
+                    if child.kind() == "identifier" {
+                        let param_name = self.node_text(child, source);
+                        if param_name == "$rootScope" {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// 関数パラメータから $scope 以外のサービス名を収集する
+    ///
+    /// 直接関数パターン用:
+    /// ```javascript
+    /// .controller('Ctrl', function($scope, MyService) {})
+    /// function MyController($scope, MyService) {}
+    /// ```
+    pub(super) fn collect_services_from_function_params(&self, node: Node, source: &str) -> Vec<String> {
+        let mut services = Vec::new();
+
+        let func_node = match node.kind() {
+            "function_expression" | "arrow_function" | "function_declaration" => Some(node),
+            _ => None,
+        };
+
+        if let Some(func) = func_node {
+            if let Some(params) = func.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                for child in params.children(&mut cursor) {
+                    if child.kind() == "identifier" {
+                        let param_name = self.node_text(child, source);
+                        // $で始まらないパラメータをサービスとして収集
+                        if !param_name.starts_with('$') {
+                            services.push(param_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        services
+    }
+
+    /// 関数参照（identifier）から関数宣言を探し、パラメータに $scope があるかチェック
+    ///
+    /// 関数参照パターン用:
+    /// ```javascript
+    /// .controller('Ctrl', MyController);
+    /// function MyController($scope, Service) {}
+    /// ```
+    pub(super) fn has_scope_in_function_ref(&self, node: Node, source: &str) -> bool {
+        if node.kind() != "identifier" {
+            return false;
+        }
+
+        let func_name = self.node_text(node, source);
+        let root = {
+            let mut current = node;
+            while let Some(parent) = current.parent() {
+                current = parent;
+            }
+            current
+        };
+
+        if let Some(func_decl) = self.find_function_declaration(root, source, &func_name) {
+            return self.has_scope_in_function_params(func_decl, source);
+        }
+        false
+    }
+
+    /// 関数参照（identifier）から関数宣言を探し、パラメータに $rootScope があるかチェック
+    ///
+    /// 関数参照パターン用:
+    /// ```javascript
+    /// .run(AppInit);
+    /// function AppInit($rootScope) {}
+    /// ```
+    pub(super) fn has_root_scope_in_function_ref(&self, node: Node, source: &str) -> bool {
+        if node.kind() != "identifier" {
+            return false;
+        }
+
+        let func_name = self.node_text(node, source);
+        let root = {
+            let mut current = node;
+            while let Some(parent) = current.parent() {
+                current = parent;
+            }
+            current
+        };
+
+        if let Some(func_decl) = self.find_function_declaration(root, source, &func_name) {
+            return self.has_root_scope_in_function_params(func_decl, source);
+        }
+        false
+    }
+
+    /// 関数参照（identifier）から関数宣言を探し、パラメータからサービスを収集
+    ///
+    /// 関数参照パターン用:
+    /// ```javascript
+    /// .controller('Ctrl', MyController);
+    /// function MyController($scope, Service) {}
+    /// ```
+    pub(super) fn collect_services_from_function_ref(&self, node: Node, source: &str) -> Vec<String> {
+        if node.kind() != "identifier" {
+            return Vec::new();
+        }
+
+        let func_name = self.node_text(node, source);
+        let root = {
+            let mut current = node;
+            while let Some(parent) = current.parent() {
+                current = parent;
+            }
+            current
+        };
+
+        if let Some(func_decl) = self.find_function_declaration(root, source, &func_name) {
+            return self.collect_services_from_function_params(func_decl, source);
+        }
+        Vec::new()
+    }
+
     /// 関数本体の行範囲を取得する
     ///
     /// DI配列または関数式から関数本体の開始行と終了行を抽出
@@ -208,10 +396,12 @@ impl AngularJsAnalyzer {
                                         if let Some(right) = expr.child_by_field_name("right") {
                                             let services = self.collect_injected_services(right, source);
                                             let has_scope = self.has_scope_in_di_array(right, source);
-                                            // サービスまたは$scopeがある場合は記録
-                                            if !services.is_empty() || has_scope {
+                                            let has_root_scope = self.has_root_scope_in_di_array(right, source);
+                                            // サービスまたは$scopeまたは$rootScopeがある場合は記録
+                                            if !services.is_empty() || has_scope || has_root_scope {
                                                 ctx.inject_map.insert(func_name.clone(), services);
                                                 ctx.inject_has_scope.insert(func_name.clone(), has_scope);
+                                                ctx.inject_has_root_scope.insert(func_name.clone(), has_root_scope);
 
                                                 // $scope がDIされている場合、ControllerScope を登録
                                                 if has_scope {

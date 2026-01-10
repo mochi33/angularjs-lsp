@@ -8,6 +8,7 @@ Language Server Protocol (LSP) implementation for AngularJS 1.x applications.
 - **Go to Definition** - Jump to AngularJS component, service, controller, and directive definitions
 - **Find References** - Find all usages of AngularJS symbols across your workspace
 - **Hover Information** - Display type and documentation information on hover
+- **CodeLens** - Show controller/template relationships with navigation support
 - **TypeScript Fallback** - Automatically falls back to `typescript-language-server` for non-AngularJS symbols
 
 ## Supported AngularJS Constructs
@@ -47,13 +48,45 @@ if not configs.angularjs_lsp then
   configs.angularjs_lsp = {
     default_config = {
       cmd = { '/path/to/angularjs-lsp' },
-      filetypes = { 'javascript' },
+      filetypes = { 'javascript', 'html' },
       root_dir = lspconfig.util.root_pattern('package.json', '.git'),
     },
   }
 end
 
 lspconfig.angularjs_lsp.setup({})
+```
+
+#### Custom Commands
+
+CodeLens uses the `angularjs.openLocation` command for navigation. Add this handler to enable CodeLens click-to-jump:
+
+```lua
+vim.lsp.commands["angularjs.openLocation"] = function(command, ctx)
+  local locations = command.arguments[1]
+
+  if #locations == 0 then
+    return
+  elseif #locations == 1 then
+    -- Single location: jump directly
+    local loc = locations[1]
+    vim.cmd("edit " .. vim.uri_to_fname(loc.uri))
+    vim.api.nvim_win_set_cursor(0, { loc.range.start.line + 1, loc.range.start.character })
+  else
+    -- Multiple locations: show selection UI
+    vim.ui.select(locations, {
+      prompt = "Select location:",
+      format_item = function(loc)
+        return vim.fn.fnamemodify(vim.uri_to_fname(loc.uri), ":t")
+      end,
+    }, function(selected)
+      if selected then
+        vim.cmd("edit " .. vim.uri_to_fname(selected.uri))
+        vim.api.nvim_win_set_cursor(0, { selected.range.start.line + 1, selected.range.start.character })
+      end
+    end)
+  end
+end
 ```
 
 ### VS Code

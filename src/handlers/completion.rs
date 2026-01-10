@@ -177,6 +177,9 @@ impl CompletionHandler {
             SymbolKind::Method => CompletionItemKind::METHOD,
             SymbolKind::ScopeProperty => CompletionItemKind::PROPERTY,
             SymbolKind::ScopeMethod => CompletionItemKind::FUNCTION,
+            SymbolKind::RootScopeProperty => CompletionItemKind::PROPERTY,
+            SymbolKind::RootScopeMethod => CompletionItemKind::FUNCTION,
+            SymbolKind::FormBinding => CompletionItemKind::VARIABLE,
         }
     }
 }

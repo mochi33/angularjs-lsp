@@ -1,13 +1,28 @@
 use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
+use rstest::{fixture, rstest};
 
 use super::context::AnalyzerContext;
 use super::AngularJsAnalyzer;
 use crate::analyzer::JsParser;
 use crate::index::{SymbolIndex, SymbolKind};
 
-#[test]
-fn test_di_check_with_di() {
+/// テスト用のアナライザーとインデックスのペア
+struct TestContext {
+    analyzer: AngularJsAnalyzer,
+    index: Arc<SymbolIndex>,
+}
+
+#[fixture]
+fn ctx() -> TestContext {
+    let index = Arc::new(SymbolIndex::new());
+    let analyzer = AngularJsAnalyzer::new(Arc::clone(&index));
+    TestContext { analyzer, index }
+}
+
+#[rstest]
+fn test_di_check_with_di(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // DIされている場合は参照が登録される
     let source = r#"
 angular.module('app')
@@ -18,8 +33,6 @@ angular.module('app')
     MyService.doSomething();
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -32,8 +45,9 @@ angular.module('app')
     assert!(!refs.is_empty(), "DIされている場合は参照が登録されるべき");
 }
 
-#[test]
-fn test_di_check_without_di() {
+#[rstest]
+fn test_di_check_without_di(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // DIされていない場合は参照が登録されない
     let source = r#"
 angular.module('app')
@@ -44,8 +58,6 @@ angular.module('app')
     MyService.doSomething();
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -58,8 +70,9 @@ angular.module('app')
     assert!(refs.is_empty(), "DIされていない場合は参照が登録されないべき");
 }
 
-#[test]
-fn test_di_check_inject_pattern() {
+#[rstest]
+fn test_di_check_inject_pattern(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // $inject パターンでDIされている場合は参照が登録される
     let source = r#"
 angular.module('app')
@@ -72,8 +85,6 @@ function TestController($scope, MyService) {
 }
 TestController.$inject = ['$scope', 'MyService'];
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -86,8 +97,9 @@ TestController.$inject = ['$scope', 'MyService'];
     assert!(!refs.is_empty(), "$injectパターンでDIされている場合は参照が登録されるべき");
 }
 
-#[test]
-fn test_di_check_inject_pattern_without_di() {
+#[rstest]
+fn test_di_check_inject_pattern_without_di(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // $inject パターンでDIされていない場合は参照が登録されない
     let source = r#"
 angular.module('app')
@@ -100,8 +112,6 @@ function TestController($scope) {
 }
 TestController.$inject = ['$scope'];
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -114,8 +124,9 @@ TestController.$inject = ['$scope'];
     assert!(refs.is_empty(), "$injectパターンでDIされていない場合は参照が登録されないべき");
 }
 
-#[test]
-fn test_di_check_iife_inject_pattern() {
+#[rstest]
+fn test_di_check_iife_inject_pattern(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // IIFE内の$injectパターンでDIされている場合は参照が登録される
     let source = r#"
 angular.module('app')
@@ -139,8 +150,6 @@ angular.module('app')
     let mut parser = JsParser::new();
     let tree = parser.parse(source).unwrap();
     let mut ctx = AnalyzerContext::new();
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     analyzer.collect_function_declarations_for_inject(tree.root_node(), source, &mut ctx);
@@ -155,8 +164,9 @@ angular.module('app')
     assert!(!refs.is_empty(), "IIFE内の$injectパターンでDIされている場合は参照が登録されるべき: refs={:?}", refs);
 }
 
-#[test]
-fn test_collect_inject_patterns() {
+#[rstest]
+fn test_collect_inject_patterns(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // $inject パターンが正しく収集されているか確認
     let source = r#"
 (function() {
@@ -171,7 +181,6 @@ fn test_collect_inject_patterns() {
     let tree = parser.parse(source).unwrap();
     let mut ctx = AnalyzerContext::new();
 
-    let index = Arc::new(SymbolIndex::new());
     let analyzer = AngularJsAnalyzer::new(index);
     let uri = Url::parse("file:///test.js").unwrap();
 
@@ -187,8 +196,9 @@ fn test_collect_inject_patterns() {
     assert!(!ctx.is_injected_at("otherService", 5), "otherService should NOT be injected at line 5");
 }
 
-#[test]
-fn test_is_injected_at_with_inject_pattern() {
+#[rstest]
+fn test_is_injected_at_with_inject_pattern(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // is_injected_at が $inject パターンで正しく動作するか確認
     let mut ctx = AnalyzerContext::new();
     ctx.function_ranges.insert("TestController".to_string(), (4, 6));
@@ -202,8 +212,9 @@ fn test_is_injected_at_with_inject_pattern() {
     assert!(!ctx.is_injected_at("otherService", 5), "otherService should NOT be injected");
 }
 
-#[test]
-fn test_scope_property_definition() {
+#[rstest]
+fn test_scope_property_definition(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // $scope.xxx = ... が定義として登録される
     let source = r#"
 angular.module('app')
@@ -214,8 +225,6 @@ angular.module('app')
     };
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -234,8 +243,9 @@ angular.module('app')
     assert_eq!(load_defs[0].kind, SymbolKind::ScopeMethod, "関数は ScopeMethod として登録されるべき");
 }
 
-#[test]
-fn test_scope_property_reference() {
+#[rstest]
+fn test_scope_property_reference(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // $scope.xxx への参照が登録される
     let source = r#"
 angular.module('app')
@@ -246,8 +256,6 @@ angular.module('app')
     };
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -260,8 +268,9 @@ angular.module('app')
     assert!(!refs.is_empty(), "$scope.users への参照が登録されるべき");
 }
 
-#[test]
-fn test_scope_first_definition_only() {
+#[rstest]
+fn test_scope_first_definition_only(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // 最初の代入のみが定義として登録される
     let source = r#"
 angular.module('app')
@@ -271,8 +280,6 @@ angular.module('app')
     $scope.count = 2;
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -285,8 +292,9 @@ angular.module('app')
     assert_eq!(defs[0].start_line, 3, "最初の定義の行が正しくない");
 }
 
-#[test]
-fn test_scope_inject_pattern() {
+#[rstest]
+fn test_scope_inject_pattern(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // $inject パターンでの $scope プロパティ
     let source = r#"
 angular.module('app')
@@ -298,8 +306,6 @@ function TestCtrl($scope) {
     $scope.message = 'Hello';
 }
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -310,8 +316,9 @@ function TestCtrl($scope) {
     assert!(!defs.is_empty(), "$inject パターンでも $scope.message の定義が登録されるべき");
 }
 
-#[test]
-fn test_scope_without_di() {
+#[rstest]
+fn test_scope_without_di(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // $scope がDIされていない場合は定義が登録されない
     let source = r#"
 angular.module('app')
@@ -319,8 +326,6 @@ angular.module('app')
     $scope.users = [];
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -331,8 +336,9 @@ angular.module('app')
     assert!(defs.is_empty(), "$scope がDIされていない場合は定義が登録されないべき");
 }
 
-#[test]
-fn test_scope_reference_without_definition() {
+#[rstest]
+fn test_scope_reference_without_definition(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // 定義がなくても参照が登録される（非同期処理内での定義など）
     let source = r#"
 angular.module('app')
@@ -345,8 +351,6 @@ angular.module('app')
     console.log($scope.asyncData);
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -361,8 +365,9 @@ angular.module('app')
     assert_eq!(refs.len(), 1, "console.log内の参照が登録されるべき（代入は定義として扱われる）");
 }
 
-#[test]
-fn test_scope_find_all_references_without_definition() {
+#[rstest]
+fn test_scope_find_all_references_without_definition(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // 定義がなくても参照同士を検索できる
     let source = r#"
 angular.module('app')
@@ -375,8 +380,6 @@ angular.module('app')
     console.log($scope.items);
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -393,8 +396,9 @@ angular.module('app')
     assert_eq!(symbol_name, Some("TestCtrl.$scope.items".to_string()), "参照位置からシンボル名を取得できるべき");
 }
 
-#[test]
-fn test_scope_in_nested_function() {
+#[rstest]
+fn test_scope_in_nested_function(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // ネストされた関数内での $scope 参照
     let source = r#"
 angular.module('app')
@@ -413,8 +417,6 @@ angular.module('app')
     init();
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -432,8 +434,9 @@ angular.module('app')
     assert!(count_refs.len() >= 1, "helper内の$scope.count参照が登録されるべき: count={}, refs={:?}", count_refs.len(), count_refs);
 }
 
-#[test]
-fn test_scope_in_callback() {
+#[rstest]
+fn test_scope_in_callback(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // コールバック関数内での $scope 参照
     let source = r#"
 angular.module('app')
@@ -452,8 +455,6 @@ angular.module('app')
     };
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -471,8 +472,9 @@ angular.module('app')
     assert!(users_refs.len() >= 2, "コールバック内の$scope.users参照が登録されるべき: count={}, refs={:?}", users_refs.len(), users_refs);
 }
 
-#[test]
-fn test_scope_in_deeply_nested_callback() {
+#[rstest]
+fn test_scope_in_deeply_nested_callback(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // 深くネストされたコールバック内での $scope 参照が同一シンボルとして扱われる
     let source = r#"
 angular.module('app')
@@ -489,8 +491,6 @@ angular.module('app')
     });
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -515,8 +515,9 @@ angular.module('app')
     assert!(unknown_refs.is_empty(), "UnknownController.$scope.data の参照が存在すべきではない");
 }
 
-#[test]
-fn test_scope_consistency_between_definition_and_reference() {
+#[rstest]
+fn test_scope_consistency_between_definition_and_reference(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // 定義と参照が同じコントローラー名を使用することを確認
     let source = r#"
 angular.module('app')
@@ -533,8 +534,6 @@ angular.module('app')
     };
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -561,9 +560,10 @@ angular.module('app')
 
 // TODO: サービスメソッドへの参照が登録されない問題を修正する必要がある
 // 現状: コントローラーと$scopeプロパティは登録されるが、DIされたサービスへのメソッド呼び出し参照は登録されない
-#[test]
+#[rstest]
 #[ignore]
-fn test_wf_large_controller_many_dependencies() {
+fn test_wf_large_controller_many_dependencies(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // jbc-wf-container の create_request_controllers.js のような
     // 多数の依存性を持つコントローラー（79+依存性）
     // ここでは簡略化して20依存性でテスト
@@ -601,8 +601,6 @@ angular.module('WfApp.request_controllers')
     }
 ]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -634,9 +632,10 @@ angular.module('WfApp.request_controllers')
 
 // TODO: $injectパターンでのサービスメソッド参照が登録されない問題を修正する必要がある
 // 現状: コントローラーと$scopeプロパティは登録されるが、DIされたサービスへのメソッド呼び出し参照は登録されない
-#[test]
+#[rstest]
 #[ignore]
-fn test_wf_inject_pattern_with_many_dependencies() {
+fn test_wf_inject_pattern_with_many_dependencies(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // $inject パターンで多数の依存性を持つコントローラー
     let source = r#"
 (function() {
@@ -678,8 +677,6 @@ fn test_wf_inject_pattern_with_many_dependencies() {
     }
 })();
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -709,8 +706,9 @@ fn test_wf_inject_pattern_with_many_dependencies() {
     assert!(!export_refs.is_empty(), "exportService.toCsv should be registered as reference via $inject pattern");
 }
 
-#[test]
-fn test_wf_service_with_http_methods() {
+#[rstest]
+fn test_wf_service_with_http_methods(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // jbc-wf-container のサービスパターン
     let source = r#"
 (function() {
@@ -763,8 +761,6 @@ fn test_wf_service_with_http_methods() {
     }
 })();
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -795,9 +791,10 @@ fn test_wf_service_with_http_methods() {
 
 // TODO: factoryパターンでのサービスメソッド定義が登録されない問題を修正する必要がある
 // 現状: ファクトリ自体は登録されるが、return { name: fn } 形式のメソッド定義が登録されない
-#[test]
+#[rstest]
 #[ignore]
-fn test_wf_factory_service_pattern() {
+fn test_wf_factory_service_pattern(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // factory パターンのサービス
     let source = r#"
 'use strict';
@@ -838,8 +835,6 @@ function BillingAddressService($http, $q) {
     }
 }
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -862,8 +857,9 @@ function BillingAddressService($http, $q) {
     assert!(!create_defs.is_empty(), "BillingAddressService.create should be registered");
 }
 
-#[test]
-fn test_wf_directive_with_validators() {
+#[rstest]
+fn test_wf_directive_with_validators(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // カスタムバリデーターを持つディレクティブ
     let source = r#"
 angular.module('WfApp.directives')
@@ -885,8 +881,6 @@ function bankAccountNameKanaValidator() {
     };
 }
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     // Pass 1: definitions
@@ -899,8 +893,9 @@ function bankAccountNameKanaValidator() {
     assert!(!directive_defs.is_empty(), "bankAccountNameKanaValidator directive should be registered");
 }
 
-#[test]
-fn test_uibmodal_template_binding_in_js() {
+#[rstest]
+fn test_uibmodal_template_binding_in_js(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
     // JSファイル内の$uibModal.open()からテンプレートバインディングを抽出
     let source = r#"
 angular.module('app')
@@ -919,8 +914,6 @@ angular.module('app')
     };
 }]);
 "#;
-    let index = Arc::new(SymbolIndex::new());
-    let analyzer = AngularJsAnalyzer::new(index.clone());
     let uri = Url::parse("file:///test.js").unwrap();
 
     analyzer.analyze_document(&uri, source);
@@ -930,4 +923,550 @@ angular.module('app')
     let controller = index.get_controller_for_template(&template_uri);
     assert_eq!(controller, Some("FormCustomItemDialogController".to_string()),
         "$uibModal.open() should register template binding");
+}
+
+#[rstest]
+fn test_direct_function_pattern_with_scope(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // 直接関数パターン（配列なし）でも$scopeが解析されること
+    // $scope を介してProjectServiceのメソッドが参照されることを確認
+    let source = r#"
+angular.module('WfApp.dialog_controllers', ['WfApp.services'])
+.service('ProjectService', function() {
+    this.getProjects = function() {};
+})
+.controller('selectProjectDialogCtrl', function(
+    $http,
+    $scope,
+    $uibModalInstance,
+    params,
+    $timeout,
+    ProjectService
+) {
+    $scope.selectedProject = null;
+    ProjectService.getProjects();
+});
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // コントローラーが登録されているか
+    let ctrl_defs = index.get_definitions("selectProjectDialogCtrl");
+    assert!(!ctrl_defs.is_empty(), "Controller should be registered");
+    assert_eq!(ctrl_defs[0].kind, SymbolKind::Controller);
+
+    // ProjectService.getProjects への参照が登録されているはず（DIが検出されている証拠）
+    let refs = index.get_references("ProjectService.getProjects");
+    assert!(!refs.is_empty(), "Direct function pattern should detect DI services and allow method references");
+}
+
+#[rstest]
+fn test_direct_function_pattern_di_services(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // 直接関数パターンでDIサービス（$以外のパラメータ）が検出されること
+    let source = r#"
+angular.module('app')
+.service('ProjectService', function() {
+    this.getProjects = function() {};
+})
+.controller('TestCtrl', function($scope, ProjectService) {
+    ProjectService.getProjects();
+});
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // ProjectService.getProjects への参照が登録されているはず
+    let refs = index.get_references("ProjectService.getProjects");
+    assert!(!refs.is_empty(), "Direct function pattern should detect DI services and register method references");
+}
+
+#[rstest]
+fn test_direct_function_pattern_without_scope(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // 直接関数パターンで$scopeがない場合
+    let source = r#"
+angular.module('app')
+.factory('DataFactory', function($http, $q) {
+    return {
+        getData: function() {}
+    };
+});
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    analyzer.analyze_document(&uri, source);
+
+    // ファクトリーが登録されているか
+    let factory_defs = index.get_definitions("DataFactory");
+    assert!(!factory_defs.is_empty(), "Factory should be registered");
+    assert_eq!(factory_defs[0].kind, SymbolKind::Factory);
+}
+
+#[rstest]
+fn test_function_reference_pattern_with_scope(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // 関数参照パターン（$injectなし）でも$scopeが解析されること
+    let source = r#"
+angular.module('WfApp.create_request_controllers')
+.service('CustomSpecificsService', function() {
+    this.process = function() {};
+})
+.controller('ExpenseSpecificsCustomController', ExpenseSpecificsCustomController);
+
+function ExpenseSpecificsCustomController(
+    $scope,
+    $location,
+    Const,
+    CustomSpecificsService,
+    util,
+    $rootScope
+) {
+    $scope.data = {};
+    CustomSpecificsService.process();
+}
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // コントローラーが登録されているか
+    let ctrl_defs = index.get_definitions("ExpenseSpecificsCustomController");
+    assert!(!ctrl_defs.is_empty(), "Controller should be registered");
+    assert_eq!(ctrl_defs[0].kind, SymbolKind::Controller);
+
+    // CustomSpecificsService.process への参照が登録されているはず（DIが検出されている証拠）
+    let refs = index.get_references("CustomSpecificsService.process");
+    assert!(!refs.is_empty(), "Function reference pattern without $inject should detect DI services from function declaration params");
+}
+
+#[rstest]
+fn test_function_reference_pattern_with_inject(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // 関数参照パターン（$injectあり）
+    let source = r#"
+angular.module('app')
+.service('MyService', function() {
+    this.doSomething = function() {};
+})
+.controller('MyCtrl', MyController);
+
+MyController.$inject = ['$scope', 'MyService'];
+function MyController($scope, MyService) {
+    MyService.doSomething();
+}
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // MyService.doSomething への参照が登録されているはず
+    let refs = index.get_references("MyService.doSomething");
+    assert!(!refs.is_empty(), "Function reference pattern with $inject should work");
+}
+
+// =====================================================
+// $rootScope テスト
+// =====================================================
+
+#[rstest]
+fn test_root_scope_property_definition(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // $rootScope プロパティの定義
+    let source = r#"
+angular.module('myApp')
+.run(['$rootScope', function($rootScope) {
+    $rootScope.currentUser = null;
+    $rootScope.isLoggedIn = false;
+    $rootScope.logout = function() {
+        $rootScope.currentUser = null;
+        $rootScope.isLoggedIn = false;
+    };
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // $rootScope.currentUser の定義
+    let defs = index.get_definitions("myApp.$rootScope.currentUser");
+    assert!(!defs.is_empty(), "$rootScope.currentUser の定義が登録されるべき: {:?}", defs);
+    assert_eq!(defs[0].kind, SymbolKind::RootScopeProperty);
+
+    // $rootScope.isLoggedIn の定義
+    let defs = index.get_definitions("myApp.$rootScope.isLoggedIn");
+    assert!(!defs.is_empty(), "$rootScope.isLoggedIn の定義が登録されるべき");
+    assert_eq!(defs[0].kind, SymbolKind::RootScopeProperty);
+
+    // $rootScope.logout の定義（メソッド）
+    let defs = index.get_definitions("myApp.$rootScope.logout");
+    assert!(!defs.is_empty(), "$rootScope.logout の定義が登録されるべき");
+    assert_eq!(defs[0].kind, SymbolKind::RootScopeMethod);
+}
+
+#[rstest]
+fn test_root_scope_property_reference(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // $rootScope プロパティの参照
+    let source = r#"
+angular.module('myApp')
+.run(['$rootScope', function($rootScope) {
+    $rootScope.currentUser = null;
+}])
+.controller('HeaderCtrl', ['$scope', '$rootScope', function($scope, $rootScope) {
+    $scope.user = $rootScope.currentUser;
+    $scope.logout = function() {
+        $rootScope.currentUser = null;
+    };
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // $rootScope.currentUser への参照
+    let refs = index.get_references("myApp.$rootScope.currentUser");
+    // HeaderCtrl内で2回参照されている（$scope.user = $rootScope.currentUser と $rootScope.currentUser = null）
+    assert!(refs.len() >= 2, "$rootScope.currentUser の参照が登録されるべき: count={}, refs={:?}", refs.len(), refs);
+}
+
+#[rstest]
+fn test_root_scope_without_di(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // $rootScope がDIされていない場合は登録されない
+    let source = r#"
+angular.module('myApp')
+.controller('TestCtrl', ['$scope', function($scope) {
+    // $rootScope がDIされていないので、これは登録されない
+    $rootScope.data = {};
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    analyzer.analyze_document(&uri, source);
+
+    // DIされていないので定義は登録されない
+    let defs = index.get_definitions("myApp.$rootScope.data");
+    assert!(defs.is_empty(), "$rootScope がDIされていない場合は登録されないべき");
+}
+
+#[rstest]
+fn test_root_scope_with_inject_pattern(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // $inject パターンでの $rootScope
+    let source = r#"
+angular.module('myApp')
+.run(AppInit);
+
+AppInit.$inject = ['$rootScope'];
+function AppInit($rootScope) {
+    $rootScope.appName = 'My Application';
+    $rootScope.version = '1.0.0';
+}
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // $rootScope.appName の定義
+    let defs = index.get_definitions("myApp.$rootScope.appName");
+    assert!(!defs.is_empty(), "$inject パターンでの $rootScope.appName の定義が登録されるべき: {:?}", defs);
+    assert_eq!(defs[0].kind, SymbolKind::RootScopeProperty);
+}
+
+#[rstest]
+fn test_root_scope_first_definition_only(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // 最初の代入のみが定義として登録される
+    let source = r#"
+angular.module('myApp')
+.run(['$rootScope', function($rootScope) {
+    $rootScope.counter = 0;
+    $rootScope.counter = 1;
+    $rootScope.counter = $rootScope.counter + 1;
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // 定義は1つだけ
+    let defs = index.get_definitions("myApp.$rootScope.counter");
+    assert_eq!(defs.len(), 1, "最初の定義のみ登録されるべき: {:?}", defs);
+
+    // 2回目以降は参照として登録
+    let refs = index.get_references("myApp.$rootScope.counter");
+    // 2回目の代入 + 3回目の左辺 + 3回目の右辺
+    assert!(refs.len() >= 3, "再代入は参照として登録されるべき: count={}, refs={:?}", refs.len(), refs);
+}
+
+// =====================================================
+// $routeProvider.when テスト
+// =====================================================
+
+#[rstest]
+fn test_route_provider_when_inline_function(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // $routeProvider.when() の controller に直接関数を指定
+    let source = r#"
+angular.module('myApp')
+.config(['$routeProvider', function($routeProvider) {
+    $routeProvider.when('/users', {
+        templateUrl: 'views/users.html',
+        controller: function($scope) {
+            $scope.users = [];
+            $scope.loadUsers = function() {
+                return [];
+            };
+        }
+    });
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // $scope.users の定義が登録されているはず
+    let users_defs = index.get_definitions("route.$scope.users");
+    assert!(!users_defs.is_empty(), "$routeProvider.when内の$scope.users の定義が登録されるべき: {:?}", users_defs);
+    assert_eq!(users_defs[0].kind, SymbolKind::ScopeProperty);
+
+    // $scope.loadUsers の定義が登録されているはず（メソッド）
+    let load_defs = index.get_definitions("route.$scope.loadUsers");
+    assert!(!load_defs.is_empty(), "$routeProvider.when内の$scope.loadUsers の定義が登録されるべき");
+    assert_eq!(load_defs[0].kind, SymbolKind::ScopeMethod);
+}
+
+#[rstest]
+fn test_route_provider_when_di_array(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // $routeProvider.when() の controller に配列記法でDI
+    let source = r#"
+angular.module('myApp')
+.config(['$routeProvider', function($routeProvider) {
+    $routeProvider.when('/dashboard', {
+        templateUrl: 'views/dashboard.html',
+        controller: ['$scope', '$http', function($scope, $http) {
+            $scope.data = null;
+            $scope.refresh = function() {
+                $http.get('/api/data').then(function(res) {
+                    $scope.data = res.data;
+                });
+            };
+        }]
+    });
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // $scope.data の定義が登録されているはず
+    let data_defs = index.get_definitions("route.$scope.data");
+    assert!(!data_defs.is_empty(), "$routeProvider.when配列記法内の$scope.data の定義が登録されるべき: {:?}", data_defs);
+
+    // $scope.refresh の定義が登録されているはず
+    let refresh_defs = index.get_definitions("route.$scope.refresh");
+    assert!(!refresh_defs.is_empty(), "$routeProvider.when配列記法内の$scope.refresh の定義が登録されるべき");
+}
+
+#[rstest]
+fn test_route_provider_otherwise(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // $routeProvider.otherwise() も同様に解析
+    let source = r#"
+angular.module('myApp')
+.config(['$routeProvider', function($routeProvider) {
+    $routeProvider.otherwise({
+        templateUrl: 'views/404.html',
+        controller: ['$scope', function($scope) {
+            $scope.errorMessage = 'Page not found';
+        }]
+    });
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+
+    // $scope.errorMessage の定義が登録されているはず
+    let defs = index.get_definitions("route.$scope.errorMessage");
+    assert!(!defs.is_empty(), "$routeProvider.otherwise内の$scope.errorMessage の定義が登録されるべき: {:?}", defs);
+}
+
+#[rstest]
+fn test_route_provider_when_with_root_scope(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // $routeProvider.when() で$rootScopeも解析される
+    let source = r#"
+angular.module('myApp')
+.config(['$routeProvider', function($routeProvider) {
+    $routeProvider.when('/login', {
+        templateUrl: 'views/login.html',
+        controller: ['$scope', '$rootScope', function($scope, $rootScope) {
+            $scope.credentials = {};
+            $rootScope.isLoggedIn = false;
+        }]
+    });
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+
+    // $scope.credentials の定義
+    let scope_defs = index.get_definitions("route.$scope.credentials");
+    assert!(!scope_defs.is_empty(), "$routeProvider.when内の$scope.credentials の定義が登録されるべき");
+
+    // $rootScope.isLoggedIn の定義
+    let root_defs = index.get_definitions("myApp.$rootScope.isLoggedIn");
+    assert!(!root_defs.is_empty(), "$routeProvider.when内の$rootScope.isLoggedIn の定義が登録されるべき: {:?}", root_defs);
+}
+
+#[rstest]
+fn test_route_provider_chained_when(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // チェーンされた $routeProvider.when() の解析
+    let source = r#"
+angular.module('myApp')
+.config(['$routeProvider', function($routeProvider) {
+    $routeProvider
+        .when('/home', {
+            templateUrl: 'views/home.html',
+            controller: function($scope) {
+                $scope.homeData = {};
+            }
+        })
+        .when('/about', {
+            templateUrl: 'views/about.html',
+            controller: function($scope) {
+                $scope.aboutInfo = {};
+            }
+        });
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+
+    // 両方の$scopeプロパティが登録されているはず
+    let home_defs = index.get_definitions("route.$scope.homeData");
+    assert!(!home_defs.is_empty(), "最初のwhen内の$scope.homeData の定義が登録されるべき");
+
+    let about_defs = index.get_definitions("route.$scope.aboutInfo");
+    assert!(!about_defs.is_empty(), "2番目のwhen内の$scope.aboutInfo の定義が登録されるべき");
+}
+
+#[rstest]
+fn test_route_provider_when_string_controller(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // controller: 'ControllerName' 文字列パターン
+    let source = r#"
+angular.module('myApp')
+.controller('ClientInfoController', ['$scope', function($scope) {
+    $scope.clientData = {};
+}])
+.config(['$routeProvider', function($routeProvider) {
+    $routeProvider.when('/client', {
+        controller: 'ClientInfoController',
+        templateUrl: '../static/wf/views/menu/client_info.html',
+        isEditPage: true
+    });
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    // Pass 1: definitions
+    analyzer.analyze_document_with_options(&uri, source, true);
+    // Pass 2: references
+    analyzer.analyze_document_with_options(&uri, source, false);
+
+    // コントローラーの定義が登録されているか
+    let ctrl_defs = index.get_definitions("ClientInfoController");
+    assert!(!ctrl_defs.is_empty(), "ClientInfoController の定義が登録されるべき");
+
+    // $routeProvider.when内のcontroller文字列がコントローラーへの参照として登録されているか
+    let ctrl_refs = index.get_references("ClientInfoController");
+    assert!(!ctrl_refs.is_empty(), "controller: 'ClientInfoController' がコントローラーへの参照として登録されるべき: {:?}", ctrl_refs);
+
+    // テンプレートバインディングが登録されているか
+    let template_uri = Url::parse("file:///static/wf/views/menu/client_info.html").unwrap();
+    let controller = index.get_controller_for_template(&template_uri);
+    assert_eq!(controller, Some("ClientInfoController".to_string()),
+        "$routeProvider.when() should register template binding");
+}
+
+#[rstest]
+fn test_route_provider_multiple_routes_with_string_controllers(ctx: TestContext) {
+    let TestContext { analyzer, index } = ctx;
+    // 複数のルートで文字列コントローラーを使用
+    let source = r#"
+angular.module('myApp')
+.controller('HomeController', function() {})
+.controller('AboutController', function() {})
+.controller('ContactController', function() {})
+.config(['$routeProvider', function($routeProvider) {
+    $routeProvider
+        .when('/home', {
+            controller: 'HomeController',
+            templateUrl: 'views/home.html'
+        })
+        .when('/about', {
+            controller: 'AboutController',
+            templateUrl: 'views/about.html'
+        })
+        .when('/contact', {
+            controller: 'ContactController',
+            templateUrl: 'views/contact.html'
+        });
+}]);
+"#;
+    let uri = Url::parse("file:///test.js").unwrap();
+
+    analyzer.analyze_document(&uri, source);
+
+    // 各コントローラーへの参照が登録されているか
+    let home_refs = index.get_references("HomeController");
+    assert!(!home_refs.is_empty(), "HomeController への参照が登録されるべき");
+
+    let about_refs = index.get_references("AboutController");
+    assert!(!about_refs.is_empty(), "AboutController への参照が登録されるべき");
+
+    let contact_refs = index.get_references("ContactController");
+    assert!(!contact_refs.is_empty(), "ContactController への参照が登録されるべき");
 }

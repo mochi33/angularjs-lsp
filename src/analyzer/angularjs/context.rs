@@ -22,6 +22,8 @@ pub(super) struct DiScope {
     pub(super) body_end_line: u32,
     /// $scope がDIされているかどうか
     pub(super) has_scope: bool,
+    /// $rootScope がDIされているかどうか
+    pub(super) has_root_scope: bool,
 }
 
 /// 解析コンテキスト
@@ -34,9 +36,16 @@ pub(super) struct AnalyzerContext {
     pub(super) function_ranges: HashMap<String, (u32, u32)>,
     /// $inject パターン用: 関数名 -> $scope がDIされているか
     pub(super) inject_has_scope: HashMap<String, bool>,
+    /// $inject パターン用: 関数名 -> $rootScope がDIされているか
+    pub(super) inject_has_root_scope: HashMap<String, bool>,
     /// 既に定義済みの $scope プロパティ名（コントローラー名.プロパティ名 -> true）
     /// 最初の定義のみを登録するために使用
     pub(super) defined_scope_properties: HashMap<String, bool>,
+    /// 既に定義済みの $rootScope プロパティ名（モジュール名.プロパティ名 -> true）
+    /// 最初の定義のみを登録するために使用
+    pub(super) defined_root_scope_properties: HashMap<String, bool>,
+    /// 現在のモジュール名
+    pub(super) current_module: Option<String>,
 }
 
 impl AnalyzerContext {
@@ -46,8 +55,21 @@ impl AnalyzerContext {
             inject_map: HashMap::new(),
             function_ranges: HashMap::new(),
             inject_has_scope: HashMap::new(),
+            inject_has_root_scope: HashMap::new(),
             defined_scope_properties: HashMap::new(),
+            defined_root_scope_properties: HashMap::new(),
+            current_module: None,
         }
+    }
+
+    /// 現在のモジュール名を設定
+    pub(super) fn set_current_module(&mut self, name: String) {
+        self.current_module = Some(name);
+    }
+
+    /// 現在のモジュール名を取得
+    pub(super) fn get_current_module(&self) -> Option<&String> {
+        self.current_module.as_ref()
     }
 
     /// 指定位置でサービスがDIされているかどうかをチェック
@@ -109,6 +131,30 @@ impl AnalyzerContext {
             if line >= range.0 && line <= range.1 {
                 if let Some(&has_scope) = self.inject_has_scope.get(func_name) {
                     return Some((func_name.clone(), has_scope));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// 指定位置の $rootScope 情報を取得（モジュール名, has_root_scope）
+    pub(super) fn get_root_scope_info_at(&self, line: u32) -> Option<(String, bool)> {
+        // モジュール名が設定されていない場合は None
+        let module_name = self.current_module.as_ref()?;
+
+        // 1. di_scopes から現在位置のスコープを探す（内側から外側へ）
+        for scope in self.di_scopes.iter().rev() {
+            if line >= scope.body_start_line && line <= scope.body_end_line {
+                return Some((module_name.clone(), scope.has_root_scope));
+            }
+        }
+
+        // 2. $inject パターンのスコープもチェック
+        for (func_name, range) in &self.function_ranges {
+            if line >= range.0 && line <= range.1 {
+                if let Some(&has_root_scope) = self.inject_has_root_scope.get(func_name) {
+                    return Some((module_name.clone(), has_root_scope));
                 }
             }
         }

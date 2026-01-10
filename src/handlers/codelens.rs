@@ -92,28 +92,32 @@ impl CodeLensHandler {
         // コントローラー定義を検索
         let definitions = self.index.get_definitions(controller_name);
 
-        let command = if let Some(def) = definitions.first() {
-            // 定義が見つかった場合、クリックでジャンプ可能
-            Command {
-                title: format!("{}: {}", source, controller_name),
-                command: "editor.action.goToLocations".to_string(),
-                arguments: Some(vec![
-                    serde_json::to_value(def.uri.to_string()).unwrap(),
-                    serde_json::to_value(Position {
-                        line: def.start_line,
-                        character: def.start_col,
-                    }).unwrap(),
-                    serde_json::to_value(Vec::<Location>::new()).unwrap(),
-                    serde_json::to_value("goto").unwrap(),
-                    serde_json::to_value("No definition found").unwrap(),
-                ]),
-            }
-        } else {
+        let command = if definitions.is_empty() {
             // 定義が見つからない場合
             Command {
                 title: format!("{}: {} (not found)", source, controller_name),
                 command: "".to_string(),
                 arguments: None,
+            }
+        } else {
+            // Locationの配列を作成
+            let locations: Vec<serde_json::Value> = definitions
+                .iter()
+                .map(|def| {
+                    serde_json::json!({
+                        "uri": def.uri.to_string(),
+                        "range": {
+                            "start": { "line": def.start_line, "character": def.start_col },
+                            "end": { "line": def.start_line, "character": def.start_col }
+                        }
+                    })
+                })
+                .collect();
+
+            Command {
+                title: format!("{}: {}", source, controller_name),
+                command: "angularjs.openLocation".to_string(),
+                arguments: Some(vec![serde_json::json!(locations)]),
             }
         };
 
@@ -141,12 +145,34 @@ impl CodeLensHandler {
             format!("Templates: {}", template_names.join(", "))
         };
 
-        // 複数のテンプレートがある場合は最初のものにジャンプ
-        // TODO: 複数選択のUIを検討
-        let command = Command {
-            title,
-            command: "".to_string(),  // クリックしても何もしない（表示のみ）
-            arguments: None,
+        // テンプレートURIを取得してLocationの配列を作成
+        let locations: Vec<serde_json::Value> = templates
+            .iter()
+            .filter_map(|template_path| {
+                self.index.resolve_template_uri(template_path).map(|uri| {
+                    serde_json::json!({
+                        "uri": uri.to_string(),
+                        "range": {
+                            "start": { "line": 0, "character": 0 },
+                            "end": { "line": 0, "character": 0 }
+                        }
+                    })
+                })
+            })
+            .collect();
+
+        let command = if locations.is_empty() {
+            Command {
+                title,
+                command: "".to_string(),
+                arguments: None,
+            }
+        } else {
+            Command {
+                title,
+                command: "angularjs.openLocation".to_string(),
+                arguments: Some(vec![serde_json::json!(locations)]),
+            }
         };
 
         CodeLens {

@@ -18,6 +18,9 @@ dashmap = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+rstest = "0.24"
+
 [profile.release]
 lto = true
 strip = true

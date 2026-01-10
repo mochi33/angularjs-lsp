@@ -508,7 +508,8 @@ impl LanguageServer for Backend {
 
         // 1. AngularJS解析を試行
         let handler = ReferencesHandler::new(Arc::clone(&self.index));
-        if let Some(def) = handler.goto_definition(params.clone()) {
+        let source = self.documents.get(uri).map(|s| s.value().clone());
+        if let Some(def) = handler.goto_definition_with_source(params.clone(), source.as_deref()) {
             self.client
                 .log_message(
                     MessageType::INFO,
@@ -578,11 +579,90 @@ impl LanguageServer for Backend {
             if let Some(doc) = self.documents.get(uri) {
                 let source = doc.value();
                 if self.html_analyzer.is_in_angular_context(source, line, col) {
-                    // Angularコンテキスト内 → $scope補完を返す
+                    // Angularコンテキスト内 → $scope補完とローカル変数を返す
                     let controller_name = self.index.resolve_controller_for_html(uri, line);
                     let handler = CompletionHandler::new(Arc::clone(&self.index));
-                    if let Some(completions) = handler.complete_with_context(Some("$scope"), controller_name.as_deref()) {
-                        return Ok(Some(completions));
+
+                    let mut items: Vec<CompletionItem> = Vec::new();
+
+                    // 1. $scope 補完を追加
+                    if let Some(CompletionResponse::Array(scope_items)) = handler.complete_with_context(Some("$scope"), controller_name.as_deref()) {
+                        items.extend(scope_items);
+                    }
+
+                    // 2. 現在のファイル内のローカル変数を追加（ng-repeat, ng-init由来）
+                    let local_vars = self.index.get_local_variables_at(uri, line);
+                    for var in local_vars {
+                        items.push(CompletionItem {
+                            label: var.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(format!("local variable ({})", var.source.as_str())),
+                            ..Default::default()
+                        });
+                    }
+
+                    // 3. 継承されたローカル変数を追加（ng-include経由）
+                    let inherited_vars = self.index.get_inherited_local_variables_for_template(uri);
+                    for var in inherited_vars {
+                        // 既に同名のローカル変数がある場合はスキップ
+                        if items.iter().any(|item| item.label == var.name) {
+                            continue;
+                        }
+                        items.push(CompletionItem {
+                            label: var.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(format!("inherited variable ({})", var.source.as_str())),
+                            ..Default::default()
+                        });
+                    }
+
+                    // 4. フォームバインディングを追加（<form name="x">由来）
+                    let form_bindings = self.index.get_form_bindings_at(uri, line);
+                    for binding in form_bindings {
+                        // 既に同名の項目がある場合はスキップ
+                        if items.iter().any(|item| item.label == binding.name) {
+                            continue;
+                        }
+                        items.push(CompletionItem {
+                            label: binding.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some("form binding ($scope)".to_string()),
+                            ..Default::default()
+                        });
+                    }
+
+                    // 5. 継承されたフォームバインディングを追加（ng-include経由）
+                    let inherited_forms = self.index.get_inherited_form_bindings_for_template(uri);
+                    for binding in inherited_forms {
+                        // 既に同名の項目がある場合はスキップ
+                        if items.iter().any(|item| item.label == binding.name) {
+                            continue;
+                        }
+                        items.push(CompletionItem {
+                            label: binding.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some("inherited form binding ($scope)".to_string()),
+                            ..Default::default()
+                        });
+                    }
+
+                    // 6. controller as エイリアスを追加
+                    let alias_mappings = self.index.get_html_alias_mappings(uri, line);
+                    for (alias, controller_name) in alias_mappings {
+                        // 既に同名の項目がある場合はスキップ
+                        if items.iter().any(|item| item.label == alias) {
+                            continue;
+                        }
+                        items.push(CompletionItem {
+                            label: alias,
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(format!("controller alias ({})", controller_name)),
+                            ..Default::default()
+                        });
+                    }
+
+                    if !items.is_empty() {
+                        return Ok(Some(CompletionResponse::Array(items)));
                     }
                 }
             }

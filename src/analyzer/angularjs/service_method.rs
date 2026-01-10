@@ -431,4 +431,176 @@ impl AngularJsAnalyzer {
             }
         }
     }
+
+    /// コントローラーの実装関数からthis.methodパターンを抽出する
+    ///
+    /// controller as構文で使用される:
+    /// ```javascript
+    /// .controller('FormCustomItemController', function() {
+    ///     this.onChangeText = function(item) { ... };
+    /// })
+    /// ```
+    ///
+    /// `FormCustomItemController.onChangeText` として登録される
+    /// (Service/Factoryと同じ形式で、HTML側でalias.methodとしてアクセス可能)
+    pub(super) fn extract_controller_methods(&self, node: Node, source: &str, uri: &Url, controller_name: &str) {
+        if node.kind() == "array" {
+            // DI配列記法: ['$scope', function($scope) { ... }]
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "function_expression" || child.kind() == "arrow_function" {
+                    self.extract_this_methods_from_controller(child, source, uri, controller_name);
+                }
+            }
+        } else if node.kind() == "function_expression" || node.kind() == "arrow_function" {
+            // 直接関数記法
+            self.extract_this_methods_from_controller(node, source, uri, controller_name);
+        } else if node.kind() == "identifier" {
+            // 関数参照パターン: .controller('Ctrl', MyController)
+            let func_name = self.node_text(node, source);
+            let root = node.parent().and_then(|n| {
+                let mut current = n;
+                while let Some(parent) = current.parent() {
+                    current = parent;
+                }
+                Some(current)
+            });
+            if let Some(root) = root {
+                if let Some(func_decl) = self.find_function_declaration(root, source, &func_name) {
+                    if let Some(body) = func_decl.child_by_field_name("body") {
+                        self.scan_for_this_methods(body, source, uri, controller_name);
+                    }
+                }
+            }
+        }
+    }
+
+    /// コントローラー関数本体からthis.methodを抽出
+    fn extract_this_methods_from_controller(&self, func_node: Node, source: &str, uri: &Url, controller_name: &str) {
+        if let Some(body) = func_node.child_by_field_name("body") {
+            // まず `var vm = this;` のようなthisエイリアスを収集
+            let this_aliases = self.collect_this_aliases(body, source);
+            // this.method と vm.method の両方をスキャン
+            self.scan_for_this_methods_with_aliases(body, source, uri, controller_name, &this_aliases);
+        }
+    }
+
+    /// `var vm = this;` のようなthisエイリアスを収集
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// var vm = this;
+    /// const vm = this;
+    /// let vm = this;
+    /// ```
+    fn collect_this_aliases(&self, node: Node, source: &str) -> Vec<String> {
+        let mut aliases = Vec::new();
+        self.collect_this_aliases_recursive(node, source, &mut aliases);
+        aliases
+    }
+
+    fn collect_this_aliases_recursive(&self, node: Node, source: &str, aliases: &mut Vec<String>) {
+        match node.kind() {
+            "variable_declaration" | "lexical_declaration" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "variable_declarator" {
+                        if let Some(name_node) = child.child_by_field_name("name") {
+                            if let Some(value_node) = child.child_by_field_name("value") {
+                                // `var vm = this;` パターンをチェック
+                                if value_node.kind() == "this" {
+                                    let var_name = self.node_text(name_node, source);
+                                    aliases.push(var_name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_this_aliases_recursive(child, source, aliases);
+        }
+    }
+
+    /// 関数本体内をスキャンしてthis.methodとvm.method定義を探す
+    fn scan_for_this_methods_with_aliases(
+        &self,
+        node: Node,
+        source: &str,
+        uri: &Url,
+        controller_name: &str,
+        this_aliases: &[String],
+    ) {
+        if node.kind() == "expression_statement" {
+            if let Some(expr) = node.named_child(0) {
+                if expr.kind() == "assignment_expression" {
+                    self.extract_this_or_alias_method(expr, source, uri, controller_name, this_aliases);
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.scan_for_this_methods_with_aliases(child, source, uri, controller_name, this_aliases);
+        }
+    }
+
+    /// `this.method = ...` または `vm.method = ...` パターンからメソッドを抽出
+    fn extract_this_or_alias_method(
+        &self,
+        assign_node: Node,
+        source: &str,
+        uri: &Url,
+        controller_name: &str,
+        this_aliases: &[String],
+    ) {
+        if let Some(left) = assign_node.child_by_field_name("left") {
+            if left.kind() == "member_expression" {
+                if let Some(object) = left.child_by_field_name("object") {
+                    let obj_text = self.node_text(object, source);
+
+                    // `this` または thisエイリアス（vm等）かどうかをチェック
+                    let is_this_or_alias = obj_text == "this" || this_aliases.contains(&obj_text);
+
+                    if is_this_or_alias {
+                        if let Some(property) = left.child_by_field_name("property") {
+                            let method_name = self.node_text(property, source);
+                            let start = property.start_position();
+                            let end = property.end_position();
+
+                            let docs = self.extract_jsdoc_for_line(assign_node.start_position().row, source);
+
+                            let full_name = format!("{}.{}", controller_name, method_name);
+                            let symbol = Symbol {
+                                name: full_name,
+                                kind: SymbolKind::Method,
+                                uri: uri.clone(),
+                                start_line: self.offset_line(start.row as u32),
+                                start_col: start.column as u32,
+                                end_line: self.offset_line(end.row as u32),
+                                end_col: end.column as u32,
+                                name_start_line: self.offset_line(start.row as u32),
+                                name_start_col: start.column as u32,
+                                name_end_line: self.offset_line(end.row as u32),
+                                name_end_col: end.column as u32,
+                                docs,
+                            };
+                            self.index.add_definition(symbol);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 関数本体内をスキャンしてthis.method定義を探す（後方互換性のため残す）
+    fn scan_for_this_methods(&self, node: Node, source: &str, uri: &Url, controller_name: &str) {
+        // thisエイリアスを収集して使用
+        let this_aliases = self.collect_this_aliases(node, source);
+        self.scan_for_this_methods_with_aliases(node, source, uri, controller_name, &this_aliases);
+    }
 }

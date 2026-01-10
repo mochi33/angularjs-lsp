@@ -17,6 +17,12 @@ pub enum SymbolKind {
     ScopeProperty,
     /// $scope メソッド（関数が格納されている）
     ScopeMethod,
+    /// $rootScope プロパティ
+    RootScopeProperty,
+    /// $rootScope メソッド（関数が格納されている）
+    RootScopeMethod,
+    /// <form name="x">で$scopeに自動バインドされるフォーム
+    FormBinding,
 }
 
 impl SymbolKind {
@@ -34,6 +40,9 @@ impl SymbolKind {
             SymbolKind::Method => "method",
             SymbolKind::ScopeProperty => "scope property",
             SymbolKind::ScopeMethod => "scope method",
+            SymbolKind::RootScopeProperty => "root scope property",
+            SymbolKind::RootScopeMethod => "root scope method",
+            SymbolKind::FormBinding => "form binding",
         }
     }
 }
