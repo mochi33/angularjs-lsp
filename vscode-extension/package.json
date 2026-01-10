@@ -1,0 +1,71 @@
+{
+  "name": "angularjs-lsp",
+  "displayName": "AngularJS Language Server",
+  "description": "Language Server Protocol implementation for AngularJS 1.x projects",
+  "version": "0.1.0",
+  "publisher": "mochi",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "angularjs",
+    "angular",
+    "javascript",
+    "lsp",
+    "language-server"
+  ],
+  "activationEvents": [
+    "onLanguage:javascript",
+    "onLanguage:html",
+    "workspaceContains:**/ajsconfig.json"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "type": "object",
+      "title": "AngularJS Language Server",
+      "properties": {
+        "angularjsLsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the angularjs-lsp server executable. If empty, the extension will not start."
+        },
+        "angularjsLsp.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the AngularJS language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "angularjs.openLocation",
+        "title": "AngularJS: Open Location"
+      },
+      {
+        "command": "angularjs.restartServer",
+        "title": "AngularJS: Restart Language Server"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.0"
+  }
+}

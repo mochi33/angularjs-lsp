@@ -91,7 +91,24 @@ end
 
 ### VS Code
 
-Coming soon.
+1. Build the extension:
+   ```bash
+   cd vscode-extension
+   npm install
+   npm run compile
+   ```
+
+2. In VSCode, open the `vscode-extension` folder and press F5 to launch Extension Development Host, or package as VSIX:
+   ```bash
+   npm run package
+   ```
+
+3. Configure the server path in VS Code settings:
+   ```json
+   {
+     "angularjsLsp.serverPath": "/path/to/angularjs-lsp/target/release/angularjs-lsp"
+   }
+   ```
 
 ## Architecture
 
