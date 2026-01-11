@@ -175,7 +175,7 @@ impl CodeLensHandler {
 
         let command = if locations.is_empty() {
             Command {
-                title,
+                title: format!("{} (not resolved)", title),
                 command: "".to_string(),
                 arguments: None,
             }

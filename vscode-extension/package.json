@@ -1,29 +1,40 @@
 {
   "name": "angularjs-lsp",
-  "displayName": "AngularJS Language Server",
+  "displayName": "AngularJS 1.x IntelliSense",
   "description": "Language Server Protocol implementation for AngularJS 1.x projects",
-  "version": "0.1.0",
-  "publisher": "mochi",
+  "version": "0.1.4",
+  "publisher": "mochi33",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mochi33/angularjs-lsp"
+  },
+  "homepage": "https://github.com/mochi33/angularjs-lsp#readme",
+  "bugs": {
+    "url": "https://github.com/mochi33/angularjs-lsp/issues"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Linters"
   ],
   "keywords": [
     "angularjs",
     "angular",
     "javascript",
     "lsp",
-    "language-server"
+    "language-server",
+    "intellisense",
+    "autocomplete"
   ],
   "activationEvents": [
     "onLanguage:javascript",
     "onLanguage:html",
     "workspaceContains:**/ajsconfig.json"
   ],
-  "main": "./out/extension.js",
+  "main": "./dist/extension.js",
   "contributes": {
     "configuration": {
       "type": "object",
@@ -36,7 +47,11 @@
         },
         "angularjsLsp.trace.server": {
           "type": "string",
-          "enum": ["off", "messages", "verbose"],
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
           "default": "off",
           "description": "Traces the communication between VS Code and the AngularJS language server."
         }
@@ -50,14 +65,20 @@
       {
         "command": "angularjs.restartServer",
         "title": "AngularJS: Restart Language Server"
+      },
+      {
+        "command": "angularjs.installServer",
+        "title": "AngularJS: Install/Update Language Server"
       }
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "vscode:prepublish": "npm run esbuild-base -- --minify",
+    "esbuild-base": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "compile": "npm run esbuild-base -- --sourcemap",
+    "watch": "npm run esbuild-base -- --sourcemap --watch",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
@@ -66,6 +87,7 @@
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.75.0",
     "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.27.2",
     "typescript": "^5.3.0"
   }
 }

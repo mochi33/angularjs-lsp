@@ -1,48 +1,47 @@
-# AngularJS Language Server - VSCode Extension
+# AngularJS Language Server
 
 Language Server Protocol implementation for AngularJS 1.x projects.
 
 ## Features
 
-- **Completion**: Autocomplete for AngularJS components, services, controllers, and $scope properties
-- **Hover**: Documentation and type information on hover
-- **Go to Definition**: Navigate to AngularJS component definitions
-- **Find References**: Find all references to AngularJS symbols
-- **Rename**: Rename AngularJS symbols across your project
-- **Document Symbols**: Outline view showing AngularJS components
-- **Code Lens**: Shows controller-template bindings
+- **Auto Completion** - IntelliSense for $scope properties, services, controllers, and directives
+- **Go to Definition** - Navigate to AngularJS component definitions
+- **Find References** - Find all usages of AngularJS components
+- **Hover Information** - Documentation and type information on hover
+- **Signature Help** - Parameter hints for function calls
+- **Rename Symbol** - Safely rename AngularJS components across files
+- **Document Symbols** - Outline view for AngularJS components
+- **Code Lens** - Reference counts and controller-template bindings
 
-## Requirements
+## Supported AngularJS Components
 
-- AngularJS 1.x project
-- The `angularjs-lsp` server binary (build from source)
+- Controllers (including `controller as` syntax)
+- Services
+- Factories
+- Directives
+- Components
+- $scope properties and methods
 
 ## Installation
 
-1. Install the extension (from VSIX or Extension Development Host)
-2. Build the `angularjs-lsp` server binary:
-   ```bash
-   cd /path/to/angularjs-lsp
-   cargo build --release
-   ```
-3. Configure the server path in VS Code settings
+The extension automatically downloads and manages the language server binary. No manual setup required!
+
+On first activation:
+1. **angularjs-lsp** binary is downloaded from GitHub releases
+2. **typescript-language-server** is installed via npm (for JavaScript fallback)
 
 ## Configuration
 
-Configure the path to the LSP server binary in your VS Code settings:
+### `angularjsLsp.serverPath`
 
-```json
-{
-  "angularjsLsp.serverPath": "/path/to/angularjs-lsp/target/release/angularjs-lsp"
-}
-```
+Path to the angularjs-lsp server executable. If empty (default), the extension automatically downloads and manages the server binary.
 
-### Settings
+### `angularjsLsp.trace.server`
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `angularjsLsp.serverPath` | string | `""` | Path to the angularjs-lsp server executable |
-| `angularjsLsp.trace.server` | string | `"off"` | Traces communication between VS Code and the server |
+Traces the communication between VS Code and the AngularJS language server.
+- `off` (default)
+- `messages`
+- `verbose`
 
 ## Project Configuration
 
@@ -59,8 +58,22 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 
 ## Commands
 
-- `AngularJS: Restart Language Server` - Restart the language server
+- **AngularJS: Restart Language Server** - Restart the language server
+
+## Updates
+
+The extension automatically checks for new versions of angularjs-lsp and prompts you to update when a new release is available.
+
+## Requirements
+
+- VS Code 1.75.0 or higher
+- Node.js (for typescript-language-server fallback)
 
 ## License
 
 MIT
+
+## Links
+
+- [GitHub Repository](https://github.com/mochi33/angularjs-lsp)
+- [Report Issues](https://github.com/mochi33/angularjs-lsp/issues)

@@ -27,7 +27,22 @@ interface LspLocation {
 // GitHub release info
 const GITHUB_OWNER = 'mochi33';
 const GITHUB_REPO = 'angularjs-lsp';
-const LSP_VERSION = '0.1.0';
+const CURRENT_VERSION = '0.1.4';
+
+// State keys
+const STATE_INSTALLED_VERSION = 'angularjsLsp.installedVersion';
+const STATE_LAST_UPDATE_CHECK = 'angularjsLsp.lastUpdateCheck';
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+interface GitHubRelease {
+    tag_name: string;
+    name: string;
+    html_url: string;
+    assets: Array<{
+        name: string;
+        browser_download_url: string;
+    }>;
+}
 
 export async function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('AngularJS LSP');
@@ -49,10 +64,24 @@ export async function activate(context: vscode.ExtensionContext) {
     );
     context.subscriptions.push(restartDisposable);
 
-    // Ensure dependencies are installed
+    const installServerDisposable = vscode.commands.registerCommand(
+        'angularjs.installServer',
+        async () => {
+            await installServerCommand(context, outputChannel);
+        }
+    );
+    context.subscriptions.push(installServerDisposable);
+
+    // Ensure dependencies are installed (non-blocking for dialogs)
     await ensureDependencies(context, outputChannel);
 
+    // Start server first, then check for updates in background
     await startServer(context, outputChannel);
+
+    // Check for updates (non-blocking)
+    checkForUpdates(context, outputChannel).catch((err) => {
+        outputChannel.appendLine(`Update check failed: ${err}`);
+    });
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(async (e) => {
@@ -77,11 +106,13 @@ async function ensureDependencies(
     context: vscode.ExtensionContext,
     outputChannel: vscode.OutputChannel
 ): Promise<void> {
-    // Check and install typescript-language-server
-    await ensureTypescriptLanguageServer(outputChannel);
-
-    // Check and install angularjs-lsp
+    // Check and install angularjs-lsp (required)
     await ensureAngularJsLsp(context, outputChannel);
+
+    // Check typescript-language-server in background (optional, for fallback)
+    ensureTypescriptLanguageServer(outputChannel).catch((err) => {
+        outputChannel.appendLine(`typescript-language-server check failed: ${err}`);
+    });
 }
 
 /**
@@ -206,10 +237,22 @@ async function downloadAngularJsLsp(
     // Create bin directory
     await fs.promises.mkdir(binDir, { recursive: true });
 
-    const assetName = getAssetName();
-    const downloadUrl = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/v${LSP_VERSION}/${assetName}`;
+    // Fetch latest release from GitHub API
+    const latestRelease = await fetchLatestRelease();
+    if (!latestRelease) {
+        throw new Error('Could not fetch latest release from GitHub');
+    }
 
-    outputChannel.appendLine(`Downloading angularjs-lsp from: ${downloadUrl}`);
+    const assetName = getAssetName();
+    const asset = latestRelease.assets.find((a) => a.name === assetName);
+    if (!asset) {
+        throw new Error(`No binary available for your platform (${assetName})`);
+    }
+
+    const downloadUrl = asset.browser_download_url;
+    const version = latestRelease.tag_name.replace(/^v/, '');
+
+    outputChannel.appendLine(`Downloading angularjs-lsp v${version} from: ${downloadUrl}`);
 
     await vscode.window.withProgress(
         {
@@ -229,8 +272,11 @@ async function downloadAngularJsLsp(
         }
     );
 
-    outputChannel.appendLine(`angularjs-lsp downloaded to: ${localServerPath}`);
-    vscode.window.showInformationMessage('angularjs-lsp downloaded successfully');
+    // Save installed version
+    await context.globalState.update(STATE_INSTALLED_VERSION, version);
+
+    outputChannel.appendLine(`angularjs-lsp v${version} downloaded to: ${localServerPath}`);
+    vscode.window.showInformationMessage(`angularjs-lsp v${version} downloaded successfully`);
 }
 
 /**
@@ -501,4 +547,241 @@ async function openSingleLocation(location: LspLocation): Promise<void> {
 
 export async function deactivate(): Promise<void> {
     await stopServer();
+}
+
+/**
+ * Check for updates from GitHub releases
+ */
+async function checkForUpdates(
+    context: vscode.ExtensionContext,
+    outputChannel: vscode.OutputChannel
+): Promise<void> {
+    // Check if enough time has passed since last check
+    const lastCheck = context.globalState.get<number>(STATE_LAST_UPDATE_CHECK) || 0;
+    const now = Date.now();
+
+    if (now - lastCheck < UPDATE_CHECK_INTERVAL_MS) {
+        outputChannel.appendLine('Skipping update check (checked recently)');
+        return;
+    }
+
+    outputChannel.appendLine('Checking for angularjs-lsp updates...');
+
+    try {
+        const latestRelease = await fetchLatestRelease();
+        if (!latestRelease) {
+            outputChannel.appendLine('Could not fetch latest release info');
+            return;
+        }
+
+        // Update last check time
+        await context.globalState.update(STATE_LAST_UPDATE_CHECK, now);
+
+        const latestVersion = latestRelease.tag_name.replace(/^v/, '');
+        const installedVersion = context.globalState.get<string>(STATE_INSTALLED_VERSION) || CURRENT_VERSION;
+
+        outputChannel.appendLine(`Installed version: ${installedVersion}, Latest version: ${latestVersion}`);
+
+        if (compareVersions(latestVersion, installedVersion) > 0) {
+            // New version available
+            const result = await vscode.window.showInformationMessage(
+                `A new version of angularjs-lsp is available: v${latestVersion} (current: v${installedVersion})`,
+                'Update Now',
+                'View Release',
+                'Later'
+            );
+
+            if (result === 'Update Now') {
+                await performUpdate(context, outputChannel, latestRelease, latestVersion);
+            } else if (result === 'View Release') {
+                vscode.env.openExternal(vscode.Uri.parse(latestRelease.html_url));
+            }
+        } else {
+            outputChannel.appendLine('angularjs-lsp is up to date');
+        }
+    } catch (error) {
+        outputChannel.appendLine(`Update check error: ${error}`);
+    }
+}
+
+/**
+ * Fetch the latest release from GitHub API
+ */
+async function fetchLatestRelease(): Promise<GitHubRelease | null> {
+    return new Promise((resolve) => {
+        const options = {
+            hostname: 'api.github.com',
+            path: `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
+            headers: {
+                'User-Agent': 'VSCode-AngularJS-LSP',
+                'Accept': 'application/vnd.github.v3+json',
+            },
+        };
+
+        https.get(options, (response) => {
+            if (response.statusCode === 404) {
+                // No releases yet
+                resolve(null);
+                return;
+            }
+
+            if (response.statusCode !== 200) {
+                resolve(null);
+                return;
+            }
+
+            let data = '';
+            response.on('data', (chunk) => {
+                data += chunk;
+            });
+
+            response.on('end', () => {
+                try {
+                    const release = JSON.parse(data) as GitHubRelease;
+                    resolve(release);
+                } catch {
+                    resolve(null);
+                }
+            });
+        }).on('error', () => {
+            resolve(null);
+        });
+    });
+}
+
+/**
+ * Compare two semantic versions
+ * Returns: positive if v1 > v2, negative if v1 < v2, 0 if equal
+ */
+function compareVersions(v1: string, v2: string): number {
+    const parts1 = v1.split('.').map(Number);
+    const parts2 = v2.split('.').map(Number);
+
+    for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+        const p1 = parts1[i] || 0;
+        const p2 = parts2[i] || 0;
+        if (p1 !== p2) {
+            return p1 - p2;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Perform the update
+ */
+async function performUpdate(
+    context: vscode.ExtensionContext,
+    outputChannel: vscode.OutputChannel,
+    release: GitHubRelease,
+    version: string
+): Promise<void> {
+    const binDir = path.join(context.globalStorageUri.fsPath, 'bin');
+    const executableName = getExecutableName();
+    const localServerPath = path.join(binDir, executableName);
+
+    // Find the correct asset for this platform
+    const assetName = getAssetName();
+    const asset = release.assets.find((a) => a.name === assetName);
+
+    if (!asset) {
+        vscode.window.showErrorMessage(
+            `No binary available for your platform (${assetName}). Please download manually.`
+        );
+        return;
+    }
+
+    outputChannel.appendLine(`Updating angularjs-lsp to v${version}...`);
+
+    try {
+        // Stop the current server
+        await stopServer();
+
+        // Create bin directory if needed
+        await fs.promises.mkdir(binDir, { recursive: true });
+
+        // Download new version
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: `Updating angularjs-lsp to v${version}...`,
+                cancellable: false,
+            },
+            async (progress) => {
+                await downloadFile(asset.browser_download_url, localServerPath, (percent) => {
+                    progress.report({ message: `${percent}%` });
+                });
+
+                // Make executable on Unix-like systems
+                if (process.platform !== 'win32') {
+                    await fs.promises.chmod(localServerPath, 0o755);
+                }
+            }
+        );
+
+        // Update stored version
+        await context.globalState.update(STATE_INSTALLED_VERSION, version);
+
+        // Update config if needed
+        const config = vscode.workspace.getConfiguration('angularjsLsp');
+        await config.update('serverPath', localServerPath, vscode.ConfigurationTarget.Global);
+
+        outputChannel.appendLine(`angularjs-lsp updated to v${version}`);
+
+        // Offer to restart
+        const result = await vscode.window.showInformationMessage(
+            `angularjs-lsp has been updated to v${version}. Restart the language server?`,
+            'Restart',
+            'Later'
+        );
+
+        if (result === 'Restart') {
+            await startServer(context, outputChannel);
+        }
+    } catch (error) {
+        outputChannel.appendLine(`Update failed: ${error}`);
+        vscode.window.showErrorMessage(`Failed to update angularjs-lsp: ${error}`);
+    }
+}
+
+/**
+ * Command to manually install/update angularjs-lsp server
+ */
+async function installServerCommand(
+    context: vscode.ExtensionContext,
+    outputChannel: vscode.OutputChannel
+): Promise<void> {
+    outputChannel.show();
+    outputChannel.appendLine('Installing angularjs-lsp server...');
+
+    try {
+        // Stop current server if running
+        await stopServer();
+
+        // Download latest version
+        await downloadAngularJsLsp(context, outputChannel);
+
+        // Update config
+        const binDir = path.join(context.globalStorageUri.fsPath, 'bin');
+        const executableName = getExecutableName();
+        const localServerPath = path.join(binDir, executableName);
+
+        const config = vscode.workspace.getConfiguration('angularjsLsp');
+        await config.update('serverPath', localServerPath, vscode.ConfigurationTarget.Global);
+
+        // Restart server
+        const result = await vscode.window.showInformationMessage(
+            'angularjs-lsp installed successfully. Start the language server?',
+            'Start',
+            'Later'
+        );
+
+        if (result === 'Start') {
+            await startServer(context, outputChannel);
+        }
+    } catch (error) {
+        outputChannel.appendLine(`Installation failed: ${error}`);
+        vscode.window.showErrorMessage(`Failed to install angularjs-lsp: ${error}`);
+    }
 }
