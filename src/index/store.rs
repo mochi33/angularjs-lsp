@@ -1,4 +1,4 @@
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tower_lsp::lsp_types::Url;
 use tracing::debug;
 
@@ -151,9 +151,10 @@ pub struct HtmlFormBinding {
     pub name: String,
     /// 定義元のURI
     pub uri: Url,
-    /// スコープの開始行（form要素の開始）
+    /// スコープの開始行（ng-controllerスコープの開始、またはファイル先頭）
+    /// フォームはformタグの範囲ではなく、コントローラースコープ全体で参照可能
     pub scope_start_line: u32,
-    /// スコープの終了行（form要素の終了）
+    /// スコープの終了行（ng-controllerスコープの終了、またはファイル末尾）
     pub scope_end_line: u32,
     /// name属性値の位置（正確な位置）
     pub name_start_line: u32,
@@ -200,6 +201,10 @@ pub struct SymbolIndex {
     html_local_variable_references: DashMap<String, Vec<HtmlLocalVariableReference>>,
     /// HTML内のフォームバインディング（URI -> Vec<HtmlFormBinding>）
     html_form_bindings: DashMap<Url, Vec<HtmlFormBinding>>,
+    /// 再解析が必要なHTMLファイル（ng-include登録時に子HTMLが既に解析済みだった場合）
+    pending_reanalysis: DashSet<Url>,
+    /// 解析済みのHTMLファイルのURI（再解析判定用）
+    analyzed_html_files: DashSet<Url>,
 }
 
 impl SymbolIndex {
@@ -216,6 +221,8 @@ impl SymbolIndex {
             html_local_variables: DashMap::new(),
             html_local_variable_references: DashMap::new(),
             html_form_bindings: DashMap::new(),
+            pending_reanalysis: DashSet::new(),
+            analyzed_html_files: DashSet::new(),
         }
     }
 
@@ -498,6 +505,36 @@ impl SymbolIndex {
         self.clear_document(uri);
     }
 
+    /// HTML参照情報のみをクリア（Pass 3で収集する情報）
+    /// ng-controllerスコープ、ng-includeバインディング、フォームバインディングは保持
+    pub fn clear_html_references(&self, uri: &Url) {
+        // $scope参照をクリア
+        self.html_scope_references.remove(uri);
+        // ローカル変数定義をクリア
+        self.html_local_variables.remove(uri);
+        // このURIのローカル変数参照をクリア
+        for mut entry in self.html_local_variable_references.iter_mut() {
+            entry.value_mut().retain(|r| &r.uri != uri);
+        }
+    }
+
+    /// 再解析が必要なURIを取得してキューをクリア
+    pub fn take_pending_reanalysis(&self) -> Vec<Url> {
+        let uris: Vec<Url> = self.pending_reanalysis.iter().map(|r| r.clone()).collect();
+        self.pending_reanalysis.clear();
+        uris
+    }
+
+    /// 指定URIを再解析キューから削除（自分自身の再解析を防ぐ）
+    pub fn remove_from_pending_reanalysis(&self, uri: &Url) {
+        self.pending_reanalysis.remove(uri);
+    }
+
+    /// HTMLファイルを解析済みとしてマーク
+    pub fn mark_html_analyzed(&self, uri: &Url) {
+        self.analyzed_html_files.insert(uri.clone());
+    }
+
     // ========== テンプレートバインディング関連 ==========
 
     /// テンプレートバインディングを追加
@@ -516,7 +553,8 @@ impl SymbolIndex {
 
         // このテンプレートが親として持っているng-include bindingの継承情報を更新
         // （$uibModalでバインドされたコントローラーをng-includeの子に伝播）
-        self.propagate_inheritance_to_children(&normalized_path, &[controller_name]);
+        // テンプレートバインディングはローカル変数やフォームバインディングを持たないので空
+        self.propagate_inheritance_to_children(&normalized_path, &[controller_name], &[], &[]);
     }
 
     /// テンプレートパスを正規化（クエリパラメータを除去、`../`を除去）
@@ -562,6 +600,39 @@ impl SymbolIndex {
         None
     }
 
+    /// URIからテンプレートバインディングのソース情報を取得
+    /// 返り値: (コントローラー名, ソースタイプ, コントローラー定義のURI, 定義行)
+    pub fn get_template_binding_source(&self, uri: &Url) -> Option<(String, BindingSource, Url, u32)> {
+        let path = uri.path();
+        let filename = path.rsplit('/').next()?;
+
+        // テンプレートバインディングを検索
+        let binding = {
+            // 方法1: 正規化パスでマッチング
+            let mut found = None;
+            for entry in self.template_bindings.iter() {
+                let normalized_path = entry.key();
+                if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
+                    found = Some(entry.value().clone());
+                    break;
+                }
+            }
+            // 方法2: ファイル名のみでマッチング
+            if found.is_none() {
+                found = self.template_bindings.get(filename).map(|b| b.clone());
+            }
+            found
+        }?;
+
+        // コントローラー定義からURIを取得
+        let definitions = self.get_definitions(&binding.controller_name);
+        if let Some(def) = definitions.first() {
+            Some((binding.controller_name, binding.source, def.uri.clone(), def.start_line))
+        } else {
+            None
+        }
+    }
+
     /// コントローラー名からバインドされているHTMLテンプレートのパスを取得
     pub fn get_templates_for_controller(&self, controller_name: &str) -> Vec<String> {
         let mut templates = Vec::new();
@@ -595,23 +666,66 @@ impl SymbolIndex {
     /// 子ファイルが親として持っているng-include bindingの継承情報も更新する
     pub fn add_ng_include_binding(&self, binding: NgIncludeBinding) {
         let normalized_path = Self::normalize_template_path(&binding.template_path);
+        let resolved_filename = binding.resolved_filename.clone();
         let inherited_controllers = binding.inherited_controllers.clone();
+        let inherited_local_variables = binding.inherited_local_variables.clone();
+        let inherited_form_bindings = binding.inherited_form_bindings.clone();
 
         debug!(
             "add_ng_include_binding: {} (resolved: {}) -> {:?}",
-            normalized_path, binding.resolved_filename, inherited_controllers
+            normalized_path, resolved_filename, inherited_controllers
         );
         self.ng_include_bindings.insert(normalized_path.clone(), binding);
 
+        // 子HTMLが既に解析済みかチェックし、解析済みなら再解析キューに追加
+        // これにより、親のフォームバインディングが子HTMLで参照可能になる
+        self.queue_child_for_reanalysis(&resolved_filename, &normalized_path);
+
         // 子ファイル（normalized_path）が親として登録しているng-include bindingがあれば、
         // その継承情報を更新する（継承チェーンの伝播）
-        self.propagate_inheritance_to_children(&normalized_path, &inherited_controllers);
+        self.propagate_inheritance_to_children(
+            &normalized_path,
+            &inherited_controllers,
+            &inherited_local_variables,
+            &inherited_form_bindings,
+        );
+    }
+
+    /// 子HTMLが解析済みなら再解析キューに追加
+    fn queue_child_for_reanalysis(&self, resolved_filename: &str, normalized_path: &str) {
+        // 解析済みHTMLファイルを走査して、ファイル名が一致するものを探す
+        for uri in self.analyzed_html_files.iter() {
+            let uri_path = uri.path();
+            // ファイル名またはパスが一致するかチェック
+            if uri_path.ends_with(&format!("/{}", resolved_filename))
+                || uri_path.ends_with(&format!("/{}", normalized_path))
+                || uri_path == format!("/{}", resolved_filename)
+                || uri_path == format!("/{}", normalized_path)
+            {
+                debug!(
+                    "queue_child_for_reanalysis: {} needs reanalysis (matched by {})",
+                    uri.key(), normalized_path
+                );
+                self.pending_reanalysis.insert(uri.clone());
+            }
+        }
     }
 
     /// 継承情報を子ファイルのng-include bindingに伝播させる
-    fn propagate_inheritance_to_children(&self, child_path: &str, parent_controllers: &[String]) {
+    fn propagate_inheritance_to_children(
+        &self,
+        child_path: &str,
+        parent_controllers: &[String],
+        parent_local_variables: &[InheritedLocalVariable],
+        parent_form_bindings: &[InheritedFormBinding],
+    ) {
         // child_pathをparent_uriとして持つng-include bindingを探す
-        let mut updates: Vec<(String, Vec<String>)> = Vec::new();
+        let mut updates: Vec<(
+            String,
+            Vec<String>,
+            Vec<InheritedLocalVariable>,
+            Vec<InheritedFormBinding>,
+        )> = Vec::new();
 
         for entry in self.ng_include_bindings.iter() {
             let binding = entry.value();
@@ -620,31 +734,65 @@ impl SymbolIndex {
             if parent_uri_path.ends_with(&format!("/{}", child_path)) ||
                parent_uri_path.ends_with(child_path) {
                 // 継承情報を更新（親のコントローラー + 現在のコントローラー）
-                let mut new_inherited = parent_controllers.to_vec();
-                // 現在のバインディングが持っているコントローラーを追加（重複除去）
+                let mut new_controllers = parent_controllers.to_vec();
                 for ctrl in &binding.inherited_controllers {
-                    if !new_inherited.contains(ctrl) {
-                        new_inherited.push(ctrl.clone());
+                    if !new_controllers.contains(ctrl) {
+                        new_controllers.push(ctrl.clone());
                     }
                 }
-                // 既に同じ場合は更新不要
-                if new_inherited != binding.inherited_controllers {
-                    updates.push((entry.key().clone(), new_inherited));
+
+                // ローカル変数を更新（親のローカル変数 + 現在のローカル変数）
+                let mut new_local_variables = parent_local_variables.to_vec();
+                for var in &binding.inherited_local_variables {
+                    if !new_local_variables.iter().any(|v| v.name == var.name) {
+                        new_local_variables.push(var.clone());
+                    }
+                }
+
+                // フォームバインディングを更新（親のフォームバインディング + 現在のフォームバインディング）
+                let mut new_form_bindings = parent_form_bindings.to_vec();
+                for form in &binding.inherited_form_bindings {
+                    if !new_form_bindings.iter().any(|f| f.name == form.name) {
+                        new_form_bindings.push(form.clone());
+                    }
+                }
+
+                // いずれかが更新された場合のみ追加
+                let controllers_changed = new_controllers != binding.inherited_controllers;
+                let local_vars_changed = new_local_variables.len() != binding.inherited_local_variables.len()
+                    || !new_local_variables.iter().all(|v| binding.inherited_local_variables.iter().any(|bv| bv.name == v.name));
+                let forms_changed = new_form_bindings.len() != binding.inherited_form_bindings.len()
+                    || !new_form_bindings.iter().all(|f| binding.inherited_form_bindings.iter().any(|bf| bf.name == f.name));
+
+                if controllers_changed || local_vars_changed || forms_changed {
+                    updates.push((
+                        entry.key().clone(),
+                        new_controllers,
+                        new_local_variables,
+                        new_form_bindings,
+                    ));
                 }
             }
         }
 
         // 更新を適用
-        for (key, new_inherited) in updates {
+        for (key, new_controllers, new_local_variables, new_form_bindings) in updates {
             if let Some(mut binding) = self.ng_include_bindings.get_mut(&key) {
                 debug!(
-                    "propagate_inheritance: {} -> {:?}",
-                    key, new_inherited
+                    "propagate_inheritance: {} -> controllers: {:?}, local_vars: {}, forms: {}",
+                    key, new_controllers, new_local_variables.len(), new_form_bindings.len()
                 );
-                binding.inherited_controllers = new_inherited.clone();
+                binding.inherited_controllers = new_controllers.clone();
+                binding.inherited_local_variables = new_local_variables.clone();
+                binding.inherited_form_bindings = new_form_bindings.clone();
             }
             // さらに子への伝播（再帰）
-            self.propagate_inheritance_to_children(&key, &new_inherited);
+            self.propagate_inheritance_to_children(
+                &key,
+                &new_controllers,
+                &new_local_variables,
+                &new_form_bindings,
+            );
         }
     }
 
@@ -793,6 +941,58 @@ impl SymbolIndex {
         for key in keys_to_remove {
             self.ng_include_bindings.remove(&key);
         }
+    }
+
+    /// 子ファイルをng-includeしている親ファイルのリストを取得
+    /// 返り値: (親ファイルのURI, ng-includeがある行番号)のリスト
+    pub fn get_parent_templates_for_child(&self, uri: &Url) -> Vec<(Url, u32)> {
+        let path = uri.path();
+        let filename = match path.rsplit('/').next() {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+
+        let mut result = Vec::new();
+
+        for entry in self.ng_include_bindings.iter() {
+            let binding = entry.value();
+            let normalized_path = entry.key();
+
+            // マッチング方法1: URIのパスが正規化パスで終わる
+            let matches_normalized = path.ends_with(&format!("/{}", normalized_path))
+                || path == format!("/{}", normalized_path);
+
+            // マッチング方法2: ファイル名が一致
+            let matches_filename = normalized_path == filename;
+
+            // マッチング方法3: resolved_filenameが一致
+            let matches_resolved = binding.resolved_filename == filename;
+
+            if matches_normalized || matches_filename || matches_resolved {
+                result.push((binding.parent_uri.clone(), binding.line));
+            }
+        }
+
+        result
+    }
+
+    /// 親ファイル内のng-includeの一覧を取得
+    /// 返り値: (ng-includeがある行番号, テンプレートパス, 解決されたURI)のリスト
+    pub fn get_ng_includes_in_file(&self, uri: &Url) -> Vec<(u32, String, Option<Url>)> {
+        let mut result = Vec::new();
+
+        for entry in self.ng_include_bindings.iter() {
+            let binding = entry.value();
+            if &binding.parent_uri == uri {
+                let resolved_uri = self.resolve_template_uri(&binding.template_path);
+                result.push((binding.line, binding.template_path.clone(), resolved_uri));
+            }
+        }
+
+        // 行番号でソート
+        result.sort_by_key(|(line, _, _)| *line);
+
+        result
     }
 
     // ========== HTML解析関連 ==========

@@ -5,20 +5,34 @@ use rstest::{fixture, rstest};
 /// テスト用のアナライザーとインデックスのペア
 struct TestContext {
     analyzer: HtmlAngularJsAnalyzer,
+    js_analyzer: Arc<AngularJsAnalyzer>,
     index: Arc<SymbolIndex>,
+}
+
+impl TestContext {
+    /// HTMLドキュメントを解析（<script>タグ内のJSも解析）
+    fn analyze_document(&self, uri: &Url, html: &str) {
+        // まず<script>タグ内のJSを解析
+        let scripts = HtmlAngularJsAnalyzer::extract_scripts(html);
+        for script in scripts {
+            self.js_analyzer.analyze_embedded_script(uri, &script.source, script.line_offset);
+        }
+        // 次にHTML解析
+        self.analyzer.analyze_document(uri, html);
+    }
 }
 
 #[fixture]
 fn ctx() -> TestContext {
     let index = Arc::new(SymbolIndex::new());
     let js_analyzer = Arc::new(AngularJsAnalyzer::new(Arc::clone(&index)));
-    let analyzer = HtmlAngularJsAnalyzer::new(Arc::clone(&index), js_analyzer);
-    TestContext { analyzer, index }
+    let analyzer = HtmlAngularJsAnalyzer::new(Arc::clone(&index), Arc::clone(&js_analyzer));
+    TestContext { analyzer, js_analyzer, index }
 }
 
 #[rstest]
 fn test_ng_controller_scope_detection(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -35,7 +49,7 @@ fn test_ng_controller_scope_detection(ctx: TestContext) {
 
 #[rstest]
 fn test_nested_ng_controller(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -58,7 +72,7 @@ fn test_nested_ng_controller(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_model_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -75,9 +89,36 @@ fn test_ng_model_reference(ctx: TestContext) {
     assert_eq!(ref_opt.unwrap().property_path, "user");
 }
 
+/// 自己終了タグ（<input ... />）からのスコープ参照テスト
+#[rstest]
+fn test_self_closing_input_reference(ctx: TestContext) {
+    let TestContext { analyzer, index, .. } = ctx;
+    let uri = Url::parse("file:///test.html").unwrap();
+
+    // 自己終了形式（/>で終わる）
+    let html = r#"
+<div ng-controller="UserController">
+    <input ng-model="user.name" ng-class="{'error': isError()}" />
+</div>
+"#;
+
+    analyzer.analyze_document(&uri, html);
+
+    // ng-modelからスコープ参照が抽出されているか
+    let refs = index.html_scope_references_for_test(&uri).unwrap_or_default();
+    eprintln!("All refs: {:?}", refs.iter().map(|r| (&r.property_path, r.start_line, r.start_col)).collect::<Vec<_>>());
+
+    assert!(refs.iter().any(|r| r.property_path == "user"),
+        "ng-model reference in self-closing input should be found, got: {:?}",
+        refs.iter().map(|r| &r.property_path).collect::<Vec<_>>());
+    assert!(refs.iter().any(|r| r.property_path == "isError"),
+        "isError reference in self-closing input should be found, got: {:?}",
+        refs.iter().map(|r| &r.property_path).collect::<Vec<_>>());
+}
+
 #[rstest]
 fn test_ng_click_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -95,7 +136,7 @@ fn test_ng_click_reference(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_repeat_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -114,7 +155,7 @@ fn test_ng_repeat_reference(ctx: TestContext) {
 
 #[rstest]
 fn test_interpolation_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -132,7 +173,7 @@ fn test_interpolation_reference(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_if_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -149,7 +190,7 @@ fn test_ng_if_reference(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_show_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -166,7 +207,6 @@ fn test_ng_show_reference(ctx: TestContext) {
 
 #[rstest]
 fn test_script_tag_route_binding(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -179,10 +219,10 @@ angular.module('app').config(function($routeProvider) {
 });
 </script>
 "#;
-    analyzer.analyze_document(&uri, html);
+    ctx.analyze_document(&uri, html);
 
     // テンプレートバインディングが抽出されているか
-    let controller = index.get_controller_for_template(
+    let controller = ctx.index.get_controller_for_template(
         &Url::parse("file:///views/users.html").unwrap()
     );
     assert_eq!(controller, Some("UserController".to_string()));
@@ -190,7 +230,6 @@ angular.module('app').config(function($routeProvider) {
 
 #[rstest]
 fn test_script_tag_modal_binding(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -201,10 +240,10 @@ $uibModal.open({
 });
 </script>
 "#;
-    analyzer.analyze_document(&uri, html);
+    ctx.analyze_document(&uri, html);
 
     // モーダルバインディングが抽出されているか
-    let controller = index.get_controller_for_template(
+    let controller = ctx.index.get_controller_for_template(
         &Url::parse("file:///views/modal.html").unwrap()
     );
     assert_eq!(controller, Some("ModalController".to_string()));
@@ -212,7 +251,7 @@ $uibModal.open({
 
 #[rstest]
 fn test_data_ng_controller(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -229,7 +268,7 @@ fn test_data_ng_controller(ctx: TestContext) {
 
 #[rstest]
 fn test_complex_expression(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -246,7 +285,7 @@ fn test_complex_expression(ctx: TestContext) {
 
 #[rstest]
 fn test_filter_expression(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -264,7 +303,7 @@ fn test_filter_expression(ctx: TestContext) {
 
 #[rstest]
 fn test_resolve_controller_for_html(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -281,7 +320,6 @@ fn test_resolve_controller_for_html(ctx: TestContext) {
 
 #[rstest]
 fn test_template_binding_resolution(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
     let uri = Url::parse("file:///app.html").unwrap();
 
     let html = r#"
@@ -292,17 +330,17 @@ $routeProvider.when('/profile', {
 });
 </script>
 "#;
-    analyzer.analyze_document(&uri, html);
+    ctx.analyze_document(&uri, html);
 
     // クエリパラメータ付きテンプレートパスが正しく解決されるか
     let template_uri = Url::parse("file:///views/profile.html").unwrap();
-    let controller = index.resolve_controller_for_html(&template_uri, 0);
+    let controller = ctx.index.resolve_controller_for_html(&template_uri, 0);
     assert_eq!(controller, Some("ProfileController".to_string()));
 }
 
 #[rstest]
 fn test_method_call_with_arguments(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -323,7 +361,7 @@ fn test_method_call_with_arguments(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_repeat_key_value(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -346,7 +384,7 @@ fn test_ng_repeat_key_value(ctx: TestContext) {
 
 #[rstest]
 fn test_nested_member_expression(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -366,7 +404,7 @@ fn test_nested_member_expression(ctx: TestContext) {
 
 #[rstest]
 fn test_ternary_expression(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -388,7 +426,7 @@ fn test_ternary_expression(ctx: TestContext) {
 
 #[rstest]
 fn test_custom_interpolate_symbols(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // カスタムinterpolate記号を設定
@@ -416,7 +454,7 @@ fn test_custom_interpolate_symbols(ctx: TestContext) {
 
 #[rstest]
 fn test_custom_interpolate_with_expressions(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // カスタムinterpolate記号を設定（ERBスタイルは避け、より一般的な記号を使用）
@@ -441,7 +479,7 @@ fn test_custom_interpolate_with_expressions(ctx: TestContext) {
 
 #[rstest]
 fn test_inline_interpolation_position(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // カスタムinterpolate記号を設定
@@ -480,7 +518,7 @@ fn test_inline_interpolation_position(ctx: TestContext) {
 
 #[rstest]
 fn test_inline_interpolation_with_japanese(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // カスタムinterpolate記号を設定
@@ -512,7 +550,7 @@ fn test_inline_interpolation_with_japanese(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_if_multiple_function_calls(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // ng-if内に複数の関数呼び出しがある場合のテスト
@@ -538,7 +576,7 @@ fn test_ng_if_multiple_function_calls(ctx: TestContext) {
 
 #[rstest]
 fn test_html_scope_reference_registered_as_symbol_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -563,7 +601,6 @@ fn test_html_scope_reference_registered_as_symbol_reference(ctx: TestContext) {
 
 #[rstest]
 fn test_html_scope_reference_with_template_binding(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
     let app_uri = Url::parse("file:///app.html").unwrap();
 
     // まずテンプレートバインディングを設定
@@ -575,7 +612,7 @@ $routeProvider.when('/users', {
 });
 </script>
 "#;
-    analyzer.analyze_document(&app_uri, app_html);
+    ctx.analyze_document(&app_uri, app_html);
 
     // テンプレートファイルを解析
     let template_uri = Url::parse("file:///views/users.html").unwrap();
@@ -584,17 +621,17 @@ $routeProvider.when('/users', {
     <span>{{userName}}</span>
 </div>
 "#;
-    analyzer.analyze_document(&template_uri, template_html);
+    ctx.analyze_document(&template_uri, template_html);
 
     // テンプレートバインディング経由でコントローラー名が解決されるか
-    let refs = index.get_all_references("UserController.$scope.userName");
+    let refs = ctx.index.get_all_references("UserController.$scope.userName");
     assert!(!refs.is_empty(), "userName should be found via template binding");
     assert_eq!(refs[0].uri, template_uri);
 }
 
 #[rstest]
 fn test_html_scope_reference_in_ng_if(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -614,7 +651,7 @@ fn test_html_scope_reference_in_ng_if(ctx: TestContext) {
 
 #[rstest]
 fn test_is_in_angular_context_ng_if(ctx: TestContext) {
-    let TestContext { analyzer, index: _index } = ctx;
+    let TestContext { analyzer, .. } = ctx;
 
     let html = r#"<div ng-controller="UserController">
     <span ng-if="isVisible">Content</span>
@@ -633,7 +670,7 @@ fn test_is_in_angular_context_ng_if(ctx: TestContext) {
 
 #[rstest]
 fn test_is_in_angular_context_interpolation(ctx: TestContext) {
-    let TestContext { analyzer, index: _index } = ctx;
+    let TestContext { analyzer, .. } = ctx;
 
     let html = r#"<div ng-controller="UserController">
     <span>{{message}}</span>
@@ -651,7 +688,7 @@ fn test_is_in_angular_context_interpolation(ctx: TestContext) {
 
 #[rstest]
 fn test_is_in_angular_context_ng_model(ctx: TestContext) {
-    let TestContext { analyzer, index: _index } = ctx;
+    let TestContext { analyzer, .. } = ctx;
 
     let html = r#"<input ng-model="userName">"#;
 
@@ -664,7 +701,7 @@ fn test_is_in_angular_context_ng_model(ctx: TestContext) {
 
 #[rstest]
 fn test_is_in_angular_context_ng_click(ctx: TestContext) {
-    let TestContext { analyzer, index: _index } = ctx;
+    let TestContext { analyzer, .. } = ctx;
 
     let html = r#"<button ng-click="save()">Save</button>"#;
 
@@ -674,7 +711,7 @@ fn test_is_in_angular_context_ng_click(ctx: TestContext) {
 
 #[rstest]
 fn test_is_in_angular_context_custom_interpolate(ctx: TestContext) {
-    let TestContext { analyzer, index: _index } = ctx;
+    let TestContext { analyzer, .. } = ctx;
 
     // カスタムinterpolate記号を設定
     analyzer.set_interpolate_config(crate::config::InterpolateConfig {
@@ -694,7 +731,7 @@ fn test_is_in_angular_context_custom_interpolate(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_include_attribute_detection(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///parent.html").unwrap();
 
     let html = r#"
@@ -716,7 +753,7 @@ fn test_ng_include_attribute_detection(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_include_element_detection(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///parent.html").unwrap();
 
     let html = r#"
@@ -735,7 +772,7 @@ fn test_ng_include_element_detection(ctx: TestContext) {
 
 #[rstest]
 fn test_child_html_multiple_controller_references(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let parent_uri = Url::parse("file:///parent.html").unwrap();
 
     // 親HTMLでng-includeを定義
@@ -767,7 +804,7 @@ fn test_child_html_multiple_controller_references(ctx: TestContext) {
 
 #[rstest]
 fn test_resolve_controllers_for_html_with_inheritance(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let parent_uri = Url::parse("file:///parent.html").unwrap();
 
     // 親HTMLでng-includeを定義
@@ -798,7 +835,7 @@ fn test_resolve_controllers_for_html_with_inheritance(ctx: TestContext) {
 
 #[rstest]
 fn test_data_ng_include_attribute(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///parent.html").unwrap();
 
     let html = r#"
@@ -817,7 +854,7 @@ fn test_data_ng_include_attribute(ctx: TestContext) {
 
 #[rstest]
 fn test_get_html_controllers_at_order(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -841,7 +878,7 @@ fn test_get_html_controllers_at_order(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_if_outside_controller_scope(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // ng-ifがaControllerの外側にある場合
@@ -865,7 +902,7 @@ fn test_ng_if_outside_controller_scope(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_include_with_dynamic_path(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///parent.html").unwrap();
 
     // 動的なパス（文字列連結）を含むng-include
@@ -885,7 +922,7 @@ fn test_ng_include_with_dynamic_path(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_include_with_query_param_and_version(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///parent.html").unwrap();
 
     // クエリパラメータ付きのパス
@@ -905,7 +942,7 @@ fn test_ng_include_with_query_param_and_version(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_include_with_relative_path(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     // 親ファイルが /app/views/main.html にある場合
     let uri = Url::parse("file:///app/views/main.html").unwrap();
 
@@ -928,7 +965,7 @@ fn test_ng_include_with_relative_path(ctx: TestContext) {
 
 #[rstest]
 fn test_ng_include_with_absolute_path(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///app/views/main.html").unwrap();
 
     // 絶対パス /static/templates/header.html
@@ -981,7 +1018,7 @@ fn test_resolve_relative_path_function(ctx: TestContext) {
 #[rstest]
 fn test_wf_custom_bracket_interpolation(ctx: TestContext) {
     // jbc-wf-container では [[ ]] をinterpolation記号として使用
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     analyzer.set_interpolate_config(crate::config::InterpolateConfig {
         start_symbol: "[[".to_string(),
         end_symbol: "]]".to_string(),
@@ -1004,7 +1041,7 @@ fn test_wf_custom_bracket_interpolation(ctx: TestContext) {
 #[rstest]
 fn test_wf_bracket_interpolation_with_translate_filter(ctx: TestContext) {
     // [[ 'テキスト' | translate ]] パターン - 文字列リテラルのみの場合
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     analyzer.set_interpolate_config(crate::config::InterpolateConfig {
         start_symbol: "[[".to_string(),
         end_symbol: "]]".to_string(),
@@ -1027,7 +1064,7 @@ fn test_wf_bracket_interpolation_with_translate_filter(ctx: TestContext) {
 #[rstest]
 fn test_wf_ng_repeat_tuple_unpacking(ctx: TestContext) {
     // ng-repeat="(i, item) in collection" パターン
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1058,7 +1095,7 @@ fn test_wf_ng_repeat_tuple_unpacking(ctx: TestContext) {
 #[rstest]
 fn test_wf_multiline_ng_if_condition(ctx: TestContext) {
     // 複数行にまたがるng-if条件
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1080,7 +1117,7 @@ fn test_wf_multiline_ng_if_condition(ctx: TestContext) {
 #[rstest]
 fn test_wf_dynamic_ng_include_path(ctx: TestContext) {
     // 動的なパスを含むng-include
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///app/views/main.html").unwrap();
 
     let html = r#"
@@ -1105,7 +1142,7 @@ fn test_wf_dynamic_ng_include_path(ctx: TestContext) {
 #[rstest]
 fn test_wf_ngf_directive_scope_references(ctx: TestContext) {
     // ngf-drop, ngf-select ディレクティブ（angular-file-upload）
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1133,7 +1170,7 @@ fn test_wf_ngf_directive_scope_references(ctx: TestContext) {
 #[rstest]
 fn test_wf_uib_tooltip_with_translate(ctx: TestContext) {
     // uib-tooltip内でのtranslateフィルター使用
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     analyzer.set_interpolate_config(crate::config::InterpolateConfig {
         start_symbol: "[[".to_string(),
         end_symbol: "]]".to_string(),
@@ -1162,7 +1199,7 @@ fn test_wf_uib_tooltip_with_translate(ctx: TestContext) {
 #[rstest]
 fn test_wf_ng_messages_form_validation(ctx: TestContext) {
     // ng-messages フォームバリデーション
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1183,20 +1220,26 @@ fn test_wf_ng_messages_form_validation(ctx: TestContext) {
     let refs = index.get_all_references("DialogController.$scope.allowanceCode");
     assert!(!refs.is_empty(), "ng-model should detect 'allowanceCode' as scope reference");
 
+    // フォームバインディングの確認
+    let form_binding = index.find_form_binding_definition(&uri, "dialog_form", 4);
+    assert!(form_binding.is_some(), "dialog_form should be found as form binding");
+
     // ng-messages内のdialog_form参照
-    // 注: ng-messagesは特殊なディレクティブで、formオブジェクトを参照する
-    let form_refs = index.get_all_references("DialogController.$scope.dialog_form");
-    // ng-messagesがサポートされていない場合はこのテストは失敗する可能性がある
-    if form_refs.is_empty() {
-        // TODO: ng-messages ディレクティブのサポートを検討
-        println!("Note: ng-messages directive form references are not currently detected");
-    }
+    // dialog_form.allowance_code の形式でHtmlScopeReferenceとして登録される
+    // （$errorはAngularの内部プロパティなのでスコープ参照としては登録されない）
+    let all_refs = index.html_scope_references_for_test(&uri).unwrap_or_default();
+    let form_ref = all_refs.iter().find(|r| r.property_path == "dialog_form.allowance_code");
+    assert!(form_ref.is_some(), "ng-messages should detect 'dialog_form.allowance_code' as scope reference");
+
+    // dialog_form 単体の参照も検出される（ベース名として）
+    let base_ref = all_refs.iter().find(|r| r.property_path == "dialog_form");
+    assert!(base_ref.is_some(), "dialog_form should be detected as base name reference");
 }
 
 #[rstest]
 fn test_wf_nested_ng_repeat_with_index(ctx: TestContext) {
     // ネストされたng-repeatとインデックス変数
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1229,7 +1272,7 @@ fn test_wf_nested_ng_repeat_with_index(ctx: TestContext) {
 #[rstest]
 fn test_wf_complex_ng_class_expression(ctx: TestContext) {
     // ng-classの複雑な式
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1257,7 +1300,7 @@ fn test_wf_complex_ng_class_expression(ctx: TestContext) {
 #[rstest]
 fn test_wf_ng_options_complex_expression(ctx: TestContext) {
     // ng-optionsの複雑な式
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1281,7 +1324,7 @@ fn test_wf_ng_options_complex_expression(ctx: TestContext) {
 #[rstest]
 fn test_wf_mouse_event_handlers(ctx: TestContext) {
     // マウスイベントハンドラー
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1313,7 +1356,7 @@ fn test_wf_mouse_event_handlers(ctx: TestContext) {
 fn test_ng_include_inheritance_chain_propagation(ctx: TestContext) {
     // 継承チェーンの伝播テスト
     // 子ファイルが先に解析されても、親が後で解析されたら継承情報が伝播される
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
 
     // 1. 孫ファイル（grandchild.html）を先に解析
     let grandchild_uri = Url::parse("file:///static/wf/views/grandchild.html").unwrap();
@@ -1358,7 +1401,7 @@ fn test_uibmodal_inheritance_propagation(ctx: TestContext) {
     // $uibModalでバインドされたコントローラーがng-includeの子に伝播されるテスト
     use crate::index::{BindingSource, TemplateBinding};
 
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
 
     // 1. 子ファイル（custom_text.html）を先に解析（ng-includeあり）
     let child_uri = Url::parse("file:///static/wf/views/form/custom_item/custom_text.html").unwrap();
@@ -1394,8 +1437,102 @@ fn test_uibmodal_inheritance_propagation(ctx: TestContext) {
 }
 
 #[rstest]
+fn test_form_binding_inheritance_via_ng_include(ctx: TestContext) {
+    // ng-include経由でフォームバインディングが継承されることをテスト
+    let TestContext { analyzer, index, .. } = ctx;
+
+    // 1. 親HTML（フォームを含み、子テンプレートをng-include）
+    let parent_uri = Url::parse("file:///parent.html").unwrap();
+    let parent_html = r#"
+<div ng-controller="ParentController">
+    <form name="myForm">
+        <div ng-include="'child.html'"></div>
+    </form>
+</div>
+"#;
+    analyzer.analyze_document(&parent_uri, parent_html);
+
+    // 2. 子HTML（親のフォームを参照）
+    let child_uri = Url::parse("file:///child.html").unwrap();
+    let child_html = r#"
+<div>
+    <input ng-model="inputValue">
+    <div ng-show="myForm.inputField.$invalid">Error</div>
+</div>
+"#;
+    analyzer.analyze_document(&child_uri, child_html);
+
+    // 子テンプレートで継承されたフォームバインディングを確認
+    let inherited_forms = index.get_inherited_form_bindings_for_template(&child_uri);
+    assert_eq!(inherited_forms.len(), 1, "Child should inherit myForm from parent");
+    assert_eq!(inherited_forms[0].name, "myForm");
+
+    // find_form_binding_definitionでも継承されたフォームが見つかる
+    let form_binding = index.find_form_binding_definition(&child_uri, "myForm", 3);
+    assert!(form_binding.is_some(), "myForm should be found in child template via inheritance");
+    assert_eq!(form_binding.unwrap().name, "myForm");
+
+    // 子テンプレート内のフォーム参照がHtmlScopeReferenceとして登録されているか確認
+    let child_refs = index.html_scope_references_for_test(&child_uri).unwrap_or_default();
+    let form_ref = child_refs.iter().find(|r| r.property_path == "myForm.inputField");
+    assert!(form_ref.is_some(), "myForm.inputField should be detected as scope reference in child template");
+}
+
+/// 子HTML→親HTMLの順で解析した場合のフォームバインディング継承テスト
+#[rstest]
+fn test_form_binding_inheritance_child_first(ctx: TestContext) {
+    let TestContext { analyzer, index, .. } = ctx;
+
+    // 1. 子HTML（親のフォームを参照）を先に解析
+    let child_uri = Url::parse("file:///child.html").unwrap();
+    let child_html = r#"
+<div>
+    <input ng-model="inputValue">
+    <div ng-show="myForm.inputField.$invalid">Error</div>
+</div>
+"#;
+    analyzer.analyze_document(&child_uri, child_html);
+
+    // この時点ではフォームバインディングは見つからない
+    let form_before = index.find_form_binding_definition(&child_uri, "myForm", 3);
+    eprintln!("form_before: {:?}", form_before);
+    assert!(form_before.is_none(), "myForm should NOT be found before parent is analyzed");
+
+    // 子テンプレート内のフォーム参照は登録されていない
+    let child_refs_before = index.html_scope_references_for_test(&child_uri).unwrap_or_default();
+    let form_ref_before = child_refs_before.iter().find(|r| r.property_path == "myForm.inputField");
+    eprintln!("form_ref_before: {:?}", form_ref_before);
+    assert!(form_ref_before.is_none(), "myForm.inputField should NOT be registered before parent is analyzed");
+
+    // 2. 親HTML（フォームを含み、子テンプレートをng-include）を解析
+    let parent_uri = Url::parse("file:///parent.html").unwrap();
+    let parent_html = r#"
+<div ng-controller="ParentController">
+    <form name="myForm">
+        <div ng-include="'child.html'"></div>
+    </form>
+</div>
+"#;
+    analyzer.analyze_document(&parent_uri, parent_html);
+
+    // 親解析後、継承されたフォームバインディングが見つかる
+    let inherited_forms = index.get_inherited_form_bindings_for_template(&child_uri);
+    eprintln!("inherited_forms after parent: {:?}", inherited_forms);
+    assert_eq!(inherited_forms.len(), 1, "Child should inherit myForm from parent");
+
+    // 3. 子HTMLを再解析
+    analyzer.analyze_document(&child_uri, child_html);
+
+    // 再解析後、フォーム参照が登録される
+    let child_refs_after = index.html_scope_references_for_test(&child_uri).unwrap_or_default();
+    let form_ref_after = child_refs_after.iter().find(|r| r.property_path == "myForm.inputField");
+    eprintln!("form_ref_after: {:?}", form_ref_after);
+    assert!(form_ref_after.is_some(), "myForm.inputField should be registered after reanalysis");
+}
+
+#[rstest]
 fn test_controller_as_alias_syntax(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // "controller as alias"構文を使用
@@ -1427,7 +1564,7 @@ fn test_controller_as_alias_syntax(ctx: TestContext) {
 
 #[rstest]
 fn test_controller_as_alias_without_alias(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // aliasなしの通常のコントローラー
@@ -1447,7 +1584,7 @@ fn test_controller_as_alias_without_alias(ctx: TestContext) {
 
 #[rstest]
 fn test_resolve_controller_by_alias(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1468,7 +1605,7 @@ fn test_resolve_controller_by_alias(ctx: TestContext) {
 
 #[rstest]
 fn test_nested_controller_as_alias(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // ネストされたcontroller as alias構文
@@ -1493,7 +1630,7 @@ fn test_nested_controller_as_alias(ctx: TestContext) {
 
 #[rstest]
 fn test_data_ng_controller_as_alias(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // data-ng-controller形式でのcontroller as alias構文
@@ -1521,7 +1658,7 @@ fn test_data_ng_controller_as_alias(ctx: TestContext) {
 /// controller as 構文で関数呼び出し形式（alias.method(args)）の参照が抽出されることを確認
 #[rstest]
 fn test_controller_as_alias_with_function_call(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1552,7 +1689,7 @@ fn test_controller_as_alias_with_function_call(ctx: TestContext) {
 /// HTMLからの定義ジャンプが動作することを確認
 #[rstest]
 fn test_controller_as_with_scope_pattern_definition_lookup(ctx: TestContext) {
-    let TestContext { analyzer: html_analyzer, index } = ctx;
+    let TestContext { analyzer: html_analyzer, index, .. } = ctx;
 
     // JSファイルでコントローラーを定義（$scope.xxx パターン）
     let js_source = r#"
@@ -1606,7 +1743,7 @@ angular.module('app')
 
 #[rstest]
 fn test_ng_class_complex_expression_with_subscript(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // 複雑なng-class式（subscript expressionを含む）
@@ -1665,7 +1802,7 @@ fn test_ng_class_complex_expression_with_subscript(ctx: TestContext) {
 #[rstest]
 fn test_ng_class_with_interpolate_inside(ctx: TestContext) {
     // ng-class属性値内にカスタムinterpolate記号がある場合
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // カスタムinterpolate記号を設定
@@ -1692,7 +1829,7 @@ fn test_ng_class_with_interpolate_inside(ctx: TestContext) {
 #[rstest]
 fn test_ng_class_vs_ng_if_position(ctx: TestContext) {
     // ng-classとng-ifで位置計算が正しいか比較
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -1747,7 +1884,7 @@ fn test_ng_class_vs_ng_if_position(ctx: TestContext) {
 #[rstest]
 fn test_ng_class_multiline_position(ctx: TestContext) {
     // マルチラインng-classの位置計算
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     // ユーザーの実際のケースに近いマルチラインng-class
@@ -1801,7 +1938,7 @@ fn test_ng_class_multiline_position(ctx: TestContext) {
 /// と定義されている場合、HTMLの `formCustomItem.onChangeText` からジャンプできるべき
 #[rstest]
 fn test_controller_as_with_this_method_pattern(ctx: TestContext) {
-    let TestContext { analyzer: html_analyzer, index } = ctx;
+    let TestContext { analyzer: html_analyzer, index, .. } = ctx;
 
     // JSファイルでコントローラーを定義（this.xxx パターン）
     let js_source = r#"
@@ -1867,7 +2004,7 @@ angular.module('app')
 /// と定義されている場合、HTMLの `formCustomItem.onChangeText` からジャンプできるべき
 #[rstest]
 fn test_controller_as_with_vm_alias_pattern(ctx: TestContext) {
-    let TestContext { analyzer: html_analyzer, index } = ctx;
+    let TestContext { analyzer: html_analyzer, index, .. } = ctx;
 
     // JSファイルでコントローラーを定義（const vm = this; パターン）
     let js_source = r#"
@@ -1934,7 +2071,7 @@ angular.module('app')
 /// 定義ジャンプができることを確認するテスト
 #[rstest]
 fn test_inherited_local_variable_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
 
     // 親テンプレート: ng-repeatで"sheet"を定義し、ng-includeで子テンプレートを読み込む
     let parent_html = r#"
@@ -1977,7 +2114,7 @@ fn test_inherited_local_variable_reference(ctx: TestContext) {
 /// 実際のユースケース: 複雑なパスでのng-include継承
 #[rstest]
 fn test_inherited_local_variable_with_complex_path(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
 
     // 親テンプレート: ng-repeatで"sheet"を定義し、ng-includeで子テンプレートを読み込む
     let parent_html = r#"
@@ -2022,7 +2159,7 @@ fn test_inherited_local_variable_with_complex_path(ctx: TestContext) {
 /// 実際のユースケース: request_expense_for_print_attachment_of_receipt.html
 #[rstest]
 fn test_inherited_local_variable_real_case(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
 
     // 親テンプレート（実際のファイルパスを使用）
     let parent_html = r#"<div style="width: 100%;" ng-repeat="sheet in req.request_expense.request_expense_specifics" ng-if="sheet.is_contained_attachment_of_receipt">
@@ -2078,7 +2215,7 @@ fn test_inherited_local_variable_real_case(ctx: TestContext) {
 /// 親テンプレートが解析されるまでは継承情報がないため、子テンプレートを再解析する必要がある
 #[rstest]
 fn test_inherited_local_variable_child_first(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
 
     // 子テンプレートを先に解析（この時点では継承情報がない）
     let child_html = r#"
@@ -2122,7 +2259,7 @@ fn test_inherited_local_variable_child_first(ctx: TestContext) {
 /// 親テンプレートの変数に対する参照検索で、子テンプレート内の参照も含まれることを確認
 #[rstest]
 fn test_inherited_local_variable_references_include_children(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
 
     // 親テンプレート
     let parent_html = r#"
@@ -2158,7 +2295,7 @@ fn test_inherited_local_variable_references_include_children(ctx: TestContext) {
 /// ng-include経由で継承されたローカル変数がスコープ参照から除外されることを確認
 #[rstest]
 fn test_inherited_local_variable_not_in_scope_reference(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
 
     // 親テンプレート
     let parent_html = r#"
@@ -2190,7 +2327,7 @@ fn test_inherited_local_variable_not_in_scope_reference(ctx: TestContext) {
 /// 非ディレクティブ属性内のインターポレーションからスコープ参照を抽出
 #[rstest]
 fn test_interpolation_in_non_directive_attribute(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -2210,7 +2347,7 @@ fn test_interpolation_in_non_directive_attribute(ctx: TestContext) {
 /// 非ディレクティブ属性内の複数インターポレーション
 #[rstest]
 fn test_multiple_interpolations_in_non_directive_attribute(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -2235,7 +2372,7 @@ fn test_multiple_interpolations_in_non_directive_attribute(ctx: TestContext) {
 /// 非ディレクティブ属性内のインターポレーションでローカル変数参照
 #[rstest]
 fn test_local_variable_in_non_directive_attribute_interpolation(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"
@@ -2261,7 +2398,7 @@ fn test_local_variable_in_non_directive_attribute_interpolation(ctx: TestContext
 /// 複数属性でのインターポレーション
 #[rstest]
 fn test_interpolation_in_multiple_attributes(ctx: TestContext) {
-    let TestContext { analyzer, index } = ctx;
+    let TestContext { analyzer, index, .. } = ctx;
     let uri = Url::parse("file:///test.html").unwrap();
 
     let html = r#"

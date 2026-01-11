@@ -524,15 +524,39 @@ impl ReferencesHandler {
             position.character,
         );
 
-        // スコープ参照が見つからない場合、継承されたローカル変数を探す
+        // スコープ参照が見つからない場合、継承されたローカル変数またはフォームバインディングを探す
         // (子テンプレートが親より先に解析された場合に発生)
         if html_ref.is_none() {
             if let Some(src) = source {
                 if let Some(identifier) = self.extract_identifier_at_position(src, position) {
                     debug!(
-                        "goto_definition_from_html: no scope ref, trying inherited local var '{}'",
+                        "goto_definition_from_html: no scope ref, trying inherited local var or form binding '{}'",
                         identifier
                     );
+
+                    // まず継承されたフォームバインディングをチェック
+                    let base_name = identifier.split('.').next().unwrap_or(&identifier);
+                    if let Some(form_binding) = self.index.find_form_binding_definition(
+                        uri,
+                        base_name,
+                        position.line,
+                    ) {
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: form_binding.uri.clone(),
+                            range: Range {
+                                start: Position {
+                                    line: form_binding.name_start_line,
+                                    character: form_binding.name_start_col,
+                                },
+                                end: Position {
+                                    line: form_binding.name_end_line,
+                                    character: form_binding.name_end_col,
+                                },
+                            },
+                        }));
+                    }
+
+                    // 次に継承されたローカル変数をチェック
                     if let Some(var_def) = self.index.find_local_variable_definition(
                         uri,
                         &identifier,

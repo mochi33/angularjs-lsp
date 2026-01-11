@@ -8,13 +8,24 @@ use crate::index::{
     InheritedLocalVariable, NgIncludeBinding, SymbolIndex,
 };
 
+use super::variable_parser::{is_valid_identifier, parse_ng_init_expression, parse_ng_repeat_expression};
 use super::HtmlAngularJsAnalyzer;
+
+/// コントローラースコープ情報（収集時に使用）
+#[derive(Clone, Debug)]
+pub(super) struct ControllerScopeInfo {
+    pub name: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
 
 /// ローカル変数スコープ情報（収集時に使用）
 #[derive(Clone, Debug)]
 struct LocalVariableScope {
     name: String,
     source: HtmlLocalVariableSource,
+    /// 定義元のURI（継承されたものは親のURI、現在のファイルのものは現在のURI）
+    uri: Url,
     scope_start_line: u32,
     scope_end_line: u32,
     name_start_line: u32,
@@ -27,53 +38,39 @@ struct LocalVariableScope {
 #[derive(Clone, Debug)]
 struct FormBindingScope {
     name: String,
+    /// 定義元のURI（継承されたものは親のURI、現在のファイルのものは現在のURI）
+    uri: Url,
     scope_start_line: u32,
     scope_end_line: u32,
     name_start_line: u32,
     name_start_col: u32,
     name_end_line: u32,
     name_end_col: u32,
+    /// このformが属するコントローラースタックの深さ
+    /// コントローラースコープ終了時にまとめてpopするために使用
+    controller_depth: usize,
 }
 
 impl HtmlAngularJsAnalyzer {
-    /// ng-controllerスコープとng-includeを収集
-    pub(super) fn collect_controller_scopes_and_includes(
+    /// ng-controllerスコープのみを収集（Pass 1用）
+    /// ng-includeバインディングは収集しない
+    pub(super) fn collect_controller_scopes_only_from_tree(
         &self,
         node: Node,
         source: &str,
         uri: &Url,
-        controller_stack: &mut Vec<String>,
     ) {
-        // ローカル変数スタックを追加
-        let mut local_var_stack: Vec<LocalVariableScope> = Vec::new();
-        // フォームバインディングスタックを追加
-        let mut form_binding_stack: Vec<FormBindingScope> = Vec::new();
-        self.collect_controller_scopes_and_includes_with_locals(
-            node,
-            source,
-            uri,
-            controller_stack,
-            &mut local_var_stack,
-            &mut form_binding_stack,
-        );
+        self.collect_controller_scopes_only_impl(node, source, uri);
     }
 
-    /// ng-controllerスコープ、ng-include、ローカル変数、フォームバインディングを収集
-    fn collect_controller_scopes_and_includes_with_locals(
+    /// ng-controllerスコープのみを収集（実装）
+    fn collect_controller_scopes_only_impl(
         &self,
         node: Node,
         source: &str,
         uri: &Url,
-        controller_stack: &mut Vec<String>,
-        local_var_stack: &mut Vec<LocalVariableScope>,
-        form_binding_stack: &mut Vec<FormBindingScope>,
     ) {
-        // 要素ノードの場合、ng-controller属性をチェック
         if node.kind() == "element" {
-            let mut added_controller = false;
-            let mut added_local_vars: Vec<String> = Vec::new();
-            let mut added_form_binding: Option<String> = None;
-
             let scope_start_line = node.start_position().row as u32;
             let scope_end_line = node.end_position().row as u32;
 
@@ -85,20 +82,116 @@ impl HtmlAngularJsAnalyzer {
                 {
                     // ng-controllerスコープを登録
                     let scope = HtmlControllerScope {
-                        controller_name: controller_name.clone(),
+                        controller_name,
                         alias,
                         uri: uri.clone(),
                         start_line: scope_start_line,
                         end_line: scope_end_line,
                     };
                     self.index.add_html_controller_scope(scope);
-                    controller_stack.push(controller_name);
+                }
+            }
+
+            // 子要素を再帰的に処理
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                self.collect_controller_scopes_only_impl(child, source, uri);
+            }
+        } else {
+            // 子ノードを再帰的に処理
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                self.collect_controller_scopes_only_impl(child, source, uri);
+            }
+        }
+    }
+
+    /// ng-includeバインディングを収集（Pass 1.5用）
+    /// 継承チェーンを考慮してコントローラー、ローカル変数、フォームバインディングを継承
+    pub(super) fn collect_ng_include_bindings_from_tree(
+        &self,
+        node: Node,
+        source: &str,
+        uri: &Url,
+        controller_stack: &mut Vec<ControllerScopeInfo>,
+    ) {
+        // 継承されたローカル変数を初期スタックに追加
+        let inherited_local_vars = self.index.get_inherited_local_variables_for_template(uri);
+        let mut local_var_stack: Vec<LocalVariableScope> = inherited_local_vars
+            .into_iter()
+            .map(|v| LocalVariableScope {
+                name: v.name,
+                source: v.source,
+                uri: v.uri, // 元の定義元URIを保持
+                scope_start_line: 0,
+                scope_end_line: u32::MAX,
+                name_start_line: v.name_start_line,
+                name_start_col: v.name_start_col,
+                name_end_line: v.name_end_line,
+                name_end_col: v.name_end_col,
+            })
+            .collect();
+
+        // 継承されたフォームバインディングを初期スタックに追加
+        let inherited_forms = self.index.get_inherited_form_bindings_for_template(uri);
+        let mut form_binding_stack: Vec<FormBindingScope> = inherited_forms
+            .into_iter()
+            .map(|f| FormBindingScope {
+                name: f.name,
+                uri: f.uri, // 元の定義元URIを保持
+                scope_start_line: 0,
+                scope_end_line: u32::MAX,
+                name_start_line: f.name_start_line,
+                name_start_col: f.name_start_col,
+                name_end_line: f.name_end_line,
+                name_end_col: f.name_end_col,
+                controller_depth: 0, // 継承されたものは最上位スコープ
+            })
+            .collect();
+
+        self.collect_ng_include_bindings_impl(
+            node,
+            source,
+            uri,
+            controller_stack,
+            &mut local_var_stack,
+            &mut form_binding_stack,
+        );
+    }
+
+    /// ng-includeバインディング収集の実装
+    fn collect_ng_include_bindings_impl(
+        &self,
+        node: Node,
+        source: &str,
+        uri: &Url,
+        controller_stack: &mut Vec<ControllerScopeInfo>,
+        local_var_stack: &mut Vec<LocalVariableScope>,
+        form_binding_stack: &mut Vec<FormBindingScope>,
+    ) {
+        if node.kind() == "element" {
+            let mut added_controller = false;
+            let mut added_local_vars: Vec<String> = Vec::new();
+
+            let scope_start_line = node.start_position().row as u32;
+            let scope_end_line = node.end_position().row as u32;
+
+            if let Some(start_tag) = self.find_child_by_kind(node, "start_tag") {
+                // ng-controllerをチェック（スタック管理用、登録は不要）
+                if let Some((controller_name, _alias)) =
+                    self.get_ng_controller_attribute(start_tag, source)
+                {
+                    controller_stack.push(ControllerScopeInfo {
+                        name: controller_name,
+                        start_line: scope_start_line,
+                        end_line: scope_end_line,
+                    });
                     added_controller = true;
                 }
 
                 // ng-repeatからローカル変数を抽出
                 if let Some(vars) =
-                    self.extract_local_vars_from_ng_repeat(start_tag, source, scope_start_line, scope_end_line)
+                    self.extract_local_vars_from_ng_repeat(start_tag, source, uri, scope_start_line, scope_end_line)
                 {
                     for var in vars {
                         added_local_vars.push(var.name.clone());
@@ -108,7 +201,7 @@ impl HtmlAngularJsAnalyzer {
 
                 // ng-initからローカル変数を抽出
                 if let Some(vars) =
-                    self.extract_local_vars_from_ng_init(start_tag, source, scope_start_line, scope_end_line)
+                    self.extract_local_vars_from_ng_init(start_tag, source, uri, scope_start_line, scope_end_line)
                 {
                     for var in vars {
                         added_local_vars.push(var.name.clone());
@@ -116,38 +209,34 @@ impl HtmlAngularJsAnalyzer {
                     }
                 }
 
-                // <form name="x">からフォームバインディングを抽出
-                if let Some(form_scope) =
-                    self.extract_form_name_from_tag(start_tag, source, scope_start_line, scope_end_line)
+                // <form name="x">からフォームバインディングを抽出（スタック管理用）
+                if let Some(mut form_scope) =
+                    self.extract_form_name_from_tag(start_tag, source, uri, scope_start_line, scope_end_line)
                 {
-                    // HtmlFormBindingとして登録
-                    let binding = HtmlFormBinding {
-                        name: form_scope.name.clone(),
-                        uri: uri.clone(),
-                        scope_start_line: form_scope.scope_start_line,
-                        scope_end_line: form_scope.scope_end_line,
-                        name_start_line: form_scope.name_start_line,
-                        name_start_col: form_scope.name_start_col,
-                        name_end_line: form_scope.name_end_line,
-                        name_end_col: form_scope.name_end_col,
-                    };
-                    self.index.add_html_form_binding(binding);
-                    added_form_binding = Some(form_scope.name.clone());
+                    let (ctrl_start, ctrl_end) = controller_stack
+                        .last()
+                        .map(|c| (c.start_line, c.end_line))
+                        .unwrap_or((0, u32::MAX));
+                    form_scope.scope_start_line = ctrl_start;
+                    form_scope.scope_end_line = ctrl_end;
+                    // formはコントローラースコープに属するため、コントローラースタックの深さを記録
+                    // コントローラースコープ終了時にまとめてpopする
+                    form_scope.controller_depth = controller_stack.len();
                     form_binding_stack.push(form_scope);
                 }
 
                 // ng-includeをチェック
                 if let Some(template_path) = self.get_ng_include_attribute(start_tag, source) {
-                    // 親ファイルを起点として相対パスを解決
                     let resolved_filename = SymbolIndex::resolve_relative_path(uri, &template_path);
 
-                    // 現在のローカル変数スタックをInheritedLocalVariableに変換
+                    // ローカル変数を継承情報に変換
+                    // 元の定義元URIを保持（継承チェーンを通じて伝播するため）
                     let inherited_local_variables: Vec<InheritedLocalVariable> = local_var_stack
                         .iter()
                         .map(|v| InheritedLocalVariable {
                             name: v.name.clone(),
                             source: v.source.clone(),
-                            uri: uri.clone(),
+                            uri: v.uri.clone(), // 元の定義元URIを保持
                             scope_start_line: v.scope_start_line,
                             scope_end_line: v.scope_end_line,
                             name_start_line: v.name_start_line,
@@ -157,12 +246,13 @@ impl HtmlAngularJsAnalyzer {
                         })
                         .collect();
 
-                    // 現在のフォームバインディングスタックをInheritedFormBindingに変換
+                    // フォームバインディングを継承情報に変換
+                    // 元の定義元URIを保持（継承チェーンを通じて伝播するため）
                     let inherited_form_bindings: Vec<InheritedFormBinding> = form_binding_stack
                         .iter()
                         .map(|f| InheritedFormBinding {
                             name: f.name.clone(),
-                            uri: uri.clone(),
+                            uri: f.uri.clone(), // 元の定義元URIを保持
                             scope_start_line: f.scope_start_line,
                             scope_end_line: f.scope_end_line,
                             name_start_line: f.name_start_line,
@@ -172,13 +262,16 @@ impl HtmlAngularJsAnalyzer {
                         })
                         .collect();
 
-                    // 現在のコントローラースタックをコピーして継承情報として登録
+                    // コントローラー名を収集
+                    let inherited_controller_names: Vec<String> =
+                        controller_stack.iter().map(|c| c.name.clone()).collect();
+
                     let binding = NgIncludeBinding {
                         parent_uri: uri.clone(),
                         template_path,
                         resolved_filename,
                         line: scope_start_line,
-                        inherited_controllers: controller_stack.clone(),
+                        inherited_controllers: inherited_controller_names,
                         inherited_local_variables,
                         inherited_form_bindings,
                     };
@@ -189,7 +282,7 @@ impl HtmlAngularJsAnalyzer {
             // 子要素を再帰的に処理
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                self.collect_controller_scopes_and_includes_with_locals(
+                self.collect_ng_include_bindings_impl(
                     child,
                     source,
                     uri,
@@ -199,29 +292,23 @@ impl HtmlAngularJsAnalyzer {
                 );
             }
 
-            // このノードで追加したコントローラーをスタックから削除
+            // スタックから削除
             if added_controller {
+                // コントローラースコープ終了時、このスコープに属するformバインディングをすべてpop
+                // formはコントローラースコープに登録されるため、DOM構造ではなくコントローラースコープに従う
+                let depth_after_pop = controller_stack.len() - 1;
+                form_binding_stack.retain(|f| f.controller_depth <= depth_after_pop);
                 controller_stack.pop();
             }
-
-            // このノードで追加したローカル変数をスタックから削除
             for var_name in added_local_vars {
                 if let Some(pos) = local_var_stack.iter().rposition(|v| v.name == var_name) {
                     local_var_stack.remove(pos);
                 }
             }
-
-            // このノードで追加したフォームバインディングをスタックから削除
-            if let Some(form_name) = added_form_binding {
-                if let Some(pos) = form_binding_stack.iter().rposition(|f| f.name == form_name) {
-                    form_binding_stack.remove(pos);
-                }
-            }
         } else {
-            // 子ノードを再帰的に処理
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                self.collect_controller_scopes_and_includes_with_locals(
+                self.collect_ng_include_bindings_impl(
                     child,
                     source,
                     uri,
@@ -238,6 +325,7 @@ impl HtmlAngularJsAnalyzer {
         &self,
         start_tag: Node,
         source: &str,
+        uri: &Url,
         scope_start_line: u32,
         scope_end_line: u32,
     ) -> Option<Vec<LocalVariableScope>> {
@@ -256,13 +344,27 @@ impl HtmlAngularJsAnalyzer {
                             let value_start_line = value_node.start_position().row as u32;
                             let value_start_col = value_node.start_position().column as u32 + 1;
 
-                            return Some(self.parse_ng_repeat_vars(
-                                value,
-                                value_start_line,
-                                value_start_col,
-                                scope_start_line,
-                                scope_end_line,
-                            ));
+                            // 共通パーサーを使用
+                            let parsed_vars = parse_ng_repeat_expression(value);
+                            let result: Vec<LocalVariableScope> = parsed_vars
+                                .into_iter()
+                                .map(|var| LocalVariableScope {
+                                    name: var.name,
+                                    source: var.source,
+                                    uri: uri.clone(),
+                                    scope_start_line,
+                                    scope_end_line,
+                                    name_start_line: value_start_line,
+                                    name_start_col: value_start_col + var.offset as u32,
+                                    name_end_line: value_start_line,
+                                    name_end_col: value_start_col + var.offset as u32 + var.len as u32,
+                                })
+                                .collect();
+
+                            if result.is_empty() {
+                                return None;
+                            }
+                            return Some(result);
                         }
                     }
                 }
@@ -271,77 +373,12 @@ impl HtmlAngularJsAnalyzer {
         None
     }
 
-    /// ng-repeat式から変数をパース
-    fn parse_ng_repeat_vars(
-        &self,
-        expr: &str,
-        value_start_line: u32,
-        value_start_col: u32,
-        scope_start_line: u32,
-        scope_end_line: u32,
-    ) -> Vec<LocalVariableScope> {
-        let mut result = Vec::new();
-
-        let Some(in_idx) = expr.find(" in ") else {
-            return result;
-        };
-
-        let iter_part = &expr[..in_idx];
-
-        if iter_part.trim().starts_with('(') {
-            // (key, value) 形式
-            if let Some(open_paren) = iter_part.find('(') {
-                if let Some(close_paren) = iter_part.find(')') {
-                    let inner = &iter_part[open_paren + 1..close_paren];
-                    let current_offset = open_paren + 1;
-
-                    for var in inner.split(',') {
-                        let var_trimmed = var.trim();
-                        if !var_trimmed.is_empty() {
-                            let var_offset_in_inner = var.as_ptr() as usize - inner.as_ptr() as usize;
-                            let leading_spaces = var.len() - var.trim_start().len();
-                            let offset = current_offset + var_offset_in_inner + leading_spaces;
-
-                            result.push(LocalVariableScope {
-                                name: var_trimmed.to_string(),
-                                source: HtmlLocalVariableSource::NgRepeatKeyValue,
-                                scope_start_line,
-                                scope_end_line,
-                                name_start_line: value_start_line,
-                                name_start_col: value_start_col + offset as u32,
-                                name_end_line: value_start_line,
-                                name_end_col: value_start_col + offset as u32 + var_trimmed.len() as u32,
-                            });
-                        }
-                    }
-                }
-            }
-        } else {
-            // item 形式
-            let trimmed = iter_part.trim();
-            if !trimmed.is_empty() {
-                let leading_spaces = iter_part.len() - iter_part.trim_start().len();
-                result.push(LocalVariableScope {
-                    name: trimmed.to_string(),
-                    source: HtmlLocalVariableSource::NgRepeatIterator,
-                    scope_start_line,
-                    scope_end_line,
-                    name_start_line: value_start_line,
-                    name_start_col: value_start_col + leading_spaces as u32,
-                    name_end_line: value_start_line,
-                    name_end_col: value_start_col + leading_spaces as u32 + trimmed.len() as u32,
-                });
-            }
-        }
-
-        result
-    }
-
     /// ng-initからローカル変数を抽出
     fn extract_local_vars_from_ng_init(
         &self,
         start_tag: Node,
         source: &str,
+        uri: &Url,
         scope_start_line: u32,
         scope_end_line: u32,
     ) -> Option<Vec<LocalVariableScope>> {
@@ -360,13 +397,27 @@ impl HtmlAngularJsAnalyzer {
                             let value_start_line = value_node.start_position().row as u32;
                             let value_start_col = value_node.start_position().column as u32 + 1;
 
-                            return Some(self.parse_ng_init_vars(
-                                value,
-                                value_start_line,
-                                value_start_col,
-                                scope_start_line,
-                                scope_end_line,
-                            ));
+                            // 共通パーサーを使用
+                            let parsed_vars = parse_ng_init_expression(value);
+                            let result: Vec<LocalVariableScope> = parsed_vars
+                                .into_iter()
+                                .map(|var| LocalVariableScope {
+                                    name: var.name,
+                                    source: var.source,
+                                    uri: uri.clone(),
+                                    scope_start_line,
+                                    scope_end_line,
+                                    name_start_line: value_start_line,
+                                    name_start_col: value_start_col + var.offset as u32,
+                                    name_end_line: value_start_line,
+                                    name_end_col: value_start_col + var.offset as u32 + var.len as u32,
+                                })
+                                .collect();
+
+                            if result.is_empty() {
+                                return None;
+                            }
+                            return Some(result);
                         }
                     }
                 }
@@ -375,66 +426,13 @@ impl HtmlAngularJsAnalyzer {
         None
     }
 
-    /// ng-init式から変数をパース
-    fn parse_ng_init_vars(
-        &self,
-        expr: &str,
-        value_start_line: u32,
-        value_start_col: u32,
-        scope_start_line: u32,
-        scope_end_line: u32,
-    ) -> Vec<LocalVariableScope> {
-        let mut result = Vec::new();
-        let mut pos = 0;
-
-        for statement in expr.split(';') {
-            if let Some(eq_idx) = statement.find('=') {
-                let before_eq = &statement[..eq_idx];
-                let after_eq_char = statement.chars().nth(eq_idx + 1);
-                if after_eq_char != Some('=') && !before_eq.ends_with('!') {
-                    let lhs = before_eq.trim();
-                    if !lhs.is_empty() && self.is_valid_identifier(lhs) {
-                        let leading_spaces = before_eq.len() - before_eq.trim_start().len();
-                        let offset = pos + leading_spaces;
-
-                        result.push(LocalVariableScope {
-                            name: lhs.to_string(),
-                            source: HtmlLocalVariableSource::NgInit,
-                            scope_start_line,
-                            scope_end_line,
-                            name_start_line: value_start_line,
-                            name_start_col: value_start_col + offset as u32,
-                            name_end_line: value_start_line,
-                            name_end_col: value_start_col + offset as u32 + lhs.len() as u32,
-                        });
-                    }
-                }
-            }
-            pos += statement.len() + 1;
-        }
-
-        result
-    }
-
-    /// 有効な識別子かどうかをチェック
-    pub(super) fn is_valid_identifier(&self, s: &str) -> bool {
-        let mut chars = s.chars();
-        if let Some(first) = chars.next() {
-            if !first.is_alphabetic() && first != '_' && first != '$' {
-                return false;
-            }
-            chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-        } else {
-            false
-        }
-    }
-
     /// <form name="x">からフォームバインディングを抽出
     /// 動的な name="{{...}}" はスキップする
     fn extract_form_name_from_tag(
         &self,
         start_tag: Node,
         source: &str,
+        uri: &Url,
         scope_start_line: u32,
         scope_end_line: u32,
     ) -> Option<FormBindingScope> {
@@ -468,7 +466,7 @@ impl HtmlAngularJsAnalyzer {
                             }
 
                             // 空でない有効な識別子のみ
-                            if value.is_empty() || !self.is_valid_identifier(value) {
+                            if value.is_empty() || !is_valid_identifier(value) {
                                 return None;
                             }
 
@@ -478,12 +476,14 @@ impl HtmlAngularJsAnalyzer {
 
                             return Some(FormBindingScope {
                                 name: value.to_string(),
+                                uri: uri.clone(),
                                 scope_start_line,
                                 scope_end_line,
                                 name_start_line: value_start_line,
                                 name_start_col: value_start_col,
                                 name_end_line: value_start_line,
                                 name_end_col: value_start_col + value.len() as u32,
+                                controller_depth: 0, // 呼び出し元で設定
                             });
                         }
                     }
@@ -587,5 +587,86 @@ impl HtmlAngularJsAnalyzer {
         }
 
         None
+    }
+
+    /// フォームバインディングのみを収集（Pass 1.5用）
+    /// ng-controllerスコープが確定した後に呼び出される
+    pub(super) fn collect_form_bindings_from_tree(
+        &self,
+        node: Node,
+        source: &str,
+        uri: &Url,
+        controller_stack: &mut Vec<ControllerScopeInfo>,
+    ) {
+        self.collect_form_bindings_recursive(node, source, uri, controller_stack);
+    }
+
+    /// フォームバインディング収集の再帰処理
+    fn collect_form_bindings_recursive(
+        &self,
+        node: Node,
+        source: &str,
+        uri: &Url,
+        controller_stack: &mut Vec<ControllerScopeInfo>,
+    ) {
+        if node.kind() == "element" {
+            let mut added_controller = false;
+            let scope_start_line = node.start_position().row as u32;
+            let scope_end_line = node.end_position().row as u32;
+
+            if let Some(start_tag) = self.find_child_by_kind(node, "start_tag") {
+                // ng-controllerをチェックしてスタックに追加
+                if let Some((controller_name, _alias)) =
+                    self.get_ng_controller_attribute(start_tag, source)
+                {
+                    controller_stack.push(ControllerScopeInfo {
+                        name: controller_name,
+                        start_line: scope_start_line,
+                        end_line: scope_end_line,
+                    });
+                    added_controller = true;
+                }
+
+                // <form name="x">からフォームバインディングを抽出
+                if let Some(form_scope) =
+                    self.extract_form_name_from_tag(start_tag, source, uri, scope_start_line, scope_end_line)
+                {
+                    // フォームはformタグの範囲ではなく、コントローラースコープ全体で参照可能
+                    let (ctrl_start, ctrl_end) = controller_stack
+                        .last()
+                        .map(|c| (c.start_line, c.end_line))
+                        .unwrap_or((0, u32::MAX));
+
+                    let binding = HtmlFormBinding {
+                        name: form_scope.name.clone(),
+                        uri: uri.clone(),
+                        scope_start_line: ctrl_start,
+                        scope_end_line: ctrl_end,
+                        name_start_line: form_scope.name_start_line,
+                        name_start_col: form_scope.name_start_col,
+                        name_end_line: form_scope.name_end_line,
+                        name_end_col: form_scope.name_end_col,
+                    };
+                    self.index.add_html_form_binding(binding);
+                }
+            }
+
+            // 子要素を再帰的に処理
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                self.collect_form_bindings_recursive(child, source, uri, controller_stack);
+            }
+
+            // このノードで追加したコントローラーをスタックから削除
+            if added_controller {
+                controller_stack.pop();
+            }
+        } else {
+            // 子ノードを再帰的に処理
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                self.collect_form_bindings_recursive(child, source, uri, controller_stack);
+            }
+        }
     }
 }

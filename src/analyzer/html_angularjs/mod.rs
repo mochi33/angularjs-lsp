@@ -3,7 +3,7 @@
 use std::sync::{Arc, RwLock};
 
 use tower_lsp::lsp_types::Url;
-use tree_sitter::Node;
+use tree_sitter::{Node, Tree};
 
 use super::{AngularJsAnalyzer, HtmlParser, JsParser};
 use crate::config::InterpolateConfig;
@@ -15,9 +15,16 @@ mod expression;
 mod local_variable;
 mod scope_reference;
 mod script;
+mod variable_parser;
+
+use controller::ControllerScopeInfo;
+pub use script::EmbeddedScript;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod inheritance_tests;
 
 /// HTML内のAngularJSディレクティブを解析するアナライザー
 pub struct HtmlAngularJsAnalyzer {
@@ -51,61 +58,86 @@ impl HtmlAngularJsAnalyzer {
         }
     }
 
-    /// HTMLドキュメントを解析
+    /// HTMLドキュメントを解析（単独ファイル解析用）
+    /// 全パス（Pass 1, 1.5, 2, 3）を実行
+    /// テストや単一ファイル更新時に使用
     pub fn analyze_document(&self, uri: &Url, source: &str) {
         let mut parser = HtmlParser::new();
-
         if let Some(tree) = parser.parse(source) {
-            // 既存のHTML情報をクリア
-            self.index.clear_document(uri);
-
-            // Pass 1: ng-controllerスコープとng-includeを収集
-            // 初期スタックには、このHTMLにバインドされているコントローラーを含める
-            // 1. ng-includeで継承されたコントローラー（親HTMLから）
-            // 2. テンプレートバインディング経由のコントローラー（$routeProvider, $uibModal）
-            let mut controller_stack: Vec<String> = Vec::new();
-
-            // ng-includeで継承されたコントローラーを追加
-            let inherited = self.index.get_inherited_controllers_for_template(uri);
-            controller_stack.extend(inherited);
-
-            // テンプレートバインディング経由のコントローラーを追加
-            if let Some(controller) = self.index.get_controller_for_template(uri) {
-                if !controller_stack.contains(&controller) {
-                    controller_stack.push(controller);
-                }
-            }
-
-            self.collect_controller_scopes_and_includes(tree.root_node(), source, uri, &mut controller_stack);
-
-            // Pass 2: <script>タグ内のJSを解析してバインディングを抽出
-            self.analyze_script_tags(tree.root_node(), source, uri);
-
-            // Pass 3: ローカル変数定義を収集（ng-init, ng-repeat由来）
-            // これをスコープ参照収集より先に行うことで、ローカル変数をフィルタリングできる
-            self.collect_local_variable_definitions(tree.root_node(), source, uri);
-
-            // Pass 4: $scope参照を収集（ローカル変数はフィルタリング）
-            self.collect_scope_references(tree.root_node(), source, uri);
-
-            // Pass 5: ローカル変数参照を収集
-            let mut active_scopes = std::collections::HashMap::new();
-
-            // 継承されたローカル変数も active_scopes に追加（ng-include経由）
-            // 子テンプレート全体で有効なので、scope範囲をファイル全体に設定
-            let inherited_vars = self.index.get_inherited_local_variables_for_template(uri);
-            for var in inherited_vars {
-                // 継承された変数は子テンプレート全体で有効
-                active_scopes.insert(var.name.clone(), (0, u32::MAX));
-            }
-
-            self.collect_local_variable_references(
-                tree.root_node(),
-                source,
-                uri,
-                &mut active_scopes,
-            );
+            self.analyze_document_with_tree(uri, source, &tree);
         }
+    }
+
+    /// HTMLドキュメントを解析し、埋め込みスクリプトも抽出
+    /// on_change/on_openで使用（単一パースで両方の処理を実行）
+    pub fn analyze_document_and_extract_scripts(&self, uri: &Url, source: &str) -> Vec<EmbeddedScript> {
+        let mut parser = HtmlParser::new();
+        if let Some(tree) = parser.parse(source) {
+            self.analyze_document_with_tree(uri, source, &tree);
+            Self::extract_scripts_from_tree(tree.root_node(), source)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// 事前にパースしたTreeでHTMLドキュメントを解析
+    fn analyze_document_with_tree(&self, uri: &Url, source: &str, tree: &Tree) {
+        // 既存情報をクリア
+        self.index.clear_document(uri);
+
+        // Pass 1: ng-controllerスコープ収集
+        self.collect_controller_scopes_only_with_tree(uri, source, tree);
+
+        // Pass 1.5: ng-includeバインディング収集
+        self.collect_ng_include_bindings_with_tree(uri, source, tree);
+
+        // Pass 2: フォームバインディング収集
+        self.collect_form_bindings_only_with_tree(uri, source, tree);
+
+        // Pass 3: 参照収集
+        self.analyze_document_references_only_with_tree(uri, source, tree);
+    }
+
+    /// HTMLドキュメントの参照のみを解析（Pass 3用）
+    /// ng-controllerスコープ、ng-includeバインディング、フォームバインディングは
+    /// 事前のPass 1, 1.5, 2で収集済みであることを前提とする
+    /// scan_workspaceから使用
+    pub fn analyze_document_references_only(&self, uri: &Url, source: &str) {
+        let mut parser = HtmlParser::new();
+        if let Some(tree) = parser.parse(source) {
+            self.analyze_document_references_only_with_tree(uri, source, &tree);
+        }
+    }
+
+    /// HTMLドキュメントの参照のみを解析（Pass 3用、Tree再利用版）
+    pub fn analyze_document_references_only_with_tree(&self, uri: &Url, source: &str, tree: &Tree) {
+        // Pass 3で収集する情報のみクリア（Pass 1, 1.5, 2の情報は保持）
+        self.index.clear_html_references(uri);
+
+        // ローカル変数定義を収集（ng-init, ng-repeat由来）
+        // これをスコープ参照収集より先に行うことで、ローカル変数をフィルタリングできる
+        self.collect_local_variable_definitions(tree.root_node(), source, uri);
+
+        // $scope参照を収集（ローカル変数はフィルタリング）
+        self.collect_scope_references(tree.root_node(), source, uri);
+
+        // ローカル変数参照を収集
+        let mut active_scopes = std::collections::HashMap::new();
+
+        // 継承されたローカル変数も active_scopes に追加（ng-include経由）
+        // 子テンプレート全体で有効なので、scope範囲をファイル全体に設定
+        let inherited_vars = self.index.get_inherited_local_variables_for_template(uri);
+        for var in inherited_vars {
+            // 継承された変数は子テンプレート全体で有効
+            active_scopes.insert(var.name.clone(), (0, u32::MAX));
+        }
+
+        self.collect_local_variable_references(
+            tree.root_node(),
+            source,
+            uri,
+            &mut active_scopes,
+        );
     }
 
     /// 指定した種類の子ノードを検索
@@ -128,5 +160,99 @@ impl HtmlAngularJsAnalyzer {
     pub(self) fn extract_string_value(&self, node: Node, source: &str) -> String {
         let text = self.node_text(node, source);
         text.trim_matches(|c| c == '"' || c == '\'').to_string()
+    }
+
+    /// ng-controllerスコープのみを収集（Pass 1用）
+    /// 全HTMLファイルのng-controllerスコープを先に登録する
+    pub fn collect_controller_scopes_only(&self, uri: &Url, source: &str) {
+        let mut parser = HtmlParser::new();
+        if let Some(tree) = parser.parse(source) {
+            self.collect_controller_scopes_only_with_tree(uri, source, &tree);
+        }
+    }
+
+    /// ng-controllerスコープのみを収集（Pass 1用、Tree再利用版）
+    pub fn collect_controller_scopes_only_with_tree(&self, uri: &Url, source: &str, tree: &Tree) {
+        // このHTMLファイルを解析済みとしてマーク
+        self.index.mark_html_analyzed(uri);
+        // ng-controllerスコープのみを収集
+        self.collect_controller_scopes_only_from_tree(tree.root_node(), source, uri);
+    }
+
+    /// ng-includeバインディングを収集（Pass 1.5用）
+    /// ng-controllerスコープが全て確定した後に呼び出される
+    /// 継承チェーンを考慮してコントローラー情報を継承
+    pub fn collect_ng_include_bindings(&self, uri: &Url, source: &str) {
+        let mut parser = HtmlParser::new();
+        if let Some(tree) = parser.parse(source) {
+            self.collect_ng_include_bindings_with_tree(uri, source, &tree);
+        }
+    }
+
+    /// ng-includeバインディングを収集（Pass 1.5用、Tree再利用版）
+    pub fn collect_ng_include_bindings_with_tree(&self, uri: &Url, source: &str, tree: &Tree) {
+        // 初期スタックを構築
+        let mut controller_stack: Vec<ControllerScopeInfo> = Vec::new();
+
+        // ng-includeで継承されたコントローラーを追加（親HTMLから）
+        let inherited = self.index.get_inherited_controllers_for_template(uri);
+        for name in inherited {
+            controller_stack.push(ControllerScopeInfo {
+                name,
+                start_line: 0,
+                end_line: u32::MAX,
+            });
+        }
+
+        // テンプレートバインディング経由のコントローラーを追加
+        if let Some(controller) = self.index.get_controller_for_template(uri) {
+            if !controller_stack.iter().any(|c| c.name == controller) {
+                controller_stack.push(ControllerScopeInfo {
+                    name: controller,
+                    start_line: 0,
+                    end_line: u32::MAX,
+                });
+            }
+        }
+
+        self.collect_ng_include_bindings_from_tree(tree.root_node(), source, uri, &mut controller_stack);
+    }
+
+    /// フォームバインディングのみを収集（Pass 2用）
+    /// ng-include関係が確定した後に呼び出される
+    /// これにより、子HTMLでも親のフォームバインディングを参照可能になる
+    pub fn collect_form_bindings_only(&self, uri: &Url, source: &str) {
+        let mut parser = HtmlParser::new();
+        if let Some(tree) = parser.parse(source) {
+            self.collect_form_bindings_only_with_tree(uri, source, &tree);
+        }
+    }
+
+    /// フォームバインディングのみを収集（Pass 2用、Tree再利用版）
+    pub fn collect_form_bindings_only_with_tree(&self, uri: &Url, source: &str, tree: &Tree) {
+        // ng-includeで継承されたコントローラーを初期スタックに追加
+        let mut controller_stack: Vec<ControllerScopeInfo> = Vec::new();
+
+        let inherited = self.index.get_inherited_controllers_for_template(uri);
+        for name in inherited {
+            controller_stack.push(ControllerScopeInfo {
+                name,
+                start_line: 0,
+                end_line: u32::MAX,
+            });
+        }
+
+        // テンプレートバインディング経由のコントローラーを追加
+        if let Some(controller) = self.index.get_controller_for_template(uri) {
+            if !controller_stack.iter().any(|c| c.name == controller) {
+                controller_stack.push(ControllerScopeInfo {
+                    name: controller,
+                    start_line: 0,
+                    end_line: u32::MAX,
+                });
+            }
+        }
+
+        self.collect_form_bindings_from_tree(tree.root_node(), source, uri, &mut controller_stack);
     }
 }

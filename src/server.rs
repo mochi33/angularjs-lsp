@@ -8,7 +8,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer};
+use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer, HtmlParser, EmbeddedScript};
 use crate::config::AjsConfig;
 use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler};
 use crate::index::SymbolIndex;
@@ -60,7 +60,14 @@ impl Backend {
 
         // ファイルタイプに応じた解析
         if Self::is_html_file(&uri) {
-            self.html_analyzer.analyze_document(&uri, &text);
+            // HTML解析と<script>タグ抽出を単一パースで実行
+            let scripts = self.html_analyzer.analyze_document_and_extract_scripts(&uri, &text);
+            // 埋め込みスクリプトをJS解析
+            for script in scripts {
+                self.analyzer.analyze_embedded_script(&uri, &script.source, script.line_offset);
+            }
+            // 再解析が必要な子HTMLを処理
+            self.process_pending_reanalysis(&uri);
         } else if Self::is_js_file(&uri) {
             self.analyzer.analyze_document(&uri, &text);
         }
@@ -76,7 +83,14 @@ impl Backend {
 
         // ファイルタイプに応じた解析
         if Self::is_html_file(&uri) {
-            self.html_analyzer.analyze_document(&uri, &text);
+            // HTML解析と<script>タグ抽出を単一パースで実行
+            let scripts = self.html_analyzer.analyze_document_and_extract_scripts(&uri, &text);
+            // 埋め込みスクリプトをJS解析
+            for script in scripts {
+                self.analyzer.analyze_embedded_script(&uri, &script.source, script.line_offset);
+            }
+            // 再解析が必要な子HTMLを処理
+            self.process_pending_reanalysis(&uri);
         } else if Self::is_js_file(&uri) {
             self.analyzer.analyze_document(&uri, &text);
         }
@@ -84,7 +98,7 @@ impl Backend {
         // ts_proxyにも通知
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             proxy.did_open(&uri, &text).await;
-            self.ts_opened_files.insert(uri, true);
+            self.ts_opened_files.insert(uri.clone(), true);
         }
         // ts_proxyがまだNoneの場合は、後で必要時に開く
     }
@@ -99,6 +113,33 @@ impl Backend {
             if let Some(doc) = self.documents.get(uri) {
                 proxy.did_open(uri, doc.value()).await;
                 self.ts_opened_files.insert(uri.clone(), true);
+            }
+        }
+    }
+
+    /// 再解析が必要な子HTMLを処理
+    /// 親HTMLの解析後に呼び出され、ng-includeで参照される子HTMLを再解析する
+    fn process_pending_reanalysis(&self, current_uri: &Url) {
+        // 自分自身を再解析キューから除外（無限ループ防止）
+        self.index.remove_from_pending_reanalysis(current_uri);
+
+        // 再解析が必要なURIを取得
+        let pending_uris = self.index.take_pending_reanalysis();
+
+        for child_uri in pending_uris {
+            // 自分自身はスキップ
+            if &child_uri == current_uri {
+                continue;
+            }
+
+            // 子HTMLのソースを取得して再解析
+            if let Some(doc) = self.documents.get(&child_uri) {
+                tracing::debug!(
+                    "process_pending_reanalysis: reanalyzing {} (triggered by {})",
+                    child_uri,
+                    current_uri
+                );
+                self.html_analyzer.analyze_document(&child_uri, doc.value());
             }
         }
     }
@@ -137,22 +178,58 @@ impl Backend {
 
                 let html_count = html_files.len();
 
+                // Extract embedded scripts from HTML files for JS Pass 1/2
+                let html_scripts: Vec<(Url, Vec<EmbeddedScript>)> = html_files
+                    .iter()
+                    .map(|(uri, content)| {
+                        let scripts = HtmlAngularJsAnalyzer::extract_scripts(content);
+                        (uri.clone(), scripts)
+                    })
+                    .filter(|(_, scripts)| !scripts.is_empty())
+                    .collect();
+
+                let html_script_count = html_scripts.len();
+                let total_js_count = js_count + html_script_count;
+
                 // Pass 1: Index definitions
                 self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
                     cancellable: Some(false),
-                    message: Some(format!("Pass 1: Indexing definitions (0/{} files)", js_count)),
+                    message: Some(format!("JS Pass 1: Indexing definitions (0/{} files)", total_js_count)),
                     percentage: Some(0),
                 })).await;
 
+                // JS files
                 for (i, (uri, content)) in js_files.iter().enumerate() {
                     self.analyzer.analyze_document_with_options(uri, content, true);
 
                     // 10ファイルごとに進捗更新（パフォーマンスのため）
                     if i % 10 == 0 || i == js_count - 1 {
-                        let pct = ((i + 1) * 40 / js_count.max(1)) as u32; // 0-40%
+                        let pct = ((i + 1) * 40 / total_js_count.max(1)) as u32; // 0-40%
                         self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
                             cancellable: Some(false),
-                            message: Some(format!("Pass 1: Indexing definitions ({}/{} files)", i + 1, js_count)),
+                            message: Some(format!("JS Pass 1: Indexing definitions ({}/{} files)", i + 1, total_js_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                // HTML embedded scripts (Pass 1)
+                for (i, (uri, scripts)) in html_scripts.iter().enumerate() {
+                    // Clear document only for first script
+                    let mut first = true;
+                    for script in scripts {
+                        if first {
+                            self.index.clear_document(uri);
+                            first = false;
+                        }
+                        self.analyzer.analyze_embedded_script(uri, &script.source, script.line_offset);
+                    }
+
+                    if i % 10 == 0 || i == html_script_count - 1 {
+                        let pct = ((js_count + i + 1) * 40 / total_js_count.max(1)) as u32;
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("JS Pass 1: Indexing definitions ({}/{} files)", js_count + i + 1, total_js_count)),
                             percentage: Some(pct),
                         })).await;
                     }
@@ -161,42 +238,130 @@ impl Backend {
                 // Pass 2: Index references (now that all definitions are known)
                 self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
                     cancellable: Some(false),
-                    message: Some(format!("Pass 2: Indexing references (0/{} files)", js_count)),
+                    message: Some(format!("JS Pass 2: Indexing references (0/{} files)", total_js_count)),
                     percentage: Some(40),
                 })).await;
 
+                // JS files
                 for (i, (uri, content)) in js_files.iter().enumerate() {
                     self.analyzer.analyze_document_with_options(uri, content, false);
 
                     if i % 10 == 0 || i == js_count - 1 {
-                        let pct = 40 + ((i + 1) * 40 / js_count.max(1)) as u32; // 40-80%
+                        let pct = 40 + ((i + 1) * 40 / total_js_count.max(1)) as u32; // 40-80%
                         self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
                             cancellable: Some(false),
-                            message: Some(format!("Pass 2: Indexing references ({}/{} files)", i + 1, js_count)),
+                            message: Some(format!("JS Pass 2: Indexing references ({}/{} files)", i + 1, total_js_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                // HTML embedded scripts (Pass 2)
+                for (i, (uri, scripts)) in html_scripts.iter().enumerate() {
+                    for script in scripts {
+                        self.analyzer.analyze_embedded_script(uri, &script.source, script.line_offset);
+                    }
+
+                    if i % 10 == 0 || i == html_script_count - 1 {
+                        let pct = 40 + ((js_count + i + 1) * 40 / total_js_count.max(1)) as u32;
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("JS Pass 2: Indexing references ({}/{} files)", js_count + i + 1, total_js_count)),
                             percentage: Some(pct),
                         })).await;
                     }
                 }
 
                 self.client
-                    .log_message(MessageType::INFO, format!("Indexed {} JavaScript files", js_count))
+                    .log_message(MessageType::INFO, format!("Indexed {} JS files + {} HTML scripts", js_count, html_script_count))
                     .await;
 
-                // Index HTML files
+                // Index HTML files (4-pass approach)
+                // Pre-parse all HTML files once and reuse the trees
+                let mut parser = HtmlParser::new();
+                let parsed_html_files: Vec<_> = html_files
+                    .iter()
+                    .filter_map(|(uri, content)| {
+                        parser.parse(content).map(|tree| (uri, content.as_str(), tree))
+                    })
+                    .collect();
+                let parsed_count = parsed_html_files.len();
+
+                // Pass 1: Collect ng-controller scopes only (all HTML files)
                 self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
                     cancellable: Some(false),
-                    message: Some(format!("Indexing HTML (0/{} files)", html_count)),
+                    message: Some(format!("HTML Pass 1: ng-controller (0/{} files)", parsed_count)),
                     percentage: Some(80),
                 })).await;
 
-                for (i, (uri, content)) in html_files.iter().enumerate() {
-                    self.html_analyzer.analyze_document(uri, content);
+                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
+                    self.html_analyzer.collect_controller_scopes_only_with_tree(uri, content, tree);
 
-                    if i % 10 == 0 || i == html_count - 1 {
-                        let pct = 80 + ((i + 1) * 20 / html_count.max(1)) as u32; // 80-100%
+                    if i % 10 == 0 || i == parsed_count - 1 {
+                        let pct = 80 + ((i + 1) * 4 / parsed_count.max(1)) as u32; // 80-84%
                         self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
                             cancellable: Some(false),
-                            message: Some(format!("Indexing HTML ({}/{} files)", i + 1, html_count)),
+                            message: Some(format!("HTML Pass 1: ng-controller ({}/{} files)", i + 1, parsed_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                // Pass 1.5: Collect ng-include bindings (inheritance chain can be resolved)
+                self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message: Some(format!("HTML Pass 1.5: ng-include (0/{} files)", parsed_count)),
+                    percentage: Some(84),
+                })).await;
+
+                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
+                    self.html_analyzer.collect_ng_include_bindings_with_tree(uri, content, tree);
+
+                    if i % 10 == 0 || i == parsed_count - 1 {
+                        let pct = 84 + ((i + 1) * 4 / parsed_count.max(1)) as u32; // 84-88%
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("HTML Pass 1.5: ng-include ({}/{} files)", i + 1, parsed_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                // Pass 2: Collect form bindings (ng-include bindings are now available)
+                self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message: Some(format!("HTML Pass 2: form bindings (0/{} files)", parsed_count)),
+                    percentage: Some(88),
+                })).await;
+
+                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
+                    self.html_analyzer.collect_form_bindings_only_with_tree(uri, content, tree);
+
+                    if i % 10 == 0 || i == parsed_count - 1 {
+                        let pct = 88 + ((i + 1) * 5 / parsed_count.max(1)) as u32; // 88-93%
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("HTML Pass 2: form bindings ({}/{} files)", i + 1, parsed_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                // Pass 3: HTML reference analysis (ng-include and form bindings are now available)
+                self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                    cancellable: Some(false),
+                    message: Some(format!("HTML Pass 3: references (0/{} files)", parsed_count)),
+                    percentage: Some(93),
+                })).await;
+
+                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
+                    self.html_analyzer.analyze_document_references_only_with_tree(uri, content, tree);
+
+                    if i % 10 == 0 || i == parsed_count - 1 {
+                        let pct = 93 + ((i + 1) * 7 / parsed_count.max(1)) as u32; // 93-100%
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("HTML Pass 3: references ({}/{} files)", i + 1, parsed_count)),
                             percentage: Some(pct),
                         })).await;
                     }

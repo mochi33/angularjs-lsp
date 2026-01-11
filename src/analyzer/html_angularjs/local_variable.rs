@@ -6,36 +6,44 @@ use tower_lsp::lsp_types::Url;
 use tree_sitter::Node;
 
 use super::directives::is_ng_directive;
+use super::variable_parser::{parse_ng_init_expression, parse_ng_repeat_expression};
 use super::HtmlAngularJsAnalyzer;
-use crate::index::{HtmlLocalVariable, HtmlLocalVariableReference, HtmlLocalVariableSource};
+use crate::index::{HtmlLocalVariable, HtmlLocalVariableReference};
 
 impl HtmlAngularJsAnalyzer {
     /// ローカル変数定義を収集（Pass 4a）
     pub(super) fn collect_local_variable_definitions(&self, node: Node, source: &str, uri: &Url) {
-        if node.kind() == "element" {
-            if let Some(start_tag) = self.find_child_by_kind(node, "start_tag") {
-                // 要素のスコープ範囲
-                let scope_start_line = node.start_position().row as u32;
-                let scope_end_line = node.end_position().row as u32;
+        // element または self_closing_tag からローカル変数を抽出
+        let tag_node = if node.kind() == "element" {
+            self.find_child_by_kind(node, "start_tag")
+        } else if node.kind() == "self_closing_tag" {
+            Some(node)
+        } else {
+            None
+        };
 
-                // ng-repeatからローカル変数を抽出
-                self.extract_ng_repeat_variable_definitions(
-                    start_tag,
-                    source,
-                    uri,
-                    scope_start_line,
-                    scope_end_line,
-                );
+        if let Some(tag) = tag_node {
+            // 要素のスコープ範囲
+            let scope_start_line = node.start_position().row as u32;
+            let scope_end_line = node.end_position().row as u32;
 
-                // ng-initからローカル変数を抽出
-                self.extract_ng_init_variable_definitions(
-                    start_tag,
-                    source,
-                    uri,
-                    scope_start_line,
-                    scope_end_line,
-                );
-            }
+            // ng-repeatからローカル変数を抽出
+            self.extract_ng_repeat_variable_definitions(
+                tag,
+                source,
+                uri,
+                scope_start_line,
+                scope_end_line,
+            );
+
+            // ng-initからローカル変数を抽出
+            self.extract_ng_init_variable_definitions(
+                tag,
+                source,
+                uri,
+                scope_start_line,
+                scope_end_line,
+            );
         }
 
         // 子ノードを再帰的に処理
@@ -71,32 +79,25 @@ impl HtmlAngularJsAnalyzer {
                             let value_start_line = value_node.start_position().row as u32;
                             let value_start_col = value_node.start_position().column as u32 + 1;
 
-                            // ng-repeat式をパース
-                            let vars = self.extract_ng_repeat_variables(value);
+                            // 共通パーサーを使用
+                            let parsed_vars = parse_ng_repeat_expression(value);
 
-                            for (var_name, offset, len) in vars {
+                            for var in parsed_vars {
                                 let (line_offset, col_in_line) = self
                                     .calculate_position_in_multiline(
                                         value,
-                                        offset,
+                                        var.offset,
                                         value_start_col as usize,
                                     );
 
                                 let name_start_line = value_start_line + line_offset as u32;
                                 let name_start_col = col_in_line as u32;
                                 let name_end_line = name_start_line;
-                                let name_end_col = name_start_col + len as u32;
-
-                                // 変数のソースを判定
-                                let source_type = if value.contains('(') && value.contains(')') {
-                                    HtmlLocalVariableSource::NgRepeatKeyValue
-                                } else {
-                                    HtmlLocalVariableSource::NgRepeatIterator
-                                };
+                                let name_end_col = name_start_col + var.len as u32;
 
                                 let variable = HtmlLocalVariable {
-                                    name: var_name.clone(),
-                                    source: source_type,
+                                    name: var.name,
+                                    source: var.source,
                                     uri: uri.clone(),
                                     scope_start_line,
                                     scope_end_line,
@@ -140,25 +141,25 @@ impl HtmlAngularJsAnalyzer {
                             let value_start_line = value_node.start_position().row as u32;
                             let value_start_col = value_node.start_position().column as u32 + 1;
 
-                            // ng-init式をパース
-                            let vars = self.extract_ng_init_variables(value);
+                            // 共通パーサーを使用
+                            let parsed_vars = parse_ng_init_expression(value);
 
-                            for (var_name, offset, len) in vars {
+                            for var in parsed_vars {
                                 let (line_offset, col_in_line) = self
                                     .calculate_position_in_multiline(
                                         value,
-                                        offset,
+                                        var.offset,
                                         value_start_col as usize,
                                     );
 
                                 let name_start_line = value_start_line + line_offset as u32;
                                 let name_start_col = col_in_line as u32;
                                 let name_end_line = name_start_line;
-                                let name_end_col = name_start_col + len as u32;
+                                let name_end_col = name_start_col + var.len as u32;
 
                                 let variable = HtmlLocalVariable {
-                                    name: var_name.clone(),
-                                    source: HtmlLocalVariableSource::NgInit,
+                                    name: var.name,
+                                    source: var.source,
                                     uri: uri.clone(),
                                     scope_start_line,
                                     scope_end_line,
@@ -176,84 +177,6 @@ impl HtmlAngularJsAnalyzer {
         }
     }
 
-    /// ng-repeat式から変数名を抽出
-    /// 例: "item in items" -> [("item", 0, 4)]
-    /// 例: "(key, value) in obj" -> [("key", 1, 3), ("value", 6, 5)]
-    /// 例: "item in items track by item.id" -> [("item", 0, 4)]
-    fn extract_ng_repeat_variables(&self, expr: &str) -> Vec<(String, usize, usize)> {
-        let mut result = Vec::new();
-
-        // " in "で分割して左側の部分を取得
-        let Some(in_idx) = expr.find(" in ") else {
-            return result;
-        };
-
-        let iter_part = &expr[..in_idx];
-
-        // (key, value) 形式
-        if iter_part.trim().starts_with('(') {
-            // 開き括弧と閉じ括弧の位置を見つける
-            let open_paren = iter_part.find('(').unwrap();
-            if let Some(close_paren) = iter_part.find(')') {
-                let inner = &iter_part[open_paren + 1..close_paren];
-
-                // カンマで分割
-                let mut current_pos = open_paren + 1;
-                for var in inner.split(',') {
-                    let var_trimmed = var.trim();
-                    if !var_trimmed.is_empty() {
-                        // var内での空白を除いた位置を計算
-                        let var_offset_in_inner =
-                            var.as_ptr() as usize - inner.as_ptr() as usize;
-                        let leading_spaces = var.len() - var.trim_start().len();
-                        let offset = current_pos + var_offset_in_inner + leading_spaces;
-                        result.push((var_trimmed.to_string(), offset, var_trimmed.len()));
-                    }
-                    current_pos = open_paren + 1; // resetしない
-                }
-            }
-        } else {
-            // item 形式
-            let trimmed = iter_part.trim();
-            if !trimmed.is_empty() {
-                // 先頭の空白を考慮してオフセットを計算
-                let leading_spaces = iter_part.len() - iter_part.trim_start().len();
-                result.push((trimmed.to_string(), leading_spaces, trimmed.len()));
-            }
-        }
-
-        result
-    }
-
-    /// ng-init式から変数名を抽出
-    /// 例: "a = 1" -> [("a", 0, 1)]
-    /// 例: "a = 1; b = 2" -> [("a", 0, 1), ("b", 7, 1)]
-    fn extract_ng_init_variables(&self, expr: &str) -> Vec<(String, usize, usize)> {
-        let mut result = Vec::new();
-
-        // セミコロンで分割して各ステートメントを処理
-        let mut pos = 0;
-        for statement in expr.split(';') {
-            // 代入式の左辺を抽出
-            if let Some(eq_idx) = statement.find('=') {
-                // ==, ===, !=, !== を除外
-                let before_eq = &statement[..eq_idx];
-                let after_eq_char = statement.chars().nth(eq_idx + 1);
-                if after_eq_char != Some('=') && !before_eq.ends_with('!') {
-                    let lhs = before_eq.trim();
-                    if !lhs.is_empty() && self.is_valid_identifier(lhs) {
-                        let leading_spaces = before_eq.len() - before_eq.trim_start().len();
-                        let offset = pos + leading_spaces;
-                        result.push((lhs.to_string(), offset, lhs.len()));
-                    }
-                }
-            }
-            pos += statement.len() + 1; // +1 for semicolon
-        }
-
-        result
-    }
-
     /// ローカル変数参照を収集（Pass 4b）
     /// 現在有効なローカル変数のスコープを追跡しながら収集
     pub(super) fn collect_local_variable_references(
@@ -266,7 +189,10 @@ impl HtmlAngularJsAnalyzer {
         // 要素ノードの場合、新しいローカル変数スコープを追加
         let mut new_vars: Vec<String> = Vec::new();
 
-        if node.kind() == "element" {
+        // element または self_closing_tag を処理
+        let is_element_or_self_closing = node.kind() == "element" || node.kind() == "self_closing_tag";
+
+        if is_element_or_self_closing {
             let scope_start_line = node.start_position().row as u32;
             let scope_end_line = node.end_position().row as u32;
 
@@ -282,9 +208,15 @@ impl HtmlAngularJsAnalyzer {
             }
 
             // ディレクティブ属性内の参照を収集
-            if let Some(start_tag) = self.find_child_by_kind(node, "start_tag") {
+            let tag_node = if node.kind() == "element" {
+                self.find_child_by_kind(node, "start_tag")
+            } else {
+                Some(node) // self_closing_tag の場合はノード自体
+            };
+
+            if let Some(tag) = tag_node {
                 self.extract_local_variable_references_from_tag(
-                    start_tag,
+                    tag,
                     source,
                     uri,
                     active_scopes,

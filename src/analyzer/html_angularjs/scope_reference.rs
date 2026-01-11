@@ -18,6 +18,11 @@ impl HtmlAngularJsAnalyzer {
             }
         }
 
+        // 自己終了タグ（<input ... />等）の場合
+        if node.kind() == "self_closing_tag" {
+            self.extract_scope_references_from_tag(node, source, uri);
+        }
+
         // text内の{{interpolation}}をチェック
         if node.kind() == "text" {
             let text = self.node_text(node, source);
@@ -78,15 +83,18 @@ impl HtmlAngularJsAnalyzer {
                 continue;
             }
 
-            // alias.property形式の場合、aliasが有効かチェック
-            // aliasでない場合はスキップ（単純な識別子だけを登録）
+            // alias.property形式の場合、aliasまたはフォームバインディングが有効かチェック
+            // どちらでもない場合はスキップ（単純な識別子だけを登録）
             if property_path.contains('.') {
                 let parts: Vec<&str> = property_path.splitn(2, '.').collect();
                 if parts.len() == 2 {
                     let potential_alias = parts[0];
                     // このaliasが有効かチェック
-                    if self.index.resolve_controller_by_alias(uri, value_start_line, potential_alias).is_none() {
-                        // aliasではないのでスキップ
+                    let is_alias = self.index.resolve_controller_by_alias(uri, value_start_line, potential_alias).is_some();
+                    // フォームバインディングかチェック
+                    let is_form_binding = self.index.find_form_binding_definition(uri, potential_alias, value_start_line).is_some();
+                    if !is_alias && !is_form_binding {
+                        // aliasでもフォームバインディングでもないのでスキップ
                         continue;
                     }
                 }
@@ -178,12 +186,14 @@ impl HtmlAngularJsAnalyzer {
                         continue;
                     }
 
-                    // alias.property形式の場合、aliasが有効かチェック
+                    // alias.property形式の場合、aliasまたはフォームバインディングが有効かチェック
                     if property_path.contains('.') {
                         let parts: Vec<&str> = property_path.splitn(2, '.').collect();
                         if parts.len() == 2 {
                             let potential_alias = parts[0];
-                            if self.index.resolve_controller_by_alias(uri, expr_line as u32, potential_alias).is_none() {
+                            let is_alias = self.index.resolve_controller_by_alias(uri, expr_line as u32, potential_alias).is_some();
+                            let is_form_binding = self.index.find_form_binding_definition(uri, potential_alias, expr_line as u32).is_some();
+                            if !is_alias && !is_form_binding {
                                 continue;
                             }
                         }
@@ -368,15 +378,18 @@ impl HtmlAngularJsAnalyzer {
                         continue;
                     }
 
-                    // alias.property形式の場合、aliasが有効かチェック
-                    // aliasでない場合はスキップ（単純な識別子だけを登録）
+                    // alias.property形式の場合、aliasまたはフォームバインディングが有効かチェック
+                    // どちらでもない場合はスキップ（単純な識別子だけを登録）
                     if property_path.contains('.') {
                         let parts: Vec<&str> = property_path.splitn(2, '.').collect();
                         if parts.len() == 2 {
                             let potential_alias = parts[0];
                             // このaliasが有効かチェック
-                            if self.index.resolve_controller_by_alias(uri, expr_line as u32, potential_alias).is_none() {
-                                // aliasではないのでスキップ
+                            let is_alias = self.index.resolve_controller_by_alias(uri, expr_line as u32, potential_alias).is_some();
+                            // フォームバインディングかチェック
+                            let is_form_binding = self.index.find_form_binding_definition(uri, potential_alias, expr_line as u32).is_some();
+                            if !is_alias && !is_form_binding {
+                                // aliasでもフォームバインディングでもないのでスキップ
                                 continue;
                             }
                         }
