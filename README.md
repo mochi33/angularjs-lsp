@@ -5,9 +5,13 @@ Language Server Protocol (LSP) implementation for AngularJS 1.x applications.
 ## Features
 
 - **Completion** - Auto-complete AngularJS controllers, services, directives, and methods
+  - Context-aware: Controllers are excluded from completions when inside a controller
+  - `$scope.` completions show only properties/methods from the current controller
+  - Service method completions with `ServiceName.` prefix
 - **Go to Definition** - Jump to AngularJS component, service, controller, and directive definitions
 - **Find References** - Find all usages of AngularJS symbols across your workspace
 - **Hover Information** - Display type and documentation information on hover
+- **Signature Help** - Display function parameter hints while typing
 - **CodeLens** - Show controller/template relationships with navigation support
 - **TypeScript Fallback** - Automatically falls back to `typescript-language-server` for non-AngularJS symbols
 
@@ -120,9 +124,13 @@ src/
 │   ├── angularjs.rs  # AngularJS pattern detection
 │   └── parser.rs     # JavaScript parsing (tree-sitter)
 ├── handlers/         # LSP request handlers
-│   ├── completion.rs # Completion provider
-│   ├── hover.rs      # Hover provider
-│   └── references.rs # References & definition provider
+│   ├── completion.rs     # Completion provider
+│   ├── hover.rs          # Hover provider
+│   ├── references.rs     # References & definition provider
+│   ├── signature_help.rs # Signature help provider
+│   ├── codelens.rs       # CodeLens provider
+│   ├── document_symbol.rs # Document symbol provider
+│   └── rename.rs         # Rename provider
 ├── index/            # Symbol indexing
 │   ├── store.rs      # In-memory symbol store
 │   └── symbol.rs     # Symbol data structures

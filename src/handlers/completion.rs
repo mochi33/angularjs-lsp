@@ -17,7 +17,13 @@ impl CompletionHandler {
     /// サービスプレフィックスに基づいて補完候補を返す
     /// service_prefix: "ServiceName" の場合、"ServiceName.xxx" のメソッドのみ返す
     /// service_prefix: "$scope" の場合、current_controller の $scope プロパティを返す
-    pub fn complete_with_context(&self, service_prefix: Option<&str>, current_controller: Option<&str>) -> Option<CompletionResponse> {
+    /// injected_services: 現在のコントローラーでDIされているサービス（優先表示）
+    pub fn complete_with_context(
+        &self,
+        service_prefix: Option<&str>,
+        current_controller: Option<&str>,
+        injected_services: &[String],
+    ) -> Option<CompletionResponse> {
         let definitions = self.index.get_all_definitions();
 
         let items: Vec<CompletionItem> = if let Some(prefix) = service_prefix {
@@ -133,21 +139,39 @@ impl CompletionHandler {
             }
         } else {
             // 通常の補完: 全シンボルを返す（メソッドと$scopeプロパティ/メソッドは除外）
+            // 現在のコントローラー自身も除外する
+            // DIされているサービスは優先表示（sort_textで制御）
+            let injected_set: HashSet<&str> = injected_services.iter().map(|s| s.as_str()).collect();
+
             definitions
                 .into_iter()
                 .filter(|s| {
                     s.kind != SymbolKind::Method
                         && s.kind != SymbolKind::ScopeProperty
                         && s.kind != SymbolKind::ScopeMethod
+                        // コントローラー内部では全てのコントローラーを除外
+                        && !(s.kind == SymbolKind::Controller && current_controller.is_some())
                 })
                 .map(|symbol| {
                     let kind = self.symbol_kind_to_completion_kind(symbol.kind);
-                    let detail = symbol.kind.as_str().to_string();
+                    let is_injected = injected_set.contains(symbol.name.as_str());
+                    let detail = if is_injected {
+                        format!("{} (injected)", symbol.kind.as_str())
+                    } else {
+                        symbol.kind.as_str().to_string()
+                    };
+                    // DIされているサービスは "0_" プレフィックス、それ以外は "1_" で並べ替え
+                    let sort_text = if is_injected {
+                        format!("0_{}", symbol.name)
+                    } else {
+                        format!("1_{}", symbol.name)
+                    };
 
                     CompletionItem {
                         label: symbol.name.clone(),
                         kind: Some(kind),
                         detail: Some(detail),
+                        sort_text: Some(sort_text),
                         documentation: symbol.docs.map(|docs| {
                             Documentation::MarkupContent(MarkupContent {
                                 kind: MarkupKind::Markdown,

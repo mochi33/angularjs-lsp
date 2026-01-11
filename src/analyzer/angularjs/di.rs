@@ -399,21 +399,22 @@ impl AngularJsAnalyzer {
                                             let has_root_scope = self.has_root_scope_in_di_array(right, source);
                                             // サービスまたは$scopeまたは$rootScopeがある場合は記録
                                             if !services.is_empty() || has_scope || has_root_scope {
-                                                ctx.inject_map.insert(func_name.clone(), services);
-                                                ctx.inject_has_scope.insert(func_name.clone(), has_scope);
-                                                ctx.inject_has_root_scope.insert(func_name.clone(), has_root_scope);
-
                                                 // $scope がDIされている場合、ControllerScope を登録
                                                 if has_scope {
                                                     if let Some((start_line, end_line)) = ctx.function_ranges.get(&func_name) {
                                                         self.index.add_controller_scope(ControllerScope {
-                                                            name: func_name,
+                                                            name: func_name.clone(),
                                                             uri: uri.clone(),
                                                             start_line: *start_line,
                                                             end_line: *end_line,
+                                                            injected_services: services.clone(),
                                                         });
                                                     }
                                                 }
+
+                                                ctx.inject_map.insert(func_name.clone(), services);
+                                                ctx.inject_has_scope.insert(func_name.clone(), has_scope);
+                                                ctx.inject_has_root_scope.insert(func_name, has_root_scope);
                                             }
                                         }
                                     }

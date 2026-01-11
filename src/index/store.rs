@@ -11,6 +11,8 @@ pub struct ControllerScope {
     pub uri: Url,
     pub start_line: u32,
     pub end_line: u32,
+    /// DIで注入されているサービス名のリスト
+    pub injected_services: Vec<String>,
 }
 
 /// テンプレートバインディングのソース
@@ -244,6 +246,18 @@ impl SymbolIndex {
         None
     }
 
+    /// 指定位置のコントローラーでDIされているサービスを取得
+    pub fn get_injected_services_at(&self, uri: &Url, line: u32) -> Vec<String> {
+        if let Some(scopes) = self.controller_scopes.get(uri) {
+            for scope in scopes.iter() {
+                if line >= scope.start_line && line <= scope.end_line {
+                    return scope.injected_services.clone();
+                }
+            }
+        }
+        Vec::new()
+    }
+
     pub fn add_definition(&self, symbol: Symbol) {
         let name = symbol.name.clone();
         let uri = symbol.uri.clone();
@@ -283,6 +297,17 @@ impl SymbolIndex {
             .get(name)
             .map(|v| v.value().clone())
             .unwrap_or_default()
+    }
+
+    /// 指定した名前がService/Factoryかどうかを判定
+    pub fn is_service_or_factory(&self, name: &str) -> bool {
+        if let Some(symbols) = self.definitions.get(name) {
+            return symbols.iter().any(|s| {
+                s.kind == super::symbol::SymbolKind::Service
+                    || s.kind == super::symbol::SymbolKind::Factory
+            });
+        }
+        false
     }
 
     pub fn get_references(&self, name: &str) -> Vec<SymbolReference> {
@@ -1533,6 +1558,7 @@ impl SymbolIndex {
                     name_end_line: scope.start_line,
                     name_end_col: scope.controller_name.len() as u32,
                     docs: Some("ng-controller".to_string()),
+                    parameters: None,
                 };
                 symbols.push(symbol);
             }
@@ -1554,6 +1580,7 @@ impl SymbolIndex {
                     name_end_line: r.end_line,
                     name_end_col: r.end_col,
                     docs: None,
+                    parameters: None,
                 };
                 symbols.push(symbol);
             }

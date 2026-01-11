@@ -1,2 +1,4 @@
 /target
 .claude
+src/analyzer/angularjs/tests.rs
+src/analyzer/html_angularjs/tests.rs

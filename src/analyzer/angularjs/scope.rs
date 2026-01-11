@@ -67,11 +67,17 @@ impl AngularJsAnalyzer {
                             // JSDocを探す
                             let docs = self.extract_jsdoc_for_line(node.start_position().row, source);
 
-                            // 右辺が関数かどうかを判定
-                            let is_function = if let Some(right) = node.child_by_field_name("right") {
-                                matches!(right.kind(), "function_expression" | "arrow_function")
+                            // 右辺が関数かどうかを判定し、パラメータを抽出
+                            let (is_function, parameters) = if let Some(right) = node.child_by_field_name("right") {
+                                let is_func = matches!(right.kind(), "function_expression" | "arrow_function");
+                                let params = if is_func {
+                                    self.extract_function_params(right, source)
+                                } else {
+                                    None
+                                };
+                                (is_func, params)
                             } else {
-                                false
+                                (false, None)
                             };
 
                             let kind = if is_function {
@@ -95,6 +101,7 @@ impl AngularJsAnalyzer {
                                 name_end_line: self.offset_line(prop_end.row as u32),
                                 name_end_col: prop_end.column as u32,
                                 docs,
+                                parameters,
                             };
 
                             self.index.add_definition(symbol);
@@ -229,11 +236,17 @@ impl AngularJsAnalyzer {
                             // JSDocを探す
                             let docs = self.extract_jsdoc_for_line(node.start_position().row, source);
 
-                            // 右辺が関数かどうかを判定
-                            let is_function = if let Some(right) = node.child_by_field_name("right") {
-                                matches!(right.kind(), "function_expression" | "arrow_function")
+                            // 右辺が関数かどうかを判定し、パラメータを抽出
+                            let (is_function, parameters) = if let Some(right) = node.child_by_field_name("right") {
+                                let is_func = matches!(right.kind(), "function_expression" | "arrow_function");
+                                let params = if is_func {
+                                    self.extract_function_params(right, source)
+                                } else {
+                                    None
+                                };
+                                (is_func, params)
                             } else {
-                                false
+                                (false, None)
                             };
 
                             let kind = if is_function {
@@ -257,6 +270,7 @@ impl AngularJsAnalyzer {
                                 name_end_line: self.offset_line(prop_end.row as u32),
                                 name_end_col: prop_end.column as u32,
                                 docs,
+                                parameters,
                             };
 
                             self.index.add_definition(symbol);

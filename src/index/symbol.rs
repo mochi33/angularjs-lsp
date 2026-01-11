@@ -63,6 +63,8 @@ pub struct Symbol {
     pub name_end_line: u32,
     pub name_end_col: u32,
     pub docs: Option<String>,
+    /// 関数パラメータ（ScopeMethodやMethodなどの場合）
+    pub parameters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -83,6 +83,41 @@ impl AngularJsAnalyzer {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// 関数ノードからパラメータ名のリストを抽出する
+    ///
+    /// 認識パターン:
+    /// - function(param1, param2) {}
+    /// - (param1, param2) => {}
+    pub(super) fn extract_function_params(&self, node: Node, source: &str) -> Option<Vec<String>> {
+        let func_node = match node.kind() {
+            "function_expression" | "arrow_function" | "function_declaration" => Some(node),
+            "array" => {
+                // DI配列: ['$scope', function($scope) {}]
+                let mut cursor = node.walk();
+                node.children(&mut cursor)
+                    .find(|c| c.kind() == "function_expression" || c.kind() == "arrow_function")
+            }
+            _ => None,
+        }?;
+
+        let params_node = func_node.child_by_field_name("parameters")?;
+        let mut params = Vec::new();
+
+        let mut cursor = params_node.walk();
+        for child in params_node.children(&mut cursor) {
+            if child.kind() == "identifier" {
+                let param_name = self.node_text(child, source);
+                params.push(param_name);
+            }
+        }
+
+        if params.is_empty() {
+            None
+        } else {
+            Some(params)
+        }
+    }
 }
 
 /// JavaScriptの予約語・キーワードかどうかを判定する

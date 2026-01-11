@@ -197,6 +197,17 @@ impl AngularJsAnalyzer {
                             // DIサービスがあるか、$scopeまたは$rootScopeがある場合はスコープを追加
                             if !injected_services.is_empty() || has_scope || has_root_scope {
                                 if let Some((body_start, body_end)) = self.find_function_body_range(value, source) {
+                                    // $scopeがある場合はControllerScopeも登録
+                                    if has_scope {
+                                        self.index.add_controller_scope(ControllerScope {
+                                            name: "route".to_string(),
+                                            uri: uri.clone(),
+                                            start_line: body_start,
+                                            end_line: body_end,
+                                            injected_services: injected_services.clone(),
+                                        });
+                                    }
+
                                     let di_scope = DiScope {
                                         component_name: "route".to_string(),
                                         injected_services,
@@ -206,16 +217,6 @@ impl AngularJsAnalyzer {
                                         has_root_scope,
                                     };
                                     ctx.push_scope(di_scope);
-
-                                    // $scopeがある場合はControllerScopeも登録
-                                    if has_scope {
-                                        self.index.add_controller_scope(ControllerScope {
-                                            name: "route".to_string(),
-                                            uri: uri.clone(),
-                                            start_line: body_start,
-                                            end_line: body_end,
-                                        });
-                                    }
                                 }
                             }
                         }
@@ -302,6 +303,7 @@ impl AngularJsAnalyzer {
                         name_end_line: self.offset_line(end.row as u32),
                         name_end_col: end.column as u32,
                         docs,
+                        parameters: None,
                     };
 
                     self.index.add_definition(symbol);
@@ -359,6 +361,17 @@ impl AngularJsAnalyzer {
                         // DIサービスがあるか、$scopeまたは$rootScopeがある場合はスコープを追加
                         if !injected_services.is_empty() || has_scope || has_root_scope {
                             if let Some((body_start, body_end)) = self.find_function_body_range(second_arg, source) {
+                                // コントローラーの場合はスコープ情報を SymbolIndex に登録
+                                if kind == SymbolKind::Controller {
+                                    self.index.add_controller_scope(ControllerScope {
+                                        name: component_name.clone(),
+                                        uri: uri.clone(),
+                                        start_line: body_start,
+                                        end_line: body_end,
+                                        injected_services: injected_services.clone(),
+                                    });
+                                }
+
                                 let di_scope = DiScope {
                                     component_name: component_name.clone(),
                                     injected_services,
@@ -368,16 +381,6 @@ impl AngularJsAnalyzer {
                                     has_root_scope,
                                 };
                                 ctx.push_scope(di_scope);
-
-                                // コントローラーの場合はスコープ情報を SymbolIndex に登録
-                                if kind == SymbolKind::Controller {
-                                    self.index.add_controller_scope(ControllerScope {
-                                        name: component_name.clone(),
-                                        uri: uri.clone(),
-                                        start_line: body_start,
-                                        end_line: body_end,
-                                    });
-                                }
                             }
                         }
 
@@ -422,6 +425,7 @@ impl AngularJsAnalyzer {
                         name_end_line: self.offset_line(name_end.row as u32),
                         name_end_col: name_end.column as u32,
                         docs,
+                        parameters: None,
                     };
 
                     self.index.add_definition(symbol);

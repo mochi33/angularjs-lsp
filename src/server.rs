@@ -10,7 +10,7 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer, HtmlParser, EmbeddedScript};
 use crate::config::AjsConfig;
-use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler};
+use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler, SignatureHelpHandler};
 use crate::index::SymbolIndex;
 use crate::ts_proxy::TsProxy;
 
@@ -544,6 +544,11 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -716,6 +721,31 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = &params.text_document_position_params.position;
+
+        // ドキュメントのソースを取得
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+
+        // 1. AngularJS解析を試行
+        let handler = SignatureHelpHandler::new(Arc::clone(&self.index));
+        if let Some(sig_help) = handler.signature_help(uri, position.line, position.character, &source) {
+            return Ok(Some(sig_help));
+        }
+
+        // 2. フォールバック: typescript-language-server
+        self.ensure_ts_file_opened(uri).await;
+        if let Some(ref proxy) = *self.ts_proxy.read().await {
+            return Ok(proxy.signature_help(&params).await);
+        }
+
+        Ok(None)
+    }
+
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -751,7 +781,7 @@ impl LanguageServer for Backend {
                     let mut items: Vec<CompletionItem> = Vec::new();
 
                     // 1. $scope 補完を追加
-                    if let Some(CompletionResponse::Array(scope_items)) = handler.complete_with_context(Some("$scope"), controller_name.as_deref()) {
+                    if let Some(CompletionResponse::Array(scope_items)) = handler.complete_with_context(Some("$scope"), controller_name.as_deref(), &[]) {
                         items.extend(scope_items);
                     }
 
@@ -839,16 +869,26 @@ impl LanguageServer for Backend {
         // カーソル前のサービス名を取得（"ServiceName." パターン）
         let service_prefix = self.get_service_prefix_at_cursor(&params);
 
-        // $scope. の場合、カーソル位置のコントローラー名を取得
-        let controller_name = if service_prefix.as_deref() == Some("$scope") {
-            self.index.get_controller_at(uri, line)
-        } else {
-            None
-        };
+        // object. パターン（$scope. と Service/Factory 以外）の場合はTypeScript補完のみ使用
+        if let Some(ref prefix) = service_prefix {
+            if prefix != "$scope" && !self.index.is_service_or_factory(prefix) {
+                // TypeScript補完にフォールバック
+                if let Some(ref proxy) = *self.ts_proxy.read().await {
+                    return Ok(proxy.completion(&params).await);
+                }
+                return Ok(None);
+            }
+        }
+
+        // カーソル位置のコントローラー名を取得（コントローラー内部での補完時にコントローラーを除外するため）
+        let controller_name = self.index.get_controller_at(uri, line);
+
+        // カーソル位置のコントローラーでDIされているサービスを取得（優先表示用）
+        let injected_services = self.index.get_injected_services_at(uri, line);
 
         // 1. AngularJS解析を試行
         let handler = CompletionHandler::new(Arc::clone(&self.index));
-        if let Some(completions) = handler.complete_with_context(service_prefix.as_deref(), controller_name.as_deref()) {
+        if let Some(completions) = handler.complete_with_context(service_prefix.as_deref(), controller_name.as_deref(), &injected_services) {
             return Ok(Some(completions));
         }
 

@@ -244,6 +244,11 @@ impl AngularJsAnalyzer {
                             // 代入文の行からJSDocを探す
                             let docs = self.extract_jsdoc_for_line(assign_node.start_position().row, source);
 
+                            // 右辺からパラメータを抽出
+                            let parameters = assign_node
+                                .child_by_field_name("right")
+                                .and_then(|right| self.extract_function_params(right, source));
+
                             let full_name = format!("{}.{}", service_name, method_name);
                             let symbol = Symbol {
                                 name: full_name,
@@ -259,6 +264,7 @@ impl AngularJsAnalyzer {
                                 name_end_line: self.offset_line(end.row as u32),
                                 name_end_col: end.column as u32,
                                 docs,
+                                parameters,
                             };
                             self.index.add_definition(symbol);
                         }
@@ -310,6 +316,8 @@ impl AngularJsAnalyzer {
                                     let end = key.end_position();
                                     // pairノードの行からJSDocを探す
                                     let docs = self.extract_jsdoc_for_line(child.start_position().row, source);
+                                    // パラメータを抽出
+                                    let parameters = self.extract_function_params(value, source);
                                     let symbol = Symbol {
                                         name: full_name,
                                         kind: SymbolKind::Method,
@@ -323,6 +331,7 @@ impl AngularJsAnalyzer {
                                         name_end_line: self.offset_line(name_end.row as u32),
                                         name_end_col: name_end.column as u32,
                                         docs,
+                                        parameters,
                                     };
                                     self.index.add_definition(symbol);
                                 }
@@ -348,6 +357,7 @@ impl AngularJsAnalyzer {
                                             name_end_line: self.offset_line(name_end.row as u32),
                                             name_end_col: name_end.column as u32,
                                             docs,
+                                            parameters: None,
                                         };
                                         self.index.add_definition(symbol);
                                     } else {
@@ -368,6 +378,7 @@ impl AngularJsAnalyzer {
                                             name_end_line: self.offset_line(name_end.row as u32),
                                             name_end_col: name_end.column as u32,
                                             docs,
+                                            parameters: None,
                                         };
                                         self.index.add_definition(symbol);
                                     }
@@ -404,6 +415,7 @@ impl AngularJsAnalyzer {
                             name_end_line: self.offset_line(name_end.row as u32),
                             name_end_col: name_end.column as u32,
                             docs,
+                            parameters: None,
                         };
                         self.index.add_definition(symbol);
                     } else {
@@ -423,6 +435,7 @@ impl AngularJsAnalyzer {
                             name_end_line: self.offset_line(name_end.row as u32),
                             name_end_col: name_end.column as u32,
                             docs,
+                            parameters: None,
                         };
                         self.index.add_definition(symbol);
                     }
@@ -574,6 +587,11 @@ impl AngularJsAnalyzer {
 
                             let docs = self.extract_jsdoc_for_line(assign_node.start_position().row, source);
 
+                            // 右辺からパラメータを抽出
+                            let parameters = assign_node
+                                .child_by_field_name("right")
+                                .and_then(|right| self.extract_function_params(right, source));
+
                             let full_name = format!("{}.{}", controller_name, method_name);
                             let symbol = Symbol {
                                 name: full_name,
@@ -588,6 +606,7 @@ impl AngularJsAnalyzer {
                                 name_end_line: self.offset_line(end.row as u32),
                                 name_end_col: end.column as u32,
                                 docs,
+                                parameters,
                             };
                             self.index.add_definition(symbol);
                         }

@@ -81,7 +81,14 @@ impl TsProxy {
                 "textDocument": {
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
                     "definition": { "linkSupport": true },
-                    "references": {}
+                    "references": {},
+                    "signatureHelp": {
+                        "signatureInformation": {
+                            "parameterInformation": {
+                                "labelOffsetSupport": true
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -270,6 +277,26 @@ impl TsProxy {
         });
 
         let response = self.send_request("textDocument/rename", request_params).await?;
+        let result = response.get("result")?;
+
+        if result.is_null() {
+            return None;
+        }
+
+        serde_json::from_value(result.clone()).ok()
+    }
+
+    /// シグネチャヘルプを取得
+    pub async fn signature_help(&self, params: &SignatureHelpParams) -> Option<SignatureHelp> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = &params.text_document_position_params.position;
+
+        let request_params = json!({
+            "textDocument": { "uri": uri.to_string() },
+            "position": { "line": pos.line, "character": pos.character }
+        });
+
+        let response = self.send_request("textDocument/signatureHelp", request_params).await?;
         let result = response.get("result")?;
 
         if result.is_null() {
