@@ -4,6 +4,7 @@ mod document_symbol;
 mod hover;
 mod references;
 mod rename;
+mod semantic_tokens;
 mod signature_help;
 
 pub use codelens::CodeLensHandler;
@@ -12,4 +13,5 @@ pub use document_symbol::DocumentSymbolHandler;
 pub use hover::HoverHandler;
 pub use references::ReferencesHandler;
 pub use rename::RenameHandler;
+pub use semantic_tokens::SemanticTokensHandler;
 pub use signature_help::SignatureHelpHandler;

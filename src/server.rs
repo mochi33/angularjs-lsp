@@ -10,7 +10,7 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer, HtmlParser, EmbeddedScript};
 use crate::config::AjsConfig;
-use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler, SignatureHelpHandler};
+use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler, SemanticTokensHandler, SignatureHelpHandler};
 use crate::index::SymbolIndex;
 use crate::ts_proxy::TsProxy;
 
@@ -557,6 +557,16 @@ impl LanguageServer for Backend {
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false),
                 }),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: Default::default(),
+                            legend: SemanticTokensHandler::legend(),
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
         })
@@ -943,6 +953,18 @@ impl LanguageServer for Backend {
         let uri = &params.text_document.uri;
         let handler = CodeLensHandler::new(Arc::clone(&self.index));
         Ok(handler.code_lens(uri))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let handler = SemanticTokensHandler::new(Arc::clone(&self.index));
+        if let Some(tokens) = handler.semantic_tokens_full(uri) {
+            return Ok(Some(SemanticTokensResult::Tokens(tokens)));
+        }
+        Ok(None)
     }
 }
 

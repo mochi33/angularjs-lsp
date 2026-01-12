@@ -1179,6 +1179,14 @@ impl SymbolIndex {
         None
     }
 
+    /// 指定URIの全てのHTMLスコープ参照を取得（セマンティックトークン用）
+    pub fn get_html_scope_references(&self, uri: &Url) -> Vec<HtmlScopeReference> {
+        self.html_scope_references
+            .get(uri)
+            .map(|refs| refs.value().clone())
+            .unwrap_or_default()
+    }
+
     // ========== HTMLローカル変数関連 ==========
 
     /// HTMLローカル変数定義を追加
@@ -1339,6 +1347,27 @@ impl SymbolIndex {
         })
     }
 
+    /// 指定URIの全てのローカル変数定義を取得（セマンティックトークン用）
+    pub fn get_all_local_variables(&self, uri: &Url) -> Vec<HtmlLocalVariable> {
+        self.html_local_variables
+            .get(uri)
+            .map(|vars| vars.value().clone())
+            .unwrap_or_default()
+    }
+
+    /// 指定URIの全てのローカル変数参照を取得（セマンティックトークン用）
+    pub fn get_all_local_variable_references_for_uri(&self, uri: &Url) -> Vec<HtmlLocalVariableReference> {
+        let mut result = Vec::new();
+        for entry in self.html_local_variable_references.iter() {
+            for reference in entry.value() {
+                if &reference.uri == uri {
+                    result.push(reference.clone());
+                }
+            }
+        }
+        result
+    }
+
     // ========== HTMLフォームバインディング関連 ==========
 
     /// HTMLフォームバインディングを追加
@@ -1435,6 +1464,14 @@ impl SymbolIndex {
                 .cloned()
                 .next()
         })
+    }
+
+    /// 指定URIの全てのフォームバインディングを取得（セマンティックトークン用）
+    pub fn get_all_form_bindings(&self, uri: &Url) -> Vec<HtmlFormBinding> {
+        self.html_form_bindings
+            .get(uri)
+            .map(|bindings| bindings.value().clone())
+            .unwrap_or_default()
     }
 
     /// ng-includeで継承されるフォームバインディングリストを取得
