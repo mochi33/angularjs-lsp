@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
-use crate::index::{BindingSource, SymbolIndex, SymbolKind};
+use crate::index::{BindingSource, SymbolIndex, SymbolKind, TemplateBinding};
 
 pub struct CodeLensHandler {
     index: Arc<SymbolIndex>,
@@ -46,7 +46,10 @@ impl CodeLensHandler {
 
         // 2. テンプレートバインディング経由の呼び出し元（JSファイル）
         if let Some((controller_name, source, js_uri, js_line)) = self.index.get_template_binding_source(uri) {
-            lenses.push(self.create_bound_from_lens(&controller_name, &source, &js_uri, js_line));
+            // バインディング箇所へのジャンプ
+            lenses.push(self.create_bound_from_lens(&source, &js_uri, js_line));
+            // コントローラー定義へのジャンプ
+            lenses.push(self.create_controller_lens(&controller_name, 0, "Binded"));
         }
 
         // 3. ng-include継承コントローラー
@@ -71,6 +74,23 @@ impl CodeLensHandler {
             lenses.push(self.create_ng_include_lens(line, &template_path, resolved_uri));
         }
 
+        // 6. <script>タグ内のコントローラー定義（JSファイルと同様の処理）
+        let symbols = self.index.get_document_symbols(uri);
+        for symbol in symbols {
+            if symbol.kind == SymbolKind::Controller {
+                let templates = self.index.get_templates_for_controller(&symbol.name);
+                if !templates.is_empty() {
+                    lenses.push(self.create_template_lens(&symbol.name, symbol.name_start_line, &templates));
+                }
+            }
+        }
+
+        // 7. <script>タグ内のテンプレートバインディング定義
+        let bindings = self.index.get_template_bindings_for_js_file(uri);
+        for binding in bindings {
+            lenses.push(self.create_binding_lens(&binding));
+        }
+
         if lenses.is_empty() {
             None
         } else {
@@ -91,6 +111,12 @@ impl CodeLensHandler {
                     lenses.push(self.create_template_lens(&symbol.name, symbol.name_start_line, &templates));
                 }
             }
+        }
+
+        // このファイル内のテンプレートバインディング定義を取得
+        let bindings = self.index.get_template_bindings_for_js_file(uri);
+        for binding in bindings {
+            lenses.push(self.create_binding_lens(&binding));
         }
 
         if lenses.is_empty() {
@@ -248,7 +274,7 @@ impl CodeLensHandler {
     }
 
     /// テンプレートバインディングの呼び出し元（JSファイル）へのCodeLens
-    fn create_bound_from_lens(&self, controller_name: &str, source: &BindingSource, js_uri: &Url, js_line: u32) -> CodeLens {
+    fn create_bound_from_lens(&self, source: &BindingSource, js_uri: &Url, js_line: u32) -> CodeLens {
         let js_filename = js_uri.path().rsplit('/').next().unwrap_or("unknown");
 
         let source_label = match source {
@@ -257,7 +283,7 @@ impl CodeLensHandler {
             BindingSource::NgController => "ng-controller",
         };
 
-        let title = format!("Bound from: {} ({} in {})", controller_name, source_label, js_filename);
+        let title = format!("Bound from: {} in {}", source_label, js_filename);
 
         let locations = vec![serde_json::json!({
             "uri": js_uri.to_string(),
@@ -314,6 +340,67 @@ impl CodeLensHandler {
             range: Range {
                 start: Position { line, character: 0 },
                 end: Position { line, character: 0 },
+            },
+            command: Some(command),
+            data: None,
+        }
+    }
+
+    /// テンプレートバインディング定義箇所のCodeLens（templateファイルとControllerファイルにジャンプ）
+    fn create_binding_lens(&self, binding: &TemplateBinding) -> CodeLens {
+        let template_filename = binding.template_path.rsplit('/').next().unwrap_or(&binding.template_path);
+
+        let source_label = match binding.source {
+            BindingSource::RouteProvider => "$routeProvider",
+            BindingSource::UibModal => "$uibModal",
+            BindingSource::NgController => "ng-controller",
+        };
+
+        let title = format!("{}: {} -> {}", source_label, template_filename, binding.controller_name);
+
+        let mut locations: Vec<serde_json::Value> = Vec::new();
+
+        // templateファイルへのLocation
+        if let Some(template_uri) = self.index.resolve_template_uri(&binding.template_path) {
+            locations.push(serde_json::json!({
+                "uri": template_uri.to_string(),
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 0 }
+                }
+            }));
+        }
+
+        // Controllerファイルへのocation
+        let definitions = self.index.get_definitions(&binding.controller_name);
+        for def in definitions {
+            locations.push(serde_json::json!({
+                "uri": def.uri.to_string(),
+                "range": {
+                    "start": { "line": def.start_line, "character": def.start_col },
+                    "end": { "line": def.start_line, "character": def.start_col }
+                }
+            }));
+        }
+
+        let command = if locations.is_empty() {
+            Command {
+                title: format!("{} (not resolved)", title),
+                command: "".to_string(),
+                arguments: None,
+            }
+        } else {
+            Command {
+                title,
+                command: "angularjs.openLocation".to_string(),
+                arguments: Some(vec![serde_json::json!(locations)]),
+            }
+        };
+
+        CodeLens {
+            range: Range {
+                start: Position { line: binding.binding_line, character: 0 },
+                end: Position { line: binding.binding_line, character: 0 },
             },
             command: Some(command),
             data: None,

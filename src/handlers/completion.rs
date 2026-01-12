@@ -149,8 +149,7 @@ impl CompletionHandler {
                     s.kind != SymbolKind::Method
                         && s.kind != SymbolKind::ScopeProperty
                         && s.kind != SymbolKind::ScopeMethod
-                        // コントローラー内部では全てのコントローラーを除外
-                        && !(s.kind == SymbolKind::Controller && current_controller.is_some())
+                        && s.kind != SymbolKind::Controller
                 })
                 .map(|symbol| {
                     let kind = self.symbol_kind_to_completion_kind(symbol.kind);

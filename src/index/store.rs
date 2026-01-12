@@ -29,6 +29,10 @@ pub struct TemplateBinding {
     pub template_path: String,
     pub controller_name: String,
     pub source: BindingSource,
+    /// バインディング定義のURI（JSファイル）
+    pub binding_uri: Url,
+    /// バインディング定義の行番号（templateUrlプロパティの位置）
+    pub binding_line: u32,
 }
 
 /// HTML内のng-controllerスコープ
@@ -573,6 +577,8 @@ impl SymbolIndex {
             template_path: normalized_path.clone(),
             controller_name: binding.controller_name,
             source: binding.source,
+            binding_uri: binding.binding_uri,
+            binding_line: binding.binding_line,
         };
         self.template_bindings.insert(normalized_path.clone(), normalized_binding);
 
@@ -626,7 +632,7 @@ impl SymbolIndex {
     }
 
     /// URIからテンプレートバインディングのソース情報を取得
-    /// 返り値: (コントローラー名, ソースタイプ, コントローラー定義のURI, 定義行)
+    /// 返り値: (コントローラー名, ソースタイプ, バインディング定義のURI, バインディング定義行)
     pub fn get_template_binding_source(&self, uri: &Url) -> Option<(String, BindingSource, Url, u32)> {
         let path = uri.path();
         let filename = path.rsplit('/').next()?;
@@ -649,13 +655,17 @@ impl SymbolIndex {
             found
         }?;
 
-        // コントローラー定義からURIを取得
-        let definitions = self.get_definitions(&binding.controller_name);
-        if let Some(def) = definitions.first() {
-            Some((binding.controller_name, binding.source, def.uri.clone(), def.start_line))
-        } else {
-            None
-        }
+        // バインディング定義位置を返す（templateUrlプロパティの位置）
+        Some((binding.controller_name, binding.source, binding.binding_uri, binding.binding_line))
+    }
+
+    /// JSファイルURIから、そのファイル内で定義されているテンプレートバインディングを取得
+    pub fn get_template_bindings_for_js_file(&self, uri: &Url) -> Vec<TemplateBinding> {
+        self.template_bindings
+            .iter()
+            .filter(|entry| &entry.value().binding_uri == uri)
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     /// コントローラー名からバインドされているHTMLテンプレートのパスを取得
@@ -687,6 +697,22 @@ impl SymbolIndex {
 
     // ========== ng-includeバインディング関連 ==========
 
+    /// ng-includeバインディングのキーを生成（parent_uri#template_path形式）
+    fn make_ng_include_key(parent_uri: &Url, template_path: &str) -> String {
+        format!("{}#{}", parent_uri.as_str(), template_path)
+    }
+
+    /// 複合キーからtemplate_pathを抽出
+    fn extract_template_path_from_key(key: &str) -> &str {
+        // キー形式: "parent_uri#template_path"
+        if let Some(idx) = key.rfind('#') {
+            &key[idx + 1..]
+        } else {
+            // フォールバック: 古い形式のキー（template_pathのみ）
+            key
+        }
+    }
+
     /// ng-includeバインディングを追加
     /// 子ファイルが親として持っているng-include bindingの継承情報も更新する
     pub fn add_ng_include_binding(&self, binding: NgIncludeBinding) {
@@ -696,11 +722,14 @@ impl SymbolIndex {
         let inherited_local_variables = binding.inherited_local_variables.clone();
         let inherited_form_bindings = binding.inherited_form_bindings.clone();
 
+        // 複合キーを生成（親URI#テンプレートパス）
+        let key = Self::make_ng_include_key(&binding.parent_uri, &normalized_path);
+
         debug!(
             "add_ng_include_binding: {} (resolved: {}) -> {:?}",
-            normalized_path, resolved_filename, inherited_controllers
+            key, resolved_filename, inherited_controllers
         );
-        self.ng_include_bindings.insert(normalized_path.clone(), binding);
+        self.ng_include_bindings.insert(key, binding);
 
         // 子HTMLが既に解析済みかチェックし、解析済みなら再解析キューに追加
         // これにより、親のフォームバインディングが子HTMLで参照可能になる
@@ -811,9 +840,10 @@ impl SymbolIndex {
                 binding.inherited_local_variables = new_local_variables.clone();
                 binding.inherited_form_bindings = new_form_bindings.clone();
             }
-            // さらに子への伝播（再帰）
+            // さらに子への伝播（再帰）- 複合キーからtemplate_pathを抽出
+            let child_template_path = Self::extract_template_path_from_key(&key);
             self.propagate_inheritance_to_children(
-                &key,
+                child_template_path,
                 &new_controllers,
                 &new_local_variables,
                 &new_form_bindings,
@@ -869,19 +899,15 @@ impl SymbolIndex {
         // 例: URI "/Users/.../static/wf/views/foo.html" と
         //     正規化パス "static/wf/views/foo.html" がマッチ
         for entry in self.ng_include_bindings.iter() {
-            let normalized_path = entry.key();
+            // 複合キーからtemplate_pathを抽出
+            let template_path = Self::extract_template_path_from_key(entry.key());
             // URIのパスが正規化パスで終わるかチェック
-            if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
+            if path.ends_with(&format!("/{}", template_path)) || path == format!("/{}", template_path) {
                 return entry.value().inherited_controllers.clone();
             }
         }
 
-        // 方法2: ファイル名のみでマッチング（フォールバック）
-        if let Some(binding) = self.ng_include_bindings.get(filename) {
-            return binding.inherited_controllers.clone();
-        }
-
-        // 方法3: resolved_filenameでマッチング
+        // 方法2: resolved_filenameでマッチング
         for entry in self.ng_include_bindings.iter() {
             if entry.value().resolved_filename == filename {
                 return entry.value().inherited_controllers.clone();
@@ -901,18 +927,14 @@ impl SymbolIndex {
 
         // 方法1: 正規化パスでマッチング（パス末尾で比較）
         for entry in self.ng_include_bindings.iter() {
-            let normalized_path = entry.key();
-            if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
+            // 複合キーからtemplate_pathを抽出
+            let template_path = Self::extract_template_path_from_key(entry.key());
+            if path.ends_with(&format!("/{}", template_path)) || path == format!("/{}", template_path) {
                 return entry.value().inherited_local_variables.clone();
             }
         }
 
-        // 方法2: ファイル名のみでマッチング（フォールバック）
-        if let Some(binding) = self.ng_include_bindings.get(filename) {
-            return binding.inherited_local_variables.clone();
-        }
-
-        // 方法3: resolved_filenameでマッチング
+        // 方法2: resolved_filenameでマッチング
         for entry in self.ng_include_bindings.iter() {
             if entry.value().resolved_filename == filename {
                 return entry.value().inherited_local_variables.clone();
@@ -981,19 +1003,17 @@ impl SymbolIndex {
 
         for entry in self.ng_include_bindings.iter() {
             let binding = entry.value();
-            let normalized_path = entry.key();
+            // 複合キーからtemplate_pathを抽出
+            let template_path = Self::extract_template_path_from_key(entry.key());
 
-            // マッチング方法1: URIのパスが正規化パスで終わる
-            let matches_normalized = path.ends_with(&format!("/{}", normalized_path))
-                || path == format!("/{}", normalized_path);
+            // マッチング方法1: URIのパスがtemplate_pathで終わる
+            let matches_path = path.ends_with(&format!("/{}", template_path))
+                || path == format!("/{}", template_path);
 
-            // マッチング方法2: ファイル名が一致
-            let matches_filename = normalized_path == filename;
-
-            // マッチング方法3: resolved_filenameが一致
+            // マッチング方法2: resolved_filenameが一致
             let matches_resolved = binding.resolved_filename == filename;
 
-            if matches_normalized || matches_filename || matches_resolved {
+            if matches_path || matches_resolved {
                 result.push((binding.parent_uri.clone(), binding.line));
             }
         }
@@ -1427,18 +1447,14 @@ impl SymbolIndex {
 
         // 方法1: 正規化パスでマッチング（パス末尾で比較）
         for entry in self.ng_include_bindings.iter() {
-            let normalized_path = entry.key();
-            if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
+            // 複合キーからtemplate_pathを抽出
+            let template_path = Self::extract_template_path_from_key(entry.key());
+            if path.ends_with(&format!("/{}", template_path)) || path == format!("/{}", template_path) {
                 return entry.value().inherited_form_bindings.clone();
             }
         }
 
-        // 方法2: ファイル名のみでマッチング（フォールバック）
-        if let Some(binding) = self.ng_include_bindings.get(filename) {
-            return binding.inherited_form_bindings.clone();
-        }
-
-        // 方法3: resolved_filenameでマッチング
+        // 方法2: resolved_filenameでマッチング
         for entry in self.ng_include_bindings.iter() {
             if entry.value().resolved_filename == filename {
                 return entry.value().inherited_form_bindings.clone();
@@ -1510,16 +1526,20 @@ impl SymbolIndex {
             }
         }
 
-        // ng_include_bindingsから検索
-        if let Some(binding) = self.ng_include_bindings.get(&normalized_path) {
-            // parent_uriから相対パスを解決してURIを構築
-            let parent_uri = &binding.parent_uri;
-            let parent_path = parent_uri.path();
-            if let Some(last_slash) = parent_path.rfind('/') {
-                let parent_dir = &parent_path[..last_slash];
-                let resolved_path = format!("{}/{}", parent_dir, normalized_path);
-                if let Ok(uri) = Url::parse(&format!("{}://{}{}", parent_uri.scheme(), parent_uri.authority(), resolved_path)) {
-                    return Some(uri);
+        // ng_include_bindingsから検索（複合キーを使用しているのでイテレーション）
+        for entry in self.ng_include_bindings.iter() {
+            let template_path = Self::extract_template_path_from_key(entry.key());
+            if template_path == normalized_path {
+                // parent_uriから相対パスを解決してURIを構築
+                let binding = entry.value();
+                let parent_uri = &binding.parent_uri;
+                let parent_path = parent_uri.path();
+                if let Some(last_slash) = parent_path.rfind('/') {
+                    let parent_dir = &parent_path[..last_slash];
+                    let resolved_path = format!("{}/{}", parent_dir, normalized_path);
+                    if let Ok(uri) = Url::parse(&format!("{}://{}{}", parent_uri.scheme(), parent_uri.authority(), resolved_path)) {
+                        return Some(uri);
+                    }
                 }
             }
         }

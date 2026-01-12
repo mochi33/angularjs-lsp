@@ -39,7 +39,7 @@ impl AngularJsAnalyzer {
                         "filter" => self.extract_component_definition(node, source, uri, SymbolKind::Filter, ctx),
                         "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant, ctx),
                         "value" => self.extract_component_definition(node, source, uri, SymbolKind::Value, ctx),
-                        "open" => self.extract_modal_binding(node, callee, source),
+                        "open" => self.extract_modal_binding(node, callee, source, uri),
                         "config" | "run" => self.extract_run_config_di(node, source, ctx),
                         "when" | "otherwise" => self.extract_route_when_di(node, source, uri, ctx),
                         _ => {}
@@ -50,7 +50,7 @@ impl AngularJsAnalyzer {
     }
 
     /// $uibModal.open() / $modal.open() からテンプレートバインディングを抽出
-    fn extract_modal_binding(&self, node: Node, callee: Node, source: &str) {
+    fn extract_modal_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
         // オブジェクトが$uibModalや$modalかチェック
         if let Some(object) = callee.child_by_field_name("object") {
             let obj_text = self.node_text(object, source);
@@ -65,16 +65,17 @@ impl AngularJsAnalyzer {
         if let Some(args) = node.child_by_field_name("arguments") {
             if let Some(first_arg) = args.named_child(0) {
                 if first_arg.kind() == "object" {
-                    self.extract_template_binding_from_object(first_arg, source, BindingSource::UibModal);
+                    self.extract_template_binding_from_object(first_arg, source, uri, BindingSource::UibModal);
                 }
             }
         }
     }
 
     /// JSオブジェクトからcontrollerとtemplateUrlを抽出してバインディングを登録
-    fn extract_template_binding_from_object(&self, obj_node: Node, source: &str, binding_source: BindingSource) {
+    fn extract_template_binding_from_object(&self, obj_node: Node, source: &str, uri: &Url, binding_source: BindingSource) {
         let mut controller_name: Option<String> = None;
         let mut template_url: Option<String> = None;
+        let mut template_url_line: Option<u32> = None;
 
         let mut cursor = obj_node.walk();
         for child in obj_node.children(&mut cursor) {
@@ -94,6 +95,7 @@ impl AngularJsAnalyzer {
                             "templateUrl" => {
                                 if value.kind() == "string" {
                                     template_url = Some(self.extract_string_value(value, source));
+                                    template_url_line = Some(self.offset_line(value.start_position().row as u32));
                                 }
                             }
                             _ => {}
@@ -109,6 +111,8 @@ impl AngularJsAnalyzer {
                 template_path: template,
                 controller_name: controller,
                 source: binding_source,
+                binding_uri: uri.clone(),
+                binding_line: template_url_line.unwrap_or(self.offset_line(obj_node.start_position().row as u32)),
             };
             self.index.add_template_binding(binding);
         }
@@ -145,7 +149,7 @@ impl AngularJsAnalyzer {
     /// また、controller と templateUrl の組み合わせでテンプレートバインディングも登録する
     fn extract_controller_di_from_config_object(&self, obj_node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         // まずテンプレートバインディング用にcontrollerとtemplateUrlを収集
-        self.extract_template_binding_from_object(obj_node, source, BindingSource::RouteProvider);
+        self.extract_template_binding_from_object(obj_node, source, uri, BindingSource::RouteProvider);
 
         let mut cursor = obj_node.walk();
         for child in obj_node.children(&mut cursor) {

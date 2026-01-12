@@ -27,7 +27,7 @@ interface LspLocation {
 // GitHub release info
 const GITHUB_OWNER = 'mochi33';
 const GITHUB_REPO = 'angularjs-lsp';
-const CURRENT_VERSION = '0.1.4';
+const CURRENT_VERSION = '0.1.5';
 
 // State keys
 const STATE_INSTALLED_VERSION = 'angularjsLsp.installedVersion';
@@ -759,14 +759,24 @@ async function installServerCommand(
         // Stop current server if running
         await stopServer();
 
+        // Wait for server process to fully terminate
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+
+        // Delete existing binary to avoid ETXTBSY
+        const binDir = path.join(context.globalStorageUri.fsPath, 'bin');
+        const executableName = getExecutableName();
+        const localServerPath = path.join(binDir, executableName);
+        try {
+            await fs.promises.unlink(localServerPath);
+            outputChannel.appendLine('Removed existing binary');
+        } catch {
+            // File might not exist, ignore
+        }
+
         // Download latest version
         await downloadAngularJsLsp(context, outputChannel);
 
         // Update config
-        const binDir = path.join(context.globalStorageUri.fsPath, 'bin');
-        const executableName = getExecutableName();
-        const localServerPath = path.join(binDir, executableName);
-
         const config = vscode.workspace.getConfiguration('angularjsLsp');
         await config.update('serverPath', localServerPath, vscode.ConfigurationTarget.Global);
 

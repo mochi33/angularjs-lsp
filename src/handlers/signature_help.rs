@@ -144,32 +144,44 @@ impl SignatureHelpHandler {
             return Some(def.clone());
         }
 
-        // 2. メソッド名のみの場合、プレフィックスを付けて検索
-        if !function_name.contains('.') {
-            // コントローラーエイリアスの解決を試みる
-            // alias.method の形式の場合、aliasからコントローラーを解決
-            // ここではHTMLファイルの場合のみ適用
-            if Self::is_html_file(uri) {
-                // HTMLの場合、コントローラーエイリアスを使ってメソッドを探す
-                let alias_mappings = self.index.get_html_alias_mappings(uri, line);
-                for (alias, controller_name) in alias_mappings {
-                    // function_nameがalias.methodの形式かチェック
-                    if function_name.starts_with(&format!("{}.", alias)) {
-                        let method_part = &function_name[alias.len() + 1..];
-                        let full_name = format!("{}.{}", controller_name, method_part);
-                        let defs = self.index.get_definitions(&full_name);
-                        if let Some(def) = defs.first() {
-                            return Some(def.clone());
-                        }
-                    }
+        // 2. $scope.methodName 形式の場合、ControllerName.$scope.methodName に変換
+        if function_name.starts_with("$scope.") {
+            if let Some(controller_name) = self.index.get_controller_at(uri, line) {
+                let method_name = &function_name[7..]; // "$scope." の後の部分
+                let full_name = format!("{}.$scope.{}", controller_name, method_name);
+                let defs = self.index.get_definitions(&full_name);
+                if let Some(def) = defs.first() {
+                    return Some(def.clone());
                 }
             }
         }
 
-        // 3. ドット区切りの場合、サービス.メソッドパターンを検索
-        if function_name.contains('.') {
-            // ServiceName.methodName形式の場合はそのまま検索
-            // すでに上で検索済みなので、ここに到達する場合は見つからなかった
+        // 3. HTMLファイルの場合
+        if Self::is_html_file(uri) {
+            // 3a. alias.method 形式をコントローラー名に解決 (例: ctrl.doSomething)
+            let alias_mappings = self.index.get_html_alias_mappings(uri, line);
+            for (alias, controller_name) in &alias_mappings {
+                if function_name.starts_with(&format!("{}.", alias)) {
+                    let method_part = &function_name[alias.len() + 1..];
+                    let full_name = format!("{}.$scope.{}", controller_name, method_part);
+                    let defs = self.index.get_definitions(&full_name);
+                    if let Some(def) = defs.first() {
+                        return Some(def.clone());
+                    }
+                }
+            }
+
+            // 3b. 直接メソッド呼び出し (例: doSomething) - エイリアスなしの場合
+            if !function_name.contains('.') {
+                // テンプレートバインディングまたはng-controllerからコントローラーを解決
+                if let Some(controller_name) = self.index.resolve_controller_for_html(uri, line) {
+                    let full_name = format!("{}.$scope.{}", controller_name, function_name);
+                    let defs = self.index.get_definitions(&full_name);
+                    if let Some(def) = defs.first() {
+                        return Some(def.clone());
+                    }
+                }
+            }
         }
 
         None

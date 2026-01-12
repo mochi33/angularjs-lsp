@@ -699,6 +699,7 @@ impl LanguageServer for Backend {
             .await;
 
         // 2. フォールバック: typescript-language-server
+        self.ensure_ts_file_opened(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.goto_definition(&params).await);
         }
@@ -707,6 +708,8 @@ impl LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+
         // 1. AngularJS解析を試行
         let handler = HoverHandler::new(Arc::clone(&self.index));
         if let Some(hover) = handler.hover(params.clone()) {
@@ -714,6 +717,7 @@ impl LanguageServer for Backend {
         }
 
         // 2. フォールバック: typescript-language-server
+        self.ensure_ts_file_opened(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.hover(&params).await);
         }
@@ -873,6 +877,7 @@ impl LanguageServer for Backend {
         if let Some(ref prefix) = service_prefix {
             if prefix != "$scope" && !self.index.is_service_or_factory(prefix) {
                 // TypeScript補完にフォールバック
+                self.ensure_ts_file_opened(uri).await;
                 if let Some(ref proxy) = *self.ts_proxy.read().await {
                     return Ok(proxy.completion(&params).await);
                 }
@@ -893,6 +898,7 @@ impl LanguageServer for Backend {
         }
 
         // 2. フォールバック: typescript-language-server
+        self.ensure_ts_file_opened(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.completion(&params).await);
         }
@@ -939,3 +945,4 @@ impl LanguageServer for Backend {
         Ok(handler.code_lens(uri))
     }
 }
+
