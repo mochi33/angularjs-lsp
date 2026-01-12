@@ -365,8 +365,9 @@ impl AngularJsAnalyzer {
                         // DIサービスがあるか、$scopeまたは$rootScopeがある場合はスコープを追加
                         if !injected_services.is_empty() || has_scope || has_root_scope {
                             if let Some((body_start, body_end)) = self.find_function_body_range(second_arg, source) {
-                                // コントローラーの場合はスコープ情報を SymbolIndex に登録
-                                if kind == SymbolKind::Controller {
+                                // Controller/Service/Factory の場合はスコープ情報を SymbolIndex に登録
+                                // これにより補完時にInjectされたサービスを優先表示できる
+                                if matches!(kind, SymbolKind::Controller | SymbolKind::Service | SymbolKind::Factory) {
                                     self.index.add_controller_scope(ControllerScope {
                                         name: component_name.clone(),
                                         uri: uri.clone(),
