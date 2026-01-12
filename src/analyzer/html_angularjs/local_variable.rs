@@ -75,25 +75,30 @@ impl HtmlAngularJsAnalyzer {
                             let raw_value = self.node_text(value_node, source);
                             let value = raw_value.trim_matches(|c| c == '"' || c == '\'');
 
-                            // 属性値の開始位置（クォートの後）
-                            let value_start_line = value_node.start_position().row as u32;
-                            let value_start_col = value_node.start_position().column as u32 + 1;
+                            // 属性値の開始位置（クォートの後）- UTF-16変換
+                            let value_start_line = value_node.start_position().row as usize;
+                            let value_byte_col = value_node.start_position().column + 1;
+                            let value_start_col = self.byte_col_to_utf16_col(source, value_start_line, value_byte_col);
 
                             // 共通パーサーを使用
                             let parsed_vars = parse_ng_repeat_expression(value);
 
                             for var in parsed_vars {
-                                let (line_offset, col_in_line) = self
-                                    .calculate_position_in_multiline(
-                                        value,
-                                        var.offset,
-                                        value_start_col as usize,
-                                    );
+                                // バイトオフセットからUTF-16位置を計算
+                                let before_var = &value[..var.offset];
+                                let var_text = &value[var.offset..var.offset + var.len];
+                                let newline_count = before_var.matches('\n').count();
 
-                                let name_start_line = value_start_line + line_offset as u32;
-                                let name_start_col = col_in_line as u32;
+                                let name_start_line = value_start_line as u32 + newline_count as u32;
+                                let name_start_col = if newline_count == 0 {
+                                    value_start_col + self.byte_offset_to_utf16_offset(before_var, before_var.len()) as u32
+                                } else {
+                                    let last_newline_pos = before_var.rfind('\n').unwrap();
+                                    let after_newline = &before_var[last_newline_pos + 1..];
+                                    self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
+                                };
                                 let name_end_line = name_start_line;
-                                let name_end_col = name_start_col + var.len as u32;
+                                let name_end_col = name_start_col + var_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
                                 let variable = HtmlLocalVariable {
                                     name: var.name,
@@ -137,25 +142,30 @@ impl HtmlAngularJsAnalyzer {
                             let raw_value = self.node_text(value_node, source);
                             let value = raw_value.trim_matches(|c| c == '"' || c == '\'');
 
-                            // 属性値の開始位置（クォートの後）
-                            let value_start_line = value_node.start_position().row as u32;
-                            let value_start_col = value_node.start_position().column as u32 + 1;
+                            // 属性値の開始位置（クォートの後）- UTF-16変換
+                            let value_start_line = value_node.start_position().row as usize;
+                            let value_byte_col = value_node.start_position().column + 1;
+                            let value_start_col = self.byte_col_to_utf16_col(source, value_start_line, value_byte_col);
 
                             // 共通パーサーを使用
                             let parsed_vars = parse_ng_init_expression(value);
 
                             for var in parsed_vars {
-                                let (line_offset, col_in_line) = self
-                                    .calculate_position_in_multiline(
-                                        value,
-                                        var.offset,
-                                        value_start_col as usize,
-                                    );
+                                // バイトオフセットからUTF-16位置を計算
+                                let before_var = &value[..var.offset];
+                                let var_text = &value[var.offset..var.offset + var.len];
+                                let newline_count = before_var.matches('\n').count();
 
-                                let name_start_line = value_start_line + line_offset as u32;
-                                let name_start_col = col_in_line as u32;
+                                let name_start_line = value_start_line as u32 + newline_count as u32;
+                                let name_start_col = if newline_count == 0 {
+                                    value_start_col + self.byte_offset_to_utf16_offset(before_var, before_var.len()) as u32
+                                } else {
+                                    let last_newline_pos = before_var.rfind('\n').unwrap();
+                                    let after_newline = &before_var[last_newline_pos + 1..];
+                                    self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
+                                };
                                 let name_end_line = name_start_line;
-                                let name_end_col = name_start_col + var.len as u32;
+                                let name_end_col = name_start_col + var_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
                                 let variable = HtmlLocalVariable {
                                     name: var.name,
@@ -227,9 +237,10 @@ impl HtmlAngularJsAnalyzer {
         // テキストノード内のinterpolationから参照を収集
         if node.kind() == "text" {
             let text = self.node_text(node, source);
-            self.extract_local_variable_references_from_interpolation(
+            self.extract_local_variable_references_from_interpolation_utf16(
                 &text,
                 node,
+                source,
                 uri,
                 active_scopes,
             );
@@ -273,8 +284,9 @@ impl HtmlAngularJsAnalyzer {
                         {
                             let raw_value = self.node_text(value_node, source);
                             let value = raw_value.trim_matches(|c| c == '"' || c == '\'');
-                            let value_start_line = value_node.start_position().row as u32;
-                            let value_start_col = value_node.start_position().column as u32 + 1;
+                            let value_start_line = value_node.start_position().row as usize;
+                            let value_byte_col = value_node.start_position().column + 1;
+                            let value_start_col = self.byte_col_to_utf16_col(source, value_start_line, value_byte_col);
 
                             // ng-repeatの場合は"in"の後の部分のみ
                             let expr_to_check =
@@ -290,7 +302,10 @@ impl HtmlAngularJsAnalyzer {
                                             };
                                         // フィルタを除去
                                         let after_in = after_in.split('|').next().unwrap_or(after_in);
-                                        Some((after_in.to_string(), in_idx + 4))
+                                        // UTF-16オフセットを計算
+                                        let before_in = &value[..in_idx + 4];
+                                        let utf16_offset = self.byte_offset_to_utf16_offset(before_in, before_in.len());
+                                        Some((after_in.to_string(), utf16_offset))
                                     } else {
                                         None
                                     }
@@ -299,12 +314,12 @@ impl HtmlAngularJsAnalyzer {
                                     None // 複雑なのでスキップ（将来的に対応可能）
                                 };
 
-                            if let Some((expr, offset_in_value)) = expr_to_check {
-                                self.check_and_register_local_var_references(
+                            if let Some((expr, utf16_offset_in_value)) = expr_to_check {
+                                self.check_and_register_local_var_references_utf16(
                                     &expr,
                                     uri,
-                                    value_start_line,
-                                    value_start_col + offset_in_value as u32,
+                                    value_start_line as u32,
+                                    value_start_col + utf16_offset_in_value as u32,
                                     active_scopes,
                                 );
                             }
@@ -317,24 +332,25 @@ impl HtmlAngularJsAnalyzer {
                     {
                         let raw_value = self.node_text(value_node, source);
                         let value = raw_value.trim_matches(|c| c == '"' || c == '\'');
-                        let value_start_line = value_node.start_position().row as u32;
-                        let value_start_col = value_node.start_position().column as u32 + 1;
+                        let value_start_line = value_node.start_position().row as usize;
+                        let value_byte_col = value_node.start_position().column + 1;
+                        let value_start_col = self.byte_col_to_utf16_col(source, value_start_line, value_byte_col);
 
                         if is_ng_directive(&attr_name) {
                             // ngディレクティブ: 属性値全体をAngular式として解析
                             // フィルタを除去
                             let expr = value.split('|').next().unwrap_or(value);
 
-                            self.check_and_register_local_var_references(
+                            self.check_and_register_local_var_references_utf16(
                                 expr,
                                 uri,
-                                value_start_line,
+                                value_start_line as u32,
                                 value_start_col,
                                 active_scopes,
                             );
                         } else {
                             // 非ディレクティブ属性: インターポレーションのみを抽出
-                            self.extract_local_variable_references_from_attribute_interpolation(
+                            self.extract_local_variable_references_from_attribute_interpolation_utf16(
                                 value,
                                 uri,
                                 value_start_line,
@@ -348,13 +364,13 @@ impl HtmlAngularJsAnalyzer {
         }
     }
 
-    /// 属性値内のインターポレーションからローカル変数参照を抽出
-    fn extract_local_variable_references_from_attribute_interpolation(
+    /// 属性値内のインターポレーションからローカル変数参照を抽出（UTF-16対応版）
+    fn extract_local_variable_references_from_attribute_interpolation_utf16(
         &self,
         value: &str,
         uri: &Url,
-        value_start_line: u32,
-        value_start_col: u32,
+        value_start_line: usize,
+        value_start_col: u32, // UTF-16
         active_scopes: &HashMap<String, (u32, u32)>,
     ) {
         let (start_symbol, end_symbol) = self.get_interpolate_symbols();
@@ -369,21 +385,29 @@ impl HtmlAngularJsAnalyzer {
                 let expr = &value[abs_open + start_len..abs_close];
                 let expr_trimmed = expr.trim();
 
-                // 式の開始位置（{{ の後、トリム前の空白を考慮）
-                let expr_start_in_value = abs_open + start_len + (expr.len() - expr.trim_start().len());
+                // 式の開始位置（{{ の後、トリム前の空白を考慮）- バイトオフセット
+                let expr_start_byte_offset = abs_open + start_len + (expr.len() - expr.trim_start().len());
 
-                // 式内での位置を計算
-                let (line_offset, col_in_line) = self.calculate_position_in_multiline(value, expr_start_in_value, value_start_col as usize);
-                let expr_line = value_start_line + line_offset as u32;
-                let expr_col = col_in_line as u32;
+                // 式内での位置を計算（UTF-16対応）
+                let before_expr = &value[..expr_start_byte_offset];
+                let newline_count = before_expr.matches('\n').count();
+                let expr_line = value_start_line + newline_count;
+
+                let expr_col = if newline_count == 0 {
+                    value_start_col + self.byte_offset_to_utf16_offset(before_expr, before_expr.len()) as u32
+                } else {
+                    let last_newline_pos = before_expr.rfind('\n').unwrap();
+                    let after_newline = &before_expr[last_newline_pos + 1..];
+                    self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
+                };
 
                 // フィルタを除去
                 let expr_to_check = expr_trimmed.split('|').next().unwrap_or(expr_trimmed);
 
-                self.check_and_register_local_var_references(
+                self.check_and_register_local_var_references_utf16(
                     expr_to_check,
                     uri,
-                    expr_line,
+                    expr_line as u32,
                     expr_col,
                     active_scopes,
                 );
@@ -395,11 +419,12 @@ impl HtmlAngularJsAnalyzer {
         }
     }
 
-    /// interpolation内からローカル変数参照を抽出
-    fn extract_local_variable_references_from_interpolation(
+    /// interpolation内からローカル変数参照を抽出（UTF-16対応版）
+    fn extract_local_variable_references_from_interpolation_utf16(
         &self,
         text: &str,
         node: Node,
+        source: &str,
         uri: &Url,
         active_scopes: &HashMap<String, (u32, u32)>,
     ) {
@@ -407,8 +432,9 @@ impl HtmlAngularJsAnalyzer {
         let start_len = start_symbol.len();
         let end_len = end_symbol.len();
 
-        let node_start_col = node.start_position().column as u32;
-        let node_start_line = node.start_position().row as u32;
+        let node_start_line = node.start_position().row as usize;
+        let node_start_byte_col = node.start_position().column;
+        let node_start_col = self.byte_col_to_utf16_col(source, node_start_line, node_start_byte_col);
 
         let mut start = 0;
         while let Some(open_idx) = text[start..].find(&start_symbol) {
@@ -418,17 +444,31 @@ impl HtmlAngularJsAnalyzer {
                 let expr = &text[abs_open + start_len..abs_close];
                 let expr_trimmed = expr.trim();
 
-                // 式の開始位置
-                let expr_start_in_text = abs_open + start_len + (expr.len() - expr.trim_start().len());
+                // 式の開始位置 - バイトオフセット
+                let expr_start_byte_offset = abs_open + start_len + (expr.len() - expr.trim_start().len());
+
+                // 式内での位置を計算（UTF-16対応）
+                let before_expr = &text[..expr_start_byte_offset];
+                let newline_count = before_expr.matches('\n').count();
+                let expr_line = node_start_line + newline_count;
+
+                let expr_col = if newline_count == 0 {
+                    let utf16_offset = self.byte_offset_to_utf16_offset(text, expr_start_byte_offset);
+                    node_start_col + utf16_offset as u32
+                } else {
+                    let last_newline_pos = before_expr.rfind('\n').unwrap();
+                    let after_newline = &text[last_newline_pos + 1..expr_start_byte_offset];
+                    self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
+                };
 
                 // フィルタを除去
                 let expr_to_check = expr_trimmed.split('|').next().unwrap_or(expr_trimmed);
 
-                self.check_and_register_local_var_references(
+                self.check_and_register_local_var_references_utf16(
                     expr_to_check,
                     uri,
-                    node_start_line,
-                    node_start_col + expr_start_in_text as u32,
+                    expr_line as u32,
+                    expr_col,
                     active_scopes,
                 );
 
@@ -439,27 +479,35 @@ impl HtmlAngularJsAnalyzer {
         }
     }
 
-    /// 式内のローカル変数参照をチェックして登録
-    fn check_and_register_local_var_references(
+    /// 式内のローカル変数参照をチェックして登録（UTF-16対応版）
+    fn check_and_register_local_var_references_utf16(
         &self,
         expr: &str,
         uri: &Url,
         base_line: u32,
-        base_col: u32,
+        base_col: u32, // UTF-16
         active_scopes: &HashMap<String, (u32, u32)>,
     ) {
         // 有効なローカル変数の名前だけをチェック
         for (var_name, _) in active_scopes {
             let positions = self.find_identifier_positions(expr, var_name);
 
-            for (offset, len) in positions {
-                let (line_offset, col_in_line) =
-                    self.calculate_position_in_multiline(expr, offset, base_col as usize);
+            for (byte_offset, byte_len) in positions {
+                // バイトオフセットからUTF-16位置を計算
+                let before_identifier = &expr[..byte_offset];
+                let identifier_text = &expr[byte_offset..byte_offset + byte_len];
+                let newline_count = before_identifier.matches('\n').count();
 
-                let start_line = base_line + line_offset as u32;
-                let start_col = col_in_line as u32;
+                let start_line = base_line + newline_count as u32;
+                let start_col = if newline_count == 0 {
+                    base_col + self.byte_offset_to_utf16_offset(before_identifier, before_identifier.len()) as u32
+                } else {
+                    let last_newline_pos = before_identifier.rfind('\n').unwrap();
+                    let after_newline = &before_identifier[last_newline_pos + 1..];
+                    self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
+                };
                 let end_line = start_line;
-                let end_col = start_col + len as u32;
+                let end_col = start_col + identifier_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
                 let reference = HtmlLocalVariableReference {
                     variable_name: var_name.clone(),

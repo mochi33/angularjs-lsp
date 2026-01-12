@@ -305,7 +305,7 @@ impl HtmlAngularJsAnalyzer {
     }
 
     /// バイトオフセットの列位置をUTF-16コードユニット単位の列位置に変換
-    fn byte_col_to_utf16_col(&self, source: &str, line: usize, byte_col: usize) -> u32 {
+    pub(super) fn byte_col_to_utf16_col(&self, source: &str, line: usize, byte_col: usize) -> u32 {
         // 該当行を取得
         if let Some(line_content) = source.lines().nth(line) {
             // バイト位置までの文字をUTF-16コードユニット数でカウント
@@ -325,7 +325,7 @@ impl HtmlAngularJsAnalyzer {
     }
 
     /// テキスト内でのバイトオフセットからUTF-16コードユニット数を計算
-    fn byte_offset_to_utf16_offset(&self, text: &str, byte_offset: usize) -> usize {
+    pub(super) fn byte_offset_to_utf16_offset(&self, text: &str, byte_offset: usize) -> usize {
         let before = &text[..byte_offset.min(text.len())];
         before.chars().map(|c| c.len_utf16()).sum()
     }
