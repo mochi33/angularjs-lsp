@@ -16,13 +16,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x64
+          # Linux x64 (Ubuntu 20.04 for glibc 2.31 compatibility)
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-20.04
             archive: tar.gz
-          # Linux ARM64
+          # Linux ARM64 (Ubuntu 20.04 for glibc 2.31 compatibility)
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-20.04
             archive: tar.gz
             cross: true
           # macOS Intel
