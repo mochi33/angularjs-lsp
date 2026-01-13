@@ -8,6 +8,7 @@ use crate::index::{HtmlScopeReference, SymbolIndex, SymbolKind};
 const TOKEN_TYPE_PROPERTY: u32 = 0;
 const TOKEN_TYPE_METHOD: u32 = 1;
 const TOKEN_TYPE_VARIABLE: u32 = 2;
+const TOKEN_TYPE_MACRO: u32 = 3; // directive
 
 /// Token modifiers (bit flags)
 const TOKEN_MOD_READONLY: u32 = 1 << 0;
@@ -39,6 +40,7 @@ impl SemanticTokensHandler {
                 SemanticTokenType::PROPERTY, // 0: scope property
                 SemanticTokenType::METHOD,   // 1: scope method
                 SemanticTokenType::VARIABLE, // 2: local variable, form binding
+                SemanticTokenType::MACRO,    // 3: directive
             ],
             token_modifiers: vec![
                 SemanticTokenModifier::READONLY,    // 0: for form bindings
@@ -85,6 +87,9 @@ impl SemanticTokensHandler {
 
         // 4. Form binding definitions
         self.collect_form_binding_tokens(uri, &mut raw_tokens);
+
+        // 5. Directive references
+        self.collect_directive_reference_tokens(uri, &mut raw_tokens);
 
         raw_tokens
     }
@@ -221,6 +226,21 @@ impl SemanticTokensHandler {
                 length: (binding.name_end_col - binding.name_start_col),
                 token_type: TOKEN_TYPE_VARIABLE,
                 token_modifiers: TOKEN_MOD_READONLY | TOKEN_MOD_DECLARATION,
+            });
+        }
+    }
+
+    /// Collect tokens from directive references
+    fn collect_directive_reference_tokens(&self, uri: &Url, tokens: &mut Vec<RawSemanticToken>) {
+        let refs = self.index.get_all_directive_references_for_uri(uri);
+
+        for directive_ref in refs {
+            tokens.push(RawSemanticToken {
+                line: directive_ref.start_line,
+                start_col: directive_ref.start_col,
+                length: (directive_ref.end_col - directive_ref.start_col),
+                token_type: TOKEN_TYPE_MACRO,
+                token_modifiers: 0,
             });
         }
     }

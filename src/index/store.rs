@@ -1595,6 +1595,14 @@ impl SymbolIndex {
         references
     }
 
+    /// 指定URIの全ディレクティブ参照を取得
+    pub fn get_all_directive_references_for_uri(&self, uri: &Url) -> Vec<HtmlDirectiveReference> {
+        self.html_directive_references
+            .get(uri)
+            .map(|refs| refs.clone())
+            .unwrap_or_default()
+    }
+
     /// HTMLファイルに対応するコントローラー名を解決
     /// 1. HTML内のng-controllerスコープ
     /// 2. テンプレートバインディング（$routeProvider, $uibModal）

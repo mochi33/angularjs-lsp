@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
-use crate::index::{HtmlFormBinding, HtmlLocalVariable, HtmlLocalVariableSource, SymbolIndex};
+use crate::index::{HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable, HtmlLocalVariableSource, SymbolIndex};
 
 pub struct HoverHandler {
     index: Arc<SymbolIndex>,
@@ -68,6 +68,15 @@ impl HoverHandler {
             position.character,
         ) {
             return self.build_hover_for_form_binding(&form_binding);
+        }
+
+        // 3.5. ディレクティブ参照をチェック
+        if let Some(directive_ref) = self.index.find_html_directive_reference_at(
+            uri,
+            position.line,
+            position.character,
+        ) {
+            return self.build_hover_for_directive(&directive_ref);
         }
 
         // 4. 位置からHTMLスコープ参照を取得
@@ -237,6 +246,60 @@ impl HoverHandler {
             form_binding.scope_start_line + 1,
             form_binding.scope_end_line + 1,
         );
+
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: None,
+        })
+    }
+
+    /// ディレクティブ参照用のホバー情報を構築
+    fn build_hover_for_directive(&self, directive_ref: &HtmlDirectiveReference) -> Option<Hover> {
+        // ディレクティブ定義を取得
+        let definitions = self.index.get_definitions(&directive_ref.directive_name);
+
+        if definitions.is_empty() {
+            return None;
+        }
+
+        let def = &definitions[0];
+
+        // ファイル名を取得
+        let file_name = def
+            .uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| def.uri.to_string());
+
+        // HTML内の参照数を取得
+        let html_references = self.index.get_html_directive_references(&directive_ref.directive_name);
+        let reference_count = html_references.len();
+
+        let usage_type = match directive_ref.usage_type {
+            crate::index::DirectiveUsageType::Element => "element",
+            crate::index::DirectiveUsageType::Attribute => "attribute",
+        };
+
+        let mut content = format!(
+            "**{}** (*directive*)\n\nUsed as: `{}`\n\n",
+            directive_ref.directive_name,
+            usage_type
+        );
+
+        if let Some(ref docs) = def.docs {
+            content.push_str(docs);
+            content.push_str("\n\n---\n\n");
+        }
+
+        content.push_str(&format!("Defined in: `{}:{}`\n", file_name, def.start_line + 1));
+
+        if reference_count > 0 {
+            content.push_str(&format!("\nHTML references: {}", reference_count));
+        }
 
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
