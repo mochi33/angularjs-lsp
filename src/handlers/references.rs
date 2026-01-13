@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::*;
 use tracing::debug;
 
-use crate::index::{HtmlFormBinding, HtmlLocalVariable, SymbolIndex};
+use crate::index::{HtmlFormBinding, HtmlLocalVariable, SymbolIndex, SymbolKind};
 
 pub struct ReferencesHandler {
     index: Arc<SymbolIndex>,
@@ -36,6 +36,12 @@ impl ReferencesHandler {
             position.character,
         )?;
 
+        // シンボルがディレクティブの場合、HTML参照も収集
+        let definitions = self.index.get_definitions(&symbol_name);
+        if definitions.iter().any(|d| d.kind == SymbolKind::Directive) {
+            return self.collect_directive_all_references(&symbol_name, include_declaration);
+        }
+
         self.collect_references(&symbol_name, include_declaration)
     }
 
@@ -46,6 +52,18 @@ impl ReferencesHandler {
         position: Position,
         include_declaration: bool,
     ) -> Option<Vec<Location>> {
+        // 0. まずカスタムディレクティブ参照をチェック
+        if let Some(directive_ref) = self.index.find_html_directive_reference_at(
+            uri,
+            position.line,
+            position.character,
+        ) {
+            return self.collect_directive_all_references(
+                &directive_ref.directive_name,
+                include_declaration,
+            );
+        }
+
         // 1. まずローカル変数をチェック（定義位置にカーソルがある場合）
         if let Some(local_var_def) = self.index.find_html_local_variable_definition_at(
             uri,
@@ -216,6 +234,76 @@ impl ReferencesHandler {
 
         // Add reference locations (JS + HTML)
         for reference in self.index.get_all_references(symbol_name) {
+            locations.push(Location {
+                uri: reference.uri.clone(),
+                range: Range {
+                    start: Position {
+                        line: reference.start_line,
+                        character: reference.start_col,
+                    },
+                    end: Position {
+                        line: reference.end_line,
+                        character: reference.end_col,
+                    },
+                },
+            });
+        }
+
+        if locations.is_empty() {
+            None
+        } else {
+            Some(locations)
+        }
+    }
+
+    /// ディレクティブの定義と全参照を収集
+    fn collect_directive_all_references(
+        &self,
+        directive_name: &str,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let mut locations = Vec::new();
+
+        // 定義位置を追加（SymbolKind::Directiveのみ）
+        if include_declaration {
+            for def in self.index.get_definitions(directive_name) {
+                if def.kind == SymbolKind::Directive {
+                    locations.push(Location {
+                        uri: def.uri.clone(),
+                        range: Range {
+                            start: Position {
+                                line: def.start_line,
+                                character: def.start_col,
+                            },
+                            end: Position {
+                                line: def.end_line,
+                                character: def.end_col,
+                            },
+                        },
+                    });
+                }
+            }
+        }
+
+        // HTML内の参照を追加
+        for reference in self.index.get_html_directive_references(directive_name) {
+            locations.push(Location {
+                uri: reference.uri.clone(),
+                range: Range {
+                    start: Position {
+                        line: reference.start_line,
+                        character: reference.start_col,
+                    },
+                    end: Position {
+                        line: reference.end_line,
+                        character: reference.end_col,
+                    },
+                },
+            });
+        }
+
+        // JS内の参照も追加（.directive('name', ...) の使用箇所など）
+        for reference in self.index.get_all_references(directive_name) {
             locations.push(Location {
                 uri: reference.uri.clone(),
                 range: Range {
@@ -448,6 +536,41 @@ impl ReferencesHandler {
 
     /// HTMLファイルからの定義ジャンプ
     fn goto_definition_from_html(&self, uri: &Url, position: Position, source: Option<&str>) -> Option<GotoDefinitionResponse> {
+        // 0. まずカスタムディレクティブ参照をチェック
+        if let Some(directive_ref) = self.index.find_html_directive_reference_at(
+            uri,
+            position.line,
+            position.character,
+        ) {
+            // ディレクティブ定義を検索
+            let definitions = self.index.get_definitions(&directive_ref.directive_name);
+            let directive_defs: Vec<_> = definitions
+                .into_iter()
+                .filter(|d| d.kind == SymbolKind::Directive)
+                .collect();
+
+            if !directive_defs.is_empty() {
+                let locations: Vec<Location> = directive_defs
+                    .into_iter()
+                    .map(|def| Location {
+                        uri: def.uri.clone(),
+                        range: Range {
+                            start: Position {
+                                line: def.start_line,
+                                character: def.start_col,
+                            },
+                            end: Position {
+                                line: def.end_line,
+                                character: def.end_col,
+                            },
+                        },
+                    })
+                    .collect();
+
+                return Some(GotoDefinitionResponse::Array(locations));
+            }
+        }
+
         // 1. まずローカル変数をチェック（定義位置にカーソルがある場合）
         if let Some(local_var_def) = self.index.find_html_local_variable_definition_at(
             uri,

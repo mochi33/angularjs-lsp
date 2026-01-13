@@ -76,19 +76,31 @@ impl HtmlAngularJsAnalyzer {
 
             // 開始タグから属性を取得
             if let Some(start_tag) = self.find_child_by_kind(node, "start_tag") {
-                // ng-controllerをチェック
-                if let Some((controller_name, alias)) =
-                    self.get_ng_controller_attribute(start_tag, source)
+                // ng-controllerをチェック（位置情報付き）
+                if let Some((controller_name, alias, name_start_line, name_start_col, name_end_line, name_end_col)) =
+                    self.get_ng_controller_attribute_with_position(start_tag, source)
                 {
                     // ng-controllerスコープを登録
                     let scope = HtmlControllerScope {
-                        controller_name,
+                        controller_name: controller_name.clone(),
                         alias,
                         uri: uri.clone(),
                         start_line: scope_start_line,
                         end_line: scope_end_line,
                     };
                     self.index.add_html_controller_scope(scope);
+
+                    // コントローラー名への参照を登録（定義ジャンプ用）
+                    use crate::index::SymbolReference;
+                    let reference = SymbolReference {
+                        name: controller_name,
+                        uri: uri.clone(),
+                        start_line: name_start_line,
+                        start_col: name_start_col,
+                        end_line: name_end_line,
+                        end_col: name_end_col,
+                    };
+                    self.index.add_reference(reference);
                 }
             }
 
@@ -507,14 +519,26 @@ impl HtmlAngularJsAnalyzer {
     /// 戻り値: (コントローラー名, alias)
     /// 例: "UserController as vm" -> ("UserController", Some("vm"))
     pub(super) fn get_ng_controller_attribute(&self, start_tag: Node, source: &str) -> Option<(String, Option<String>)> {
+        self.get_ng_controller_attribute_with_position(start_tag, source)
+            .map(|(name, alias, _, _, _, _)| (name, alias))
+    }
+
+    /// ng-controller属性の値と位置を取得
+    /// 戻り値: (コントローラー名, alias, start_line, start_col, end_line, end_col)
+    /// 位置はコントローラー名の位置（クォート除く）
+    pub(super) fn get_ng_controller_attribute_with_position(
+        &self,
+        start_tag: Node,
+        source: &str,
+    ) -> Option<(String, Option<String>, u32, u32, u32, u32)> {
         let mut cursor = start_tag.walk();
         for child in start_tag.children(&mut cursor) {
             if child.kind() == "attribute" {
                 if let Some(name) = self.find_child_by_kind(child, "attribute_name") {
                     let attr_name = self.node_text(name, source);
                     if attr_name == "ng-controller" || attr_name == "data-ng-controller" {
-                        if let Some(value) = self.find_child_by_kind(child, "quoted_attribute_value") {
-                            let raw_value = self.node_text(value, source);
+                        if let Some(value_node) = self.find_child_by_kind(child, "quoted_attribute_value") {
+                            let raw_value = self.node_text(value_node, source);
                             // クォートを除去
                             let value = raw_value.trim_matches(|c| c == '"' || c == '\'');
                             // "Controller as alias"形式をパース
@@ -525,7 +549,14 @@ impl HtmlAngularJsAnalyzer {
                             } else {
                                 None
                             };
-                            return Some((controller_name, alias));
+
+                            // コントローラー名の位置を計算（クォートの後から）
+                            let start_line = value_node.start_position().row as u32;
+                            let start_col = value_node.start_position().column as u32 + 1; // クォート分
+                            let end_line = start_line;
+                            let end_col = start_col + controller_name.len() as u32;
+
+                            return Some((controller_name, alias, start_line, start_col, end_line, end_col));
                         }
                     }
                 }

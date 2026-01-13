@@ -10,6 +10,7 @@ use crate::config::InterpolateConfig;
 use crate::index::SymbolIndex;
 
 mod controller;
+mod directive_reference;
 mod directives;
 mod expression;
 mod local_variable;
@@ -120,6 +121,9 @@ impl HtmlAngularJsAnalyzer {
 
         // $scope参照を収集（ローカル変数はフィルタリング）
         self.collect_scope_references(tree.root_node(), source, uri);
+
+        // カスタムディレクティブ参照を収集
+        self.collect_directive_references(tree.root_node(), source, uri);
 
         // ローカル変数参照を収集
         let mut active_scopes = std::collections::HashMap::new();

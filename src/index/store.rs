@@ -187,6 +187,32 @@ pub struct InheritedFormBinding {
     pub name_end_col: u32,
 }
 
+/// HTML内でのディレクティブ使用タイプ
+#[derive(Clone, Debug, PartialEq)]
+pub enum DirectiveUsageType {
+    /// <my-directive>...</my-directive>
+    Element,
+    /// <div my-directive>...</div>
+    Attribute,
+}
+
+/// HTML内のカスタムディレクティブ参照
+#[derive(Clone, Debug)]
+pub struct HtmlDirectiveReference {
+    /// ディレクティブ名（camelCase形式、正規化済み）
+    /// 例: "myDirective"
+    pub directive_name: String,
+    /// 参照位置のURI
+    pub uri: Url,
+    /// 参照位置（要素名または属性名の位置）
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    /// 使用タイプ（要素または属性）
+    pub usage_type: DirectiveUsageType,
+}
+
 pub struct SymbolIndex {
     definitions: DashMap<String, Vec<Symbol>>,
     references: DashMap<String, Vec<SymbolReference>>,
@@ -211,6 +237,8 @@ pub struct SymbolIndex {
     html_local_variable_references: DashMap<String, Vec<HtmlLocalVariableReference>>,
     /// HTML内のフォームバインディング（URI -> Vec<HtmlFormBinding>）
     html_form_bindings: DashMap<Url, Vec<HtmlFormBinding>>,
+    /// HTML内のカスタムディレクティブ参照（URI -> Vec<HtmlDirectiveReference>）
+    html_directive_references: DashMap<Url, Vec<HtmlDirectiveReference>>,
     /// 再解析が必要なHTMLファイル（ng-include登録時に子HTMLが既に解析済みだった場合）
     pending_reanalysis: DashSet<Url>,
     /// 解析済みのHTMLファイルのURI（再解析判定用）
@@ -233,6 +261,7 @@ impl SymbolIndex {
             html_local_variables: DashMap::new(),
             html_local_variable_references: DashMap::new(),
             html_form_bindings: DashMap::new(),
+            html_directive_references: DashMap::new(),
             pending_reanalysis: DashSet::new(),
             analyzed_html_files: DashSet::new(),
         }
@@ -534,6 +563,8 @@ impl SymbolIndex {
         }
         // HTMLフォームバインディングもクリア
         self.html_form_bindings.remove(uri);
+        // HTMLディレクティブ参照もクリア
+        self.html_directive_references.remove(uri);
     }
 
     pub fn remove_document(&self, uri: &Url) {
@@ -551,6 +582,8 @@ impl SymbolIndex {
         for mut entry in self.html_local_variable_references.iter_mut() {
             entry.value_mut().retain(|r| &r.uri != uri);
         }
+        // ディレクティブ参照をクリア
+        self.html_directive_references.remove(uri);
     }
 
     /// 再解析が必要なURIを取得してキューをクリア
@@ -1507,6 +1540,61 @@ impl SymbolIndex {
         Vec::new()
     }
 
+    // ========== HTMLディレクティブ参照関連 ==========
+
+    /// HTMLディレクティブ参照を追加
+    pub fn add_html_directive_reference(&self, reference: HtmlDirectiveReference) {
+        let uri = reference.uri.clone();
+        let mut entry = self.html_directive_references.entry(uri).or_default();
+        // 重複チェック
+        let is_duplicate = entry.iter().any(|r| {
+            r.directive_name == reference.directive_name
+                && r.start_line == reference.start_line
+                && r.start_col == reference.start_col
+        });
+        if !is_duplicate {
+            entry.push(reference);
+        }
+    }
+
+    /// 指定位置のディレクティブ参照を検索
+    pub fn find_html_directive_reference_at(
+        &self,
+        uri: &Url,
+        line: u32,
+        col: u32,
+    ) -> Option<HtmlDirectiveReference> {
+        self.html_directive_references.get(uri).and_then(|refs| {
+            refs.iter()
+                .filter(|r| {
+                    self.is_position_in_range(
+                        line,
+                        col,
+                        r.start_line,
+                        r.start_col,
+                        r.end_line,
+                        r.end_col,
+                    )
+                })
+                .cloned()
+                .next()
+        })
+    }
+
+    /// ディレクティブ名に対応する全HTML参照を取得
+    /// directive_name: camelCase形式（例: "myDirective"）
+    pub fn get_html_directive_references(&self, directive_name: &str) -> Vec<HtmlDirectiveReference> {
+        let mut references = Vec::new();
+        for entry in self.html_directive_references.iter() {
+            for r in entry.value() {
+                if r.directive_name == directive_name {
+                    references.push(r.clone());
+                }
+            }
+        }
+        references
+    }
+
     /// HTMLファイルに対応するコントローラー名を解決
     /// 1. HTML内のng-controllerスコープ
     /// 2. テンプレートバインディング（$routeProvider, $uibModal）
@@ -1633,6 +1721,28 @@ impl SymbolIndex {
                 let symbol = Symbol {
                     name: r.property_path.clone(),
                     kind: SymbolKind::ScopeProperty,
+                    uri: r.uri.clone(),
+                    start_line: r.start_line,
+                    start_col: r.start_col,
+                    end_line: r.end_line,
+                    end_col: r.end_col,
+                    name_start_line: r.start_line,
+                    name_start_col: r.start_col,
+                    name_end_line: r.end_line,
+                    name_end_col: r.end_col,
+                    docs: None,
+                    parameters: None,
+                };
+                symbols.push(symbol);
+            }
+        }
+
+        // HTMLファイルの場合、html_directive_referencesからもシンボルを作成
+        if let Some(refs) = self.html_directive_references.get(uri) {
+            for r in refs.iter() {
+                let symbol = Symbol {
+                    name: r.directive_name.clone(),
+                    kind: SymbolKind::Directive,
                     uri: r.uri.clone(),
                     start_line: r.start_line,
                     start_col: r.start_col,

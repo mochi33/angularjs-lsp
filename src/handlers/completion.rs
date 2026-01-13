@@ -5,6 +5,25 @@ use tower_lsp::lsp_types::*;
 
 use crate::index::{SymbolIndex, SymbolKind};
 
+/// camelCase を kebab-case に変換
+/// 例: "myDirective" -> "my-directive"
+fn camel_to_kebab_case(name: &str) -> String {
+    let mut result = String::new();
+
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                result.push('-');
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
 pub struct CompletionHandler {
     index: Arc<SymbolIndex>,
 }
@@ -184,6 +203,65 @@ impl CompletionHandler {
         };
 
         Some(CompletionResponse::Array(items))
+    }
+
+    /// HTMLでのディレクティブ補完を返す
+    /// prefix: 入力中のプレフィックス（kebab-case）
+    /// is_tag_name: タグ名位置かどうか（要素として補完）
+    pub fn complete_directives(
+        &self,
+        prefix: &str,
+        is_tag_name: bool,
+    ) -> Option<CompletionResponse> {
+        let definitions = self.index.get_all_definitions();
+
+        // ディレクティブのみをフィルタ
+        let directives: Vec<_> = definitions
+            .into_iter()
+            .filter(|s| s.kind == SymbolKind::Directive)
+            .collect();
+
+        if directives.is_empty() {
+            return None;
+        }
+
+        let items: Vec<CompletionItem> = directives
+            .into_iter()
+            .filter_map(|symbol| {
+                // camelCase を kebab-case に変換
+                let kebab_name = camel_to_kebab_case(&symbol.name);
+
+                // プレフィックスでフィルタ
+                if !prefix.is_empty() && !kebab_name.starts_with(prefix) {
+                    return None;
+                }
+
+                let detail = if is_tag_name {
+                    "directive (element)".to_string()
+                } else {
+                    "directive (attribute)".to_string()
+                };
+
+                Some(CompletionItem {
+                    label: kebab_name,
+                    kind: Some(CompletionItemKind::CLASS),
+                    detail: Some(detail),
+                    documentation: symbol.docs.map(|docs| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: docs,
+                        })
+                    }),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        if items.is_empty() {
+            None
+        } else {
+            Some(CompletionResponse::Array(items))
+        }
     }
 
     fn symbol_kind_to_completion_kind(&self, kind: SymbolKind) -> CompletionItemKind {

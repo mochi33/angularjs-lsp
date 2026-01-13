@@ -72,9 +72,14 @@ impl AngularJsAnalyzer {
                 self.index.clear_document(uri);
             }
             let mut ctx = AnalyzerContext::new();
-            // 事前収集: $inject パターン用の関数宣言と $inject パターンを収集
+            // 事前収集フェーズ:
+            // 1. $inject パターン用の関数宣言とclass宣言を収集
             self.collect_function_declarations_for_inject(tree.root_node(), source, &mut ctx);
+            // 2. $inject パターンを収集
             self.collect_inject_patterns(tree.root_node(), source, uri, &mut ctx);
+            // 3. 関数/class参照パターンのコンポーネント登録を収集（$inject なしでも $scope 追跡可能に）
+            self.collect_component_ref_scopes(tree.root_node(), source, uri, &mut ctx);
+            // 本解析
             self.traverse_tree(&tree, source, uri, &mut ctx);
         }
     }

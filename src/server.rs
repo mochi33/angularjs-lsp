@@ -9,7 +9,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer, HtmlParser, EmbeddedScript};
-use crate::config::AjsConfig;
+use crate::config::{AjsConfig, PathMatcher};
 use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler, SemanticTokensHandler, SignatureHelpHandler};
 use crate::index::SymbolIndex;
 use crate::ts_proxy::TsProxy;
@@ -24,6 +24,8 @@ pub struct Backend {
     documents: DashMap<Url, String>,
     /// tsserverに開かれたファイルを追跡
     ts_opened_files: DashMap<Url, bool>,
+    /// パスマッチング（include/exclude）
+    path_matcher: RwLock<Option<PathMatcher>>,
 }
 
 impl Backend {
@@ -41,6 +43,7 @@ impl Backend {
             ts_proxy: RwLock::new(None),
             documents: DashMap::new(),
             ts_opened_files: DashMap::new(),
+            path_matcher: RwLock::new(None),
         }
     }
 
@@ -146,6 +149,7 @@ impl Backend {
 
     async fn scan_workspace(&self) {
         let root_uri = self.root_uri.read().await;
+        let path_matcher = self.path_matcher.read().await;
         if let Some(ref uri) = *root_uri {
             if let Ok(path) = uri.to_file_path() {
                 self.client
@@ -168,13 +172,13 @@ impl Backend {
 
                 // Collect all JS files
                 let mut js_files: Vec<(Url, String)> = Vec::new();
-                self.collect_js_files(&path, &mut js_files);
+                self.collect_js_files(&path, &path, path_matcher.as_ref(), &mut js_files);
 
                 let js_count = js_files.len();
 
                 // Collect HTML files
                 let mut html_files: Vec<(Url, String)> = Vec::new();
-                self.collect_html_files(&path, &mut html_files);
+                self.collect_html_files(&path, &path, path_matcher.as_ref(), &mut html_files);
 
                 let html_count = html_files.len();
 
@@ -389,21 +393,47 @@ impl Backend {
         self.client.send_notification::<notification::Progress>(params).await;
     }
 
-    fn collect_js_files(&self, dir: &Path, files: &mut Vec<(Url, String)>) {
+    fn collect_js_files(
+        &self,
+        dir: &Path,
+        root: &Path,
+        path_matcher: Option<&PathMatcher>,
+        files: &mut Vec<(Url, String)>,
+    ) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
 
-                // Skip node_modules and hidden directories
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "build" {
-                        continue;
-                    }
-                }
+                // 相対パスを取得してパターンマッチング
+                let relative_path = path.strip_prefix(root).unwrap_or(&path);
 
                 if path.is_dir() {
-                    self.collect_js_files(&path, files);
+                    // ディレクトリはexcludeのみチェック
+                    if let Some(matcher) = path_matcher {
+                        if !matcher.should_traverse_dir(relative_path) {
+                            continue;
+                        }
+                    } else {
+                        // フォールバック: 従来のハードコード除外
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "build" {
+                                continue;
+                            }
+                        }
+                    }
+                    self.collect_js_files(&path, root, path_matcher, files);
                 } else if path.extension().map_or(false, |ext| ext == "js") {
+                    // ファイルはinclude/exclude両方チェック
+                    if let Some(matcher) = path_matcher {
+                        if !matcher.should_include(relative_path) {
+                            tracing::debug!(
+                                "collect_js_files: skipping {:?} (not in include)",
+                                relative_path
+                            );
+                            continue;
+                        }
+                    }
+                    tracing::debug!("collect_js_files: including {:?}", relative_path);
                     if let Ok(content) = fs::read_to_string(&path) {
                         if let Ok(uri) = Url::from_file_path(&path) {
                             files.push((uri, content));
@@ -414,21 +444,47 @@ impl Backend {
         }
     }
 
-    fn collect_html_files(&self, dir: &Path, files: &mut Vec<(Url, String)>) {
+    fn collect_html_files(
+        &self,
+        dir: &Path,
+        root: &Path,
+        path_matcher: Option<&PathMatcher>,
+        files: &mut Vec<(Url, String)>,
+    ) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
 
-                // Skip node_modules and hidden directories
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "build" {
-                        continue;
-                    }
-                }
+                // 相対パスを取得してパターンマッチング
+                let relative_path = path.strip_prefix(root).unwrap_or(&path);
 
                 if path.is_dir() {
-                    self.collect_html_files(&path, files);
+                    // ディレクトリはexcludeのみチェック
+                    if let Some(matcher) = path_matcher {
+                        if !matcher.should_traverse_dir(relative_path) {
+                            continue;
+                        }
+                    } else {
+                        // フォールバック: 従来のハードコード除外
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "build" {
+                                continue;
+                            }
+                        }
+                    }
+                    self.collect_html_files(&path, root, path_matcher, files);
                 } else if path.extension().map_or(false, |ext| ext == "html" || ext == "htm") {
+                    // ファイルはinclude/exclude両方チェック
+                    if let Some(matcher) = path_matcher {
+                        if !matcher.should_include(relative_path) {
+                            tracing::debug!(
+                                "collect_html_files: skipping {:?} (not in include)",
+                                relative_path
+                            );
+                            continue;
+                        }
+                    }
+                    tracing::debug!("collect_html_files: including {:?}", relative_path);
                     if let Ok(content) = fs::read_to_string(&path) {
                         if let Ok(uri) = Url::from_file_path(&path) {
                             files.push((uri, content));
@@ -593,6 +649,34 @@ impl LanguageServer for Backend {
                         ),
                     )
                     .await;
+
+                // include/excludeパターンをログ出力
+                if !config.include.is_empty() {
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            format!("Include patterns: {:?}", config.include),
+                        )
+                        .await;
+                }
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("Exclude patterns: {:?}", config.exclude),
+                    )
+                    .await;
+
+                // PathMatcherをコンパイル
+                match config.create_path_matcher() {
+                    Ok(matcher) => {
+                        *self.path_matcher.write().await = Some(matcher);
+                    }
+                    Err(e) => {
+                        self.client
+                            .log_message(MessageType::ERROR, format!("Invalid path patterns: {}", e))
+                            .await;
+                    }
+                }
             }
         }
 
@@ -783,10 +867,20 @@ impl LanguageServer for Backend {
         let line = params.text_document_position.position.line;
         let col = params.text_document_position.position.character;
 
-        // HTMLファイルの場合、Angularコンテキスト内かチェック
+        // HTMLファイルの場合
         if Self::is_html_file(uri) {
             if let Some(doc) = self.documents.get(uri) {
                 let source = doc.value();
+
+                // 1. ディレクティブ補完コンテキストかチェック（タグ名または属性名位置）
+                if let Some((prefix, is_tag_name)) = self.html_analyzer.get_directive_completion_context(source, line, col) {
+                    let handler = CompletionHandler::new(Arc::clone(&self.index));
+                    if let Some(completions) = handler.complete_directives(&prefix, is_tag_name) {
+                        return Ok(Some(completions));
+                    }
+                }
+
+                // 2. Angularコンテキスト内かチェック（属性値内）
                 if self.html_analyzer.is_in_angular_context(source, line, col) {
                     // Angularコンテキスト内 → $scope補完とローカル変数を返す
                     let controller_name = self.index.resolve_controller_for_html(uri, line);

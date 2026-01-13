@@ -207,4 +207,78 @@ impl HtmlAngularJsAnalyzer {
 
         false
     }
+
+    /// カーソル位置がHTMLタグ名または属性名の位置かを判定（ディレクティブ補完用）
+    /// 属性値の中ではfalseを返す
+    /// 戻り値: Some((prefix, is_tag_name)) - prefix: 入力中の文字列, is_tag_name: タグ名位置かどうか
+    pub fn get_directive_completion_context(&self, source: &str, line: u32, col: u32) -> Option<(String, bool)> {
+        let lines: Vec<&str> = source.lines().collect();
+        if (line as usize) >= lines.len() {
+            return None;
+        }
+
+        let current_line = lines[line as usize];
+        let col = col as usize;
+        if col > current_line.len() {
+            return None;
+        }
+
+        let before_cursor = &current_line[..col];
+
+        // 開いているタグ `<` を逆方向に探す
+        let last_open_tag = before_cursor.rfind('<');
+        let last_close_tag = before_cursor.rfind('>');
+
+        // `>` が `<` より後にある場合、タグの外にいる
+        if let (Some(open_idx), Some(close_idx)) = (last_open_tag, last_close_tag) {
+            if close_idx > open_idx {
+                return None;
+            }
+        }
+
+        // `<` がない場合、タグの外
+        let open_idx = last_open_tag?;
+
+        // タグ内のテキスト（`<` の後からカーソルまで）
+        let tag_content = &before_cursor[open_idx + 1..];
+
+        // 閉じタグ `</` の場合は補完しない
+        if tag_content.starts_with('/') {
+            return None;
+        }
+
+        // 属性値の中にいるかチェック
+        // クォートの数をカウント（奇数なら属性値の中）
+        let double_quote_count = tag_content.matches('"').count();
+        let single_quote_count = tag_content.matches('\'').count();
+
+        // どちらかのクォートが奇数なら、属性値の中にいる
+        if double_quote_count % 2 == 1 || single_quote_count % 2 == 1 {
+            return None;
+        }
+
+        // タグ名位置かどうかを判定
+        // スペースがなければタグ名、あれば属性名
+        if !tag_content.contains(char::is_whitespace) {
+            // タグ名位置
+            Some((tag_content.to_string(), true))
+        } else {
+            // 属性名位置 - 最後のスペース後の文字列を取得
+            // ただし `=` の後にいる場合（属性値を開始しようとしている場合）は除外
+            let last_space_idx = tag_content.rfind(char::is_whitespace)?;
+            let attr_part = &tag_content[last_space_idx + 1..];
+
+            // `=` の後の場合、属性値の開始位置なので補完しない
+            if tag_content.trim_end().ends_with('=') {
+                return None;
+            }
+
+            // `=` が含まれている場合（`attr=`の後の補完の場合は除外）
+            if attr_part.contains('=') {
+                return None;
+            }
+
+            Some((attr_part.to_string(), false))
+        }
+    }
 }

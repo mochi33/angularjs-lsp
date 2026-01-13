@@ -341,9 +341,10 @@ impl AngularJsAnalyzer {
                         self.extract_dependencies(second_arg, source, uri);
 
                         // DIスコープを追加
-                        // 配列記法、直接関数記法、関数参照の全パターンをサポート
+                        // 配列記法、直接関数記法、class式、関数参照の全パターンをサポート
                         let (injected_services, has_scope, has_root_scope) = if second_arg.kind() == "array" {
                             // 配列記法: ['$scope', 'Service', function($scope, Service) {}]
+                            // または: ['$scope', 'Service', class { constructor($scope, Service) {} }]
                             (self.collect_injected_services(second_arg, source),
                              self.has_scope_in_di_array(second_arg, source),
                              self.has_root_scope_in_di_array(second_arg, source))
@@ -352,9 +353,14 @@ impl AngularJsAnalyzer {
                             (self.collect_services_from_function_params(second_arg, source),
                              self.has_scope_in_function_params(second_arg, source),
                              self.has_root_scope_in_function_params(second_arg, source))
+                        } else if second_arg.kind() == "class" {
+                            // ES6 class式: class { constructor($scope, Service) {} }
+                            (self.collect_services_from_function_params(second_arg, source),
+                             self.has_scope_in_function_params(second_arg, source),
+                             self.has_root_scope_in_function_params(second_arg, source))
                         } else if second_arg.kind() == "identifier" {
-                            // 関数参照: .controller('Ctrl', MyController)
-                            // $inject がある場合は別途処理されるが、ない場合はここで関数宣言のパラメータを解析
+                            // 関数参照またはclass参照: .controller('Ctrl', MyController)
+                            // $inject がある場合は別途処理されるが、ない場合はここで関数宣言/class宣言のパラメータを解析
                             (self.collect_services_from_function_ref(second_arg, source),
                              self.has_scope_in_function_ref(second_arg, source),
                              self.has_root_scope_in_function_ref(second_arg, source))
@@ -441,20 +447,37 @@ impl AngularJsAnalyzer {
 
     /// ノードから関数定義の位置を取得する
     ///
-    /// - 配列の場合: 配列内の関数式を探す
+    /// - 配列の場合: 配列内の関数式またはclass式を探す
     /// - 関数式の場合: その位置を返す
-    /// - 識別子の場合: ファイル内の関数宣言/変数宣言を探す
+    /// - class式の場合: constructorの位置またはclass全体の位置を返す
+    /// - 識別子の場合: ファイル内の関数宣言/変数宣言/class宣言を探す
     pub(super) fn find_function_position(&self, node: Node, source: &str) -> Option<(tree_sitter::Point, tree_sitter::Point)> {
         match node.kind() {
             "function_expression" | "arrow_function" => {
                 Some((node.start_position(), node.end_position()))
             }
+            // ES6 class式: constructorの位置を返す（存在すれば）
+            "class" => {
+                if let Some(constructor) = self.get_constructor_from_class(node, source) {
+                    Some((constructor.start_position(), constructor.end_position()))
+                } else {
+                    Some((node.start_position(), node.end_position()))
+                }
+            }
             "array" => {
-                // DI配列: ['$http', function($http) { ... }]
+                // DI配列: ['$http', function($http) { ... }] または ['$http', class { constructor($http) {} }]
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() == "function_expression" || child.kind() == "arrow_function" {
                         return Some((child.start_position(), child.end_position()));
+                    }
+                    if child.kind() == "class" {
+                        // class式の場合はconstructorの位置を返す
+                        if let Some(constructor) = self.get_constructor_from_class(child, source) {
+                            return Some((constructor.start_position(), constructor.end_position()));
+                        } else {
+                            return Some((child.start_position(), child.end_position()));
+                        }
                     }
                 }
                 None
@@ -470,14 +493,14 @@ impl AngularJsAnalyzer {
                     }
                     current
                 };
-                // ファイル内の関数宣言または変数宣言を探す
+                // ファイル内の関数宣言または変数宣言またはclass宣言を探す
                 self.find_function_declaration_position(root, source, &func_name)
             }
             _ => None,
         }
     }
 
-    /// ファイル内で指定された名前の関数宣言または変数宣言（関数式）を探す
+    /// ファイル内で指定された名前の関数宣言、変数宣言（関数式）、またはclass宣言を探す
     pub(super) fn find_function_declaration_position(
         &self,
         node: Node,
@@ -488,6 +511,18 @@ impl AngularJsAnalyzer {
             "function_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     if self.node_text(name_node, source) == name {
+                        return Some((node.start_position(), node.end_position()));
+                    }
+                }
+            }
+            // ES6 class宣言: constructorの位置を返す（存在すれば）
+            "class_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if self.node_text(name_node, source) == name {
+                        // constructorがあればその位置、なければclass全体
+                        if let Some(constructor) = self.get_constructor_from_class(node, source) {
+                            return Some((constructor.start_position(), constructor.end_position()));
+                        }
                         return Some((node.start_position(), node.end_position()));
                     }
                 }

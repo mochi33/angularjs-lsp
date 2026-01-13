@@ -49,12 +49,32 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 
 ```json
 {
+  "include": ["src/**/*.js", "app/**/*.js"],
+  "exclude": ["**/test/**", "**/vendor/**"],
   "interpolate": {
     "startSymbol": "{{",
     "endSymbol": "}}"
   }
 }
 ```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `include` | `string[]` | `[]` (all files) | Glob patterns for files to analyze. If empty, all files are included. |
+| `exclude` | `string[]` | (see below) | Glob patterns for files/directories to exclude. |
+| `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. |
+| `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. |
+
+### Default Exclude Patterns
+
+By default, the following patterns are excluded:
+
+- `**/node_modules/**`
+- `**/dist/**`
+- `**/build/**`
+- `**/.*/**` (hidden files/directories)
 
 ## Commands
 

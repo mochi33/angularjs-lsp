@@ -10,11 +10,13 @@ use crate::index::{Symbol, SymbolKind};
 impl AngularJsAnalyzer {
     /// サービス/ファクトリーの実装関数からメソッドを抽出する
     ///
-    /// DI配列記法と直接関数渡しの両方に対応:
+    /// DI配列記法と直接関数渡し、ES6 classの全パターンに対応:
     /// ```javascript
     /// .service('Svc', ['$http', function($http) { ... }])
     /// .service('Svc', function() { ... })
     /// .factory('Svc', SvcFunction)  // 関数参照パターン
+    /// .service('Svc', class { getData() { ... } })  // ES6 class式
+    /// .service('Svc', MyServiceClass)  // ES6 class参照
     /// ```
     pub(super) fn extract_service_methods(&self, node: Node, source: &str, uri: &Url, service_name: &str) {
         if node.kind() == "array" {
@@ -22,14 +24,20 @@ impl AngularJsAnalyzer {
             for child in node.children(&mut cursor) {
                 if child.kind() == "function_expression" || child.kind() == "arrow_function" {
                     self.extract_methods_from_function(child, source, uri, service_name);
+                } else if child.kind() == "class" {
+                    // ES6 class式: ['$http', class { ... }]
+                    self.extract_methods_from_class(child, source, uri, service_name);
                 }
             }
         } else if node.kind() == "function_expression" || node.kind() == "arrow_function" {
             self.extract_methods_from_function(node, source, uri, service_name);
+        } else if node.kind() == "class" {
+            // ES6 class式: .service('Svc', class { ... })
+            self.extract_methods_from_class(node, source, uri, service_name);
         } else if node.kind() == "identifier" {
-            // 関数参照パターン: .factory('Svc', SvcFunction)
-            let func_name = self.node_text(node, source);
-            // ルートから関数宣言を探す
+            // 関数参照またはclass参照パターン: .factory('Svc', SvcFunction) or .service('Svc', SvcClass)
+            let ref_name = self.node_text(node, source);
+            // ルートから関数宣言またはclass宣言を探す
             let root = node.parent().and_then(|n| {
                 let mut current = n;
                 while let Some(parent) = current.parent() {
@@ -38,10 +46,89 @@ impl AngularJsAnalyzer {
                 Some(current)
             });
             if let Some(root) = root {
-                if let Some(func_decl) = self.find_function_declaration(root, source, &func_name) {
+                // まず関数宣言を探す
+                if let Some(func_decl) = self.find_function_declaration(root, source, &ref_name) {
                     self.extract_methods_from_function_decl(func_decl, source, uri, service_name);
+                } else if let Some(class_decl) = self.find_class_declaration(root, source, &ref_name) {
+                    // class宣言を探す
+                    self.extract_methods_from_class(class_decl, source, uri, service_name);
                 }
             }
+        }
+    }
+
+    /// ES6 classからService/Factory/Controllerのメソッドを抽出する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// class MyService {
+    ///     constructor($http) { ... }
+    ///     getData() { return this.http.get('/api'); }
+    ///     postData(data) { return this.http.post('/api', data); }
+    /// }
+    /// ```
+    ///
+    /// `MyService.getData`, `MyService.postData` として登録（constructorは除外）
+    fn extract_methods_from_class(&self, class_node: Node, source: &str, uri: &Url, service_name: &str) {
+        // class_body を取得
+        if let Some(body) = class_node.child_by_field_name("body") {
+            let mut cursor = body.walk();
+            for child in body.children(&mut cursor) {
+                if child.kind() == "method_definition" {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let method_name = self.node_text(name_node, source);
+
+                        // constructorはスキップ（DIエントリポイントであってメソッドではない）
+                        if method_name == "constructor" {
+                            continue;
+                        }
+
+                        let start = name_node.start_position();
+                        let end = name_node.end_position();
+
+                        // JSDocを抽出
+                        let docs = self.extract_jsdoc_for_line(child.start_position().row, source);
+
+                        // パラメータを抽出
+                        let parameters = child.child_by_field_name("parameters")
+                            .and_then(|params| self.extract_params_from_node(params, source));
+
+                        let full_name = format!("{}.{}", service_name, method_name);
+                        let symbol = Symbol {
+                            name: full_name,
+                            kind: SymbolKind::Method,
+                            uri: uri.clone(),
+                            start_line: self.offset_line(start.row as u32),
+                            start_col: start.column as u32,
+                            end_line: self.offset_line(end.row as u32),
+                            end_col: end.column as u32,
+                            name_start_line: self.offset_line(start.row as u32),
+                            name_start_col: start.column as u32,
+                            name_end_line: self.offset_line(end.row as u32),
+                            name_end_col: end.column as u32,
+                            docs,
+                            parameters,
+                        };
+                        self.index.add_definition(symbol);
+                    }
+                }
+            }
+        }
+    }
+
+    /// パラメータノードからパラメータ名のリストを抽出する
+    fn extract_params_from_node(&self, params_node: Node, source: &str) -> Option<Vec<String>> {
+        let mut params = Vec::new();
+        let mut cursor = params_node.walk();
+        for child in params_node.children(&mut cursor) {
+            if child.kind() == "identifier" {
+                params.push(self.node_text(child, source));
+            }
+        }
+        if params.is_empty() {
+            None
+        } else {
+            Some(params)
         }
     }
 
@@ -454,23 +541,37 @@ impl AngularJsAnalyzer {
     /// })
     /// ```
     ///
-    /// `FormCustomItemController.onChangeText` として登録される
+    /// ES6 classの場合はclassメソッドを抽出:
+    /// ```javascript
+    /// class FormController {
+    ///     submit() { ... }
+    /// }
+    /// .controller('FormController', FormController)
+    /// ```
+    ///
+    /// `FormCustomItemController.onChangeText` / `FormController.submit` として登録される
     /// (Service/Factoryと同じ形式で、HTML側でalias.methodとしてアクセス可能)
     pub(super) fn extract_controller_methods(&self, node: Node, source: &str, uri: &Url, controller_name: &str) {
         if node.kind() == "array" {
-            // DI配列記法: ['$scope', function($scope) { ... }]
+            // DI配列記法: ['$scope', function($scope) { ... }] または ['$scope', class { ... }]
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.kind() == "function_expression" || child.kind() == "arrow_function" {
                     self.extract_this_methods_from_controller(child, source, uri, controller_name);
+                } else if child.kind() == "class" {
+                    // ES6 class式: ['$scope', class { submit() {} }]
+                    self.extract_methods_from_class(child, source, uri, controller_name);
                 }
             }
         } else if node.kind() == "function_expression" || node.kind() == "arrow_function" {
             // 直接関数記法
             self.extract_this_methods_from_controller(node, source, uri, controller_name);
+        } else if node.kind() == "class" {
+            // ES6 class式: .controller('Ctrl', class { ... })
+            self.extract_methods_from_class(node, source, uri, controller_name);
         } else if node.kind() == "identifier" {
-            // 関数参照パターン: .controller('Ctrl', MyController)
-            let func_name = self.node_text(node, source);
+            // 関数参照またはclass参照パターン: .controller('Ctrl', MyController)
+            let ref_name = self.node_text(node, source);
             let root = node.parent().and_then(|n| {
                 let mut current = n;
                 while let Some(parent) = current.parent() {
@@ -479,10 +580,14 @@ impl AngularJsAnalyzer {
                 Some(current)
             });
             if let Some(root) = root {
-                if let Some(func_decl) = self.find_function_declaration(root, source, &func_name) {
+                // まず関数宣言を探す
+                if let Some(func_decl) = self.find_function_declaration(root, source, &ref_name) {
                     if let Some(body) = func_decl.child_by_field_name("body") {
                         self.scan_for_this_methods(body, source, uri, controller_name);
                     }
+                } else if let Some(class_decl) = self.find_class_declaration(root, source, &ref_name) {
+                    // class宣言を探す
+                    self.extract_methods_from_class(class_decl, source, uri, controller_name);
                 }
             }
         }

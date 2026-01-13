@@ -444,6 +444,8 @@ async function startServer(
         documentSelector: [
             { scheme: 'file', language: 'javascript' },
             { scheme: 'file', language: 'html' },
+            { scheme: 'file', language: 'django-html' },
+            { scheme: 'file', language: 'jinja-html' },
         ],
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher('**/ajsconfig.json'),
