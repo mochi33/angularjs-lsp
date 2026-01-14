@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
@@ -45,11 +46,22 @@ impl CodeLensHandler {
         }
 
         // 2. テンプレートバインディング経由の呼び出し元（JSファイル）
-        if let Some((controller_name, source, js_uri, js_line)) = self.index.get_template_binding_source(uri) {
-            // バインディング箇所へのジャンプ
-            lenses.push(self.create_bound_from_lens(&source, &js_uri, js_line));
-            // コントローラー定義へのジャンプ
-            lenses.push(self.create_controller_lens(&controller_name, 0, "Binded"));
+        // 同じコントローラー・同じファイルの重複を排除
+        let bindings = self.index.get_all_template_binding_sources(uri);
+        let mut seen_files: HashSet<String> = HashSet::new();
+        let mut seen_controllers: HashSet<String> = HashSet::new();
+        for (controller_name, source, js_uri, js_line) in bindings {
+            // バインディング箇所へのジャンプ（同じファイルは1回だけ）
+            let file_key = js_uri.to_string();
+            if !seen_files.contains(&file_key) {
+                seen_files.insert(file_key);
+                lenses.push(self.create_bound_from_lens(&source, &js_uri, js_line));
+            }
+            // コントローラー定義へのジャンプ（同じコントローラーは1回だけ）
+            if !seen_controllers.contains(&controller_name) {
+                seen_controllers.insert(controller_name.clone());
+                lenses.push(self.create_controller_lens(&controller_name, 0, "Binded"));
+            }
         }
 
         // 3. ng-include継承コントローラー

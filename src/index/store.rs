@@ -617,10 +617,13 @@ impl SymbolIndex {
             template_path: normalized_path.clone(),
             controller_name: binding.controller_name,
             source: binding.source,
-            binding_uri: binding.binding_uri,
+            binding_uri: binding.binding_uri.clone(),
             binding_line: binding.binding_line,
         };
-        self.template_bindings.insert(normalized_path.clone(), normalized_binding);
+        // キーをユニークにするため、binding_uri#binding_line#template_path形式を使用
+        // これにより同じテンプレートへの複数のバインディングを保持できる
+        let binding_key = format!("{}#{}#{}", binding.binding_uri.as_str(), binding.binding_line, normalized_path);
+        self.template_bindings.insert(binding_key, normalized_binding);
 
         // このテンプレートが親として持っているng-include bindingの継承情報を更新
         // （$uibModalでバインドされたコントローラーをng-includeの子に伝播）
@@ -658,15 +661,19 @@ impl SymbolIndex {
 
         // 方法1: 正規化パスでマッチング（パス末尾で比較）
         for entry in self.template_bindings.iter() {
-            let normalized_path = entry.key();
-            if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
-                return Some(entry.value().controller_name.clone());
+            let binding = entry.value();
+            if path.ends_with(&format!("/{}", binding.template_path)) || path == format!("/{}", binding.template_path) {
+                return Some(binding.controller_name.clone());
             }
         }
 
         // 方法2: ファイル名のみでマッチング（フォールバック）
-        if let Some(binding) = self.template_bindings.get(filename) {
-            return Some(binding.controller_name.clone());
+        for entry in self.template_bindings.iter() {
+            let binding = entry.value();
+            let binding_filename = binding.template_path.rsplit('/').next().unwrap_or(&binding.template_path);
+            if binding_filename == filename {
+                return Some(binding.controller_name.clone());
+            }
         }
         None
     }
@@ -682,21 +689,68 @@ impl SymbolIndex {
             // 方法1: 正規化パスでマッチング
             let mut found = None;
             for entry in self.template_bindings.iter() {
-                let normalized_path = entry.key();
-                if path.ends_with(&format!("/{}", normalized_path)) || path == format!("/{}", normalized_path) {
-                    found = Some(entry.value().clone());
+                let binding = entry.value();
+                if path.ends_with(&format!("/{}", binding.template_path)) || path == format!("/{}", binding.template_path) {
+                    found = Some(binding.clone());
                     break;
                 }
             }
             // 方法2: ファイル名のみでマッチング
             if found.is_none() {
-                found = self.template_bindings.get(filename).map(|b| b.clone());
+                for entry in self.template_bindings.iter() {
+                    let binding = entry.value();
+                    let binding_filename = binding.template_path.rsplit('/').next().unwrap_or(&binding.template_path);
+                    if binding_filename == filename {
+                        found = Some(binding.clone());
+                        break;
+                    }
+                }
             }
             found
         }?;
 
         // バインディング定義位置を返す（templateUrlプロパティの位置）
         Some((binding.controller_name, binding.source, binding.binding_uri, binding.binding_line))
+    }
+
+    /// URIからテンプレートバインディングの全ソース情報を取得
+    /// 同じテンプレートに複数のバインディングがある場合（例: 複数の$routeProvider.when）、全て返す
+    pub fn get_all_template_binding_sources(&self, uri: &Url) -> Vec<(String, BindingSource, Url, u32)> {
+        let path = uri.path();
+        let filename = path.rsplit('/').next().unwrap_or("");
+
+        let mut results = Vec::new();
+
+        // 方法1: 正規化パスでマッチング
+        for entry in self.template_bindings.iter() {
+            let binding = entry.value();
+            if path.ends_with(&format!("/{}", binding.template_path)) || path == format!("/{}", binding.template_path) {
+                results.push((
+                    binding.controller_name.clone(),
+                    binding.source.clone(),
+                    binding.binding_uri.clone(),
+                    binding.binding_line,
+                ));
+            }
+        }
+
+        // 方法2: ファイル名のみでマッチング（方法1で見つからなかった場合）
+        if results.is_empty() {
+            for entry in self.template_bindings.iter() {
+                let binding = entry.value();
+                let binding_filename = binding.template_path.rsplit('/').next().unwrap_or(&binding.template_path);
+                if binding_filename == filename {
+                    results.push((
+                        binding.controller_name.clone(),
+                        binding.source.clone(),
+                        binding.binding_uri.clone(),
+                        binding.binding_line,
+                    ));
+                }
+            }
+        }
+
+        results
     }
 
     /// JSファイルURIから、そのファイル内で定義されているテンプレートバインディングを取得
