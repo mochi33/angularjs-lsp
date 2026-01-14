@@ -15,6 +15,9 @@ pub struct AjsConfig {
     /// 除外対象のglobパターン
     #[serde(default = "default_exclude")]
     pub exclude: Vec<String>,
+    /// キャッシュ機能を有効にする（デフォルト: false）
+    #[serde(default)]
+    pub cache: bool,
 }
 
 fn default_exclude() -> Vec<String> {
@@ -63,6 +66,7 @@ impl Default for AjsConfig {
             interpolate: InterpolateConfig::default(),
             include: Vec::new(),
             exclude: default_exclude(),
+            cache: false,
         }
     }
 }

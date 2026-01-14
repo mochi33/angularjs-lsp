@@ -1,11 +1,12 @@
 use dashmap::{DashMap, DashSet};
+use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Url;
 use tracing::debug;
 
 use super::symbol::{Symbol, SymbolReference};
 
 /// コントローラーのスコープ情報
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ControllerScope {
     pub name: String,
     pub uri: Url,
@@ -16,7 +17,7 @@ pub struct ControllerScope {
 }
 
 /// テンプレートバインディングのソース
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BindingSource {
     NgController,
     RouteProvider,
@@ -24,7 +25,7 @@ pub enum BindingSource {
 }
 
 /// HTMLテンプレートとコントローラーのバインディング
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TemplateBinding {
     pub template_path: String,
     pub controller_name: String,
@@ -36,7 +37,7 @@ pub struct TemplateBinding {
 }
 
 /// HTML内のng-controllerスコープ
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HtmlControllerScope {
     pub controller_name: String,
     /// "controller as alias"構文で指定されたalias名（例: "formCustomItem"）
@@ -47,7 +48,7 @@ pub struct HtmlControllerScope {
 }
 
 /// HTML内のスコープ参照
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HtmlScopeReference {
     pub property_path: String,
     pub uri: Url,
@@ -58,7 +59,7 @@ pub struct HtmlScopeReference {
 }
 
 /// ng-include経由で継承されるローカル変数
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InheritedLocalVariable {
     /// 変数名
     pub name: String,
@@ -78,7 +79,7 @@ pub struct InheritedLocalVariable {
 }
 
 /// ng-includeによる親子HTML関係
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NgIncludeBinding {
     pub parent_uri: Url,
     pub template_path: String,
@@ -95,7 +96,7 @@ pub struct NgIncludeBinding {
 }
 
 /// HTML内で定義されたローカル変数のソース
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HtmlLocalVariableSource {
     /// ng-init="counter = 0" -> "counter"
     NgInit,
@@ -116,7 +117,7 @@ impl HtmlLocalVariableSource {
 }
 
 /// HTML内で定義されたローカル変数（ng-init, ng-repeat由来）
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HtmlLocalVariable {
     /// 変数名（例: "item", "key", "value", "counter"）
     pub name: String,
@@ -136,7 +137,7 @@ pub struct HtmlLocalVariable {
 }
 
 /// HTML内のローカル変数への参照
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HtmlLocalVariableReference {
     /// 参照している変数名
     pub variable_name: String,
@@ -151,7 +152,7 @@ pub struct HtmlLocalVariableReference {
 
 /// HTML内の<form name="x">で定義されるフォームバインディング
 /// AngularJSは自動的に$scope.xにフォームコントローラーをバインドする
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HtmlFormBinding {
     /// フォーム名（例: "userForm"）
     pub name: String,
@@ -170,7 +171,7 @@ pub struct HtmlFormBinding {
 }
 
 /// ng-include経由で継承されるフォームバインディング
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InheritedFormBinding {
     /// フォーム名
     pub name: String,
@@ -188,7 +189,7 @@ pub struct InheritedFormBinding {
 }
 
 /// HTML内でのディレクティブ使用タイプ
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DirectiveUsageType {
     /// <my-directive>...</my-directive>
     Element,
@@ -197,7 +198,7 @@ pub enum DirectiveUsageType {
 }
 
 /// HTML内のカスタムディレクティブ参照
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HtmlDirectiveReference {
     /// ディレクティブ名（camelCase形式、正規化済み）
     /// 例: "myDirective"
@@ -1875,6 +1876,109 @@ impl SymbolIndex {
             return false;
         }
         true
+    }
+
+    /// 全コントローラースコープを取得（キャッシュ用）
+    pub fn get_all_controller_scopes(&self) -> Vec<ControllerScope> {
+        self.controller_scopes
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    // ========== キャッシュ用メソッド ==========
+
+    /// 全HTMLコントローラースコープを取得（キャッシュ用）
+    pub fn get_all_html_controller_scopes_for_cache(&self) -> Vec<HtmlControllerScope> {
+        self.html_controller_scopes
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// 全HTMLスコープ参照を取得（キャッシュ用）
+    pub fn get_all_html_scope_references_for_cache(&self) -> Vec<HtmlScopeReference> {
+        self.html_scope_references
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// 全HTMLローカル変数を取得（キャッシュ用）
+    pub fn get_all_html_local_variables_for_cache(&self) -> Vec<HtmlLocalVariable> {
+        self.html_local_variables
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// 全HTMLローカル変数参照を取得（キャッシュ用）
+    pub fn get_all_html_local_variable_references_for_cache(&self) -> Vec<HtmlLocalVariableReference> {
+        self.html_local_variable_references
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// 全HTMLフォームバインディングを取得（キャッシュ用）
+    pub fn get_all_html_form_bindings_for_cache(&self) -> Vec<HtmlFormBinding> {
+        self.html_form_bindings
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// 全HTMLディレクティブ参照を取得（キャッシュ用）
+    pub fn get_all_html_directive_references_for_cache(&self) -> Vec<HtmlDirectiveReference> {
+        self.html_directive_references
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// 全テンプレートバインディングを取得（キャッシュ用）
+    pub fn get_all_template_bindings(&self) -> Vec<TemplateBinding> {
+        self.template_bindings
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// 全ng-includeバインディングを取得（キャッシュ用）
+    pub fn get_all_ng_include_bindings(&self) -> Vec<(String, NgIncludeBinding)> {
+        self.ng_include_bindings
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
+    }
+
+    /// キーを指定してng-includeバインディングを追加（キャッシュ復元用）
+    /// 通常のadd_ng_include_bindingと異なり、キーを直接指定する
+    pub fn add_ng_include_binding_with_key(&self, key: String, binding: NgIncludeBinding) {
+        let resolved_filename = binding.resolved_filename.clone();
+        let normalized_path = Self::normalize_template_path(&binding.template_path);
+
+        debug!(
+            "add_ng_include_binding_with_key: {} (resolved: {})",
+            key, resolved_filename
+        );
+
+        // 逆引きインデックスを更新
+        self.ng_include_by_filename
+            .entry(resolved_filename)
+            .or_default()
+            .push(key.clone());
+        self.ng_include_by_path
+            .entry(normalized_path)
+            .or_default()
+            .push(key.clone());
+
+        self.ng_include_bindings.insert(key, binding);
+    }
+
+    /// HTMLファイルを解析済みとしてマーク（キャッシュ復元時用）
+    pub fn mark_html_analyzed_for_cache(&self, uri: &Url) {
+        self.analyzed_html_files.insert(uri.clone());
     }
 }
 

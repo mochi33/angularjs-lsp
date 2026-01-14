@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -9,6 +10,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer, HtmlParser, EmbeddedScript};
+use crate::cache::{CacheLoader, CacheWriter, FileMetadata};
 use crate::config::{AjsConfig, PathMatcher};
 use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler, SemanticTokensHandler, SignatureHelpHandler};
 use crate::index::SymbolIndex;
@@ -393,6 +395,177 @@ impl Backend {
         self.client.send_notification::<notification::Progress>(params).await;
     }
 
+    /// HTML解析のみを実行（キャッシュからJS解析結果をロードした後に使用）
+    async fn scan_html_only(&self) {
+        let root_uri = self.root_uri.read().await;
+        let path_matcher = self.path_matcher.read().await;
+        if let Some(ref uri) = *root_uri {
+            if let Ok(path) = uri.to_file_path() {
+                // 進捗トークンを作成
+                let token = NumberOrString::String("angularjs-indexing".to_string());
+                let _ = self.client.send_request::<request::WorkDoneProgressCreate>(
+                    WorkDoneProgressCreateParams { token: token.clone() }
+                ).await;
+
+                self.send_progress(&token, WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                    title: "Indexing AngularJS (from cache)".to_string(),
+                    cancellable: Some(false),
+                    message: Some("Collecting HTML files...".to_string()),
+                    percentage: Some(0),
+                })).await;
+
+                // Collect HTML files
+                let mut html_files: Vec<(Url, String)> = Vec::new();
+                self.collect_html_files(&path, &path, path_matcher.as_ref(), &mut html_files);
+
+                let html_count = html_files.len();
+
+                self.client
+                    .log_message(MessageType::INFO, format!("Scanning {} HTML files (JS from cache)", html_count))
+                    .await;
+
+                // Pre-parse all HTML files once and reuse the trees
+                let mut parser = HtmlParser::new();
+                let parsed_html_files: Vec<_> = html_files
+                    .iter()
+                    .filter_map(|(uri, content)| {
+                        parser.parse(content).map(|tree| (uri, content.as_str(), tree))
+                    })
+                    .collect();
+                let parsed_count = parsed_html_files.len();
+
+                // Pass 1: Collect ng-controller scopes only
+                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
+                    self.html_analyzer.collect_controller_scopes_only_with_tree(uri, content, tree);
+                    if i % 10 == 0 || i == parsed_count - 1 {
+                        let pct = ((i + 1) * 25 / parsed_count.max(1)) as u32;
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("HTML Pass 1: ng-controller ({}/{})", i + 1, parsed_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                // Pass 1.5: Collect ng-include bindings
+                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
+                    self.html_analyzer.collect_ng_include_bindings_with_tree(uri, content, tree);
+                    if i % 10 == 0 || i == parsed_count - 1 {
+                        let pct = 25 + ((i + 1) * 25 / parsed_count.max(1)) as u32;
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("HTML Pass 1.5: ng-include ({}/{})", i + 1, parsed_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                // Pass 2: Collect form bindings
+                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
+                    self.html_analyzer.collect_form_bindings_only_with_tree(uri, content, tree);
+                    if i % 10 == 0 || i == parsed_count - 1 {
+                        let pct = 50 + ((i + 1) * 25 / parsed_count.max(1)) as u32;
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("HTML Pass 2: form bindings ({}/{})", i + 1, parsed_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                // Pass 3: HTML reference analysis
+                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
+                    self.html_analyzer.analyze_document_references_only_with_tree(uri, content, tree);
+                    if i % 10 == 0 || i == parsed_count - 1 {
+                        let pct = 75 + ((i + 1) * 25 / parsed_count.max(1)) as u32;
+                        self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("HTML Pass 3: references ({}/{})", i + 1, parsed_count)),
+                            percentage: Some(pct),
+                        })).await;
+                    }
+                }
+
+                self.send_progress(&token, WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(format!("Indexed {} HTML files (JS from cache)", parsed_count)),
+                })).await;
+
+                self.client
+                    .log_message(MessageType::INFO, format!("Indexed {} HTML files", parsed_count))
+                    .await;
+            }
+        }
+    }
+
+    /// 変更されたJSファイルのみ解析（部分スキャン）
+    async fn scan_js_files_only(&self, files: &[PathBuf]) {
+        for file_path in files {
+            if let Ok(uri) = Url::from_file_path(file_path) {
+                if let Ok(content) = fs::read_to_string(file_path) {
+                    if Self::is_js_file(&uri) {
+                        // JSファイル解析（定義と参照を両方収集）
+                        self.analyzer.analyze_document(&uri, &content);
+                    } else if Self::is_html_file(&uri) {
+                        // HTML埋め込みスクリプト解析
+                        let scripts = self.html_analyzer.analyze_document_and_extract_scripts(&uri, &content);
+                        for script in scripts {
+                            self.analyzer.analyze_embedded_script(&uri, &script.source, script.line_offset);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 変更されたHTMLファイルのみ解析（部分スキャン）
+    async fn scan_html_files_only(&self, files: &[PathBuf]) {
+        let mut parser = HtmlParser::new();
+        let mut html_files: Vec<(Url, String)> = Vec::new();
+
+        // HTMLファイルを収集
+        for file_path in files {
+            if let Ok(uri) = Url::from_file_path(file_path) {
+                if Self::is_html_file(&uri) {
+                    if let Ok(content) = fs::read_to_string(file_path) {
+                        html_files.push((uri, content));
+                    }
+                }
+            }
+        }
+
+        if html_files.is_empty() {
+            return;
+        }
+
+        // Pre-parse all HTML files
+        let parsed_html_files: Vec<_> = html_files
+            .iter()
+            .filter_map(|(uri, content)| {
+                parser.parse(content).map(|tree| (uri, content.as_str(), tree))
+            })
+            .collect();
+
+        // Pass 1: Collect ng-controller scopes only
+        for (uri, content, tree) in &parsed_html_files {
+            self.html_analyzer.collect_controller_scopes_only_with_tree(uri, content, tree);
+        }
+
+        // Pass 1.5: Collect ng-include bindings
+        for (uri, content, tree) in &parsed_html_files {
+            self.html_analyzer.collect_ng_include_bindings_with_tree(uri, content, tree);
+        }
+
+        // Pass 2: Collect form bindings
+        for (uri, content, tree) in &parsed_html_files {
+            self.html_analyzer.collect_form_bindings_only_with_tree(uri, content, tree);
+        }
+
+        // Pass 3: HTML reference analysis
+        for (uri, content, tree) in &parsed_html_files {
+            self.html_analyzer.analyze_document_references_only_with_tree(uri, content, tree);
+        }
+    }
+
     fn collect_js_files(
         &self,
         dir: &Path,
@@ -572,6 +745,61 @@ impl Backend {
         }
         None
     }
+
+    /// ファイルメタデータを収集（キャッシュ用）
+    fn collect_file_metadata(
+        &self,
+        dir: &Path,
+        root: &Path,
+        path_matcher: Option<&PathMatcher>,
+        metadata: &mut HashMap<PathBuf, FileMetadata>,
+    ) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let relative_path = path.strip_prefix(root).unwrap_or(&path);
+
+                if path.is_dir() {
+                    // ディレクトリはexcludeのみチェック
+                    if let Some(matcher) = path_matcher {
+                        if !matcher.should_traverse_dir(relative_path) {
+                            continue;
+                        }
+                    } else {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with('.') || name == "node_modules" || name == "dist" || name == "build" {
+                                continue;
+                            }
+                        }
+                    }
+                    self.collect_file_metadata(&path, root, path_matcher, metadata);
+                } else {
+                    let ext = path.extension().and_then(|e| e.to_str());
+                    if ext == Some("js") || ext == Some("html") || ext == Some("htm") {
+                        // ファイルはinclude/exclude両方チェック
+                        if let Some(matcher) = path_matcher {
+                            if !matcher.should_include(relative_path) {
+                                continue;
+                            }
+                        }
+
+                        // メタデータを取得
+                        if let Ok(meta) = fs::metadata(&path) {
+                            let mtime = meta.modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            metadata.insert(path, FileMetadata {
+                                mtime,
+                                size: meta.len(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -635,9 +863,13 @@ impl LanguageServer for Backend {
 
         // ajsconfig.json を読み込む
         let root_uri = self.root_uri.read().await.clone();
+        let mut cache_enabled = false;
+
         if let Some(ref uri) = root_uri {
             if let Ok(path) = uri.to_file_path() {
                 let config = AjsConfig::load_from_dir(&path);
+                cache_enabled = config.cache;
+
                 self.html_analyzer.set_interpolate_config(config.interpolate.clone());
                 self.client
                     .log_message(
@@ -665,6 +897,12 @@ impl LanguageServer for Backend {
                         format!("Exclude patterns: {:?}", config.exclude),
                     )
                     .await;
+
+                if cache_enabled {
+                    self.client
+                        .log_message(MessageType::INFO, "Cache enabled")
+                        .await;
+                }
 
                 // PathMatcherをコンパイル
                 match config.create_path_matcher() {
@@ -701,11 +939,237 @@ impl LanguageServer for Backend {
                 .await;
         }
 
-        // Scan workspace for JS files
-        self.scan_workspace().await;
+        // キャッシュ処理
+        if cache_enabled {
+            if let Some(ref uri) = root_uri {
+                if let Ok(root_path) = uri.to_file_path() {
+                    let path_matcher = self.path_matcher.read().await;
+
+                    // ファイルメタデータを収集
+                    let mut file_metadata = HashMap::new();
+                    self.collect_file_metadata(&root_path, &root_path, path_matcher.as_ref(), &mut file_metadata);
+
+                    let loader = CacheLoader::new(&root_path);
+                    let files_for_validation: Vec<_> = file_metadata
+                        .iter()
+                        .map(|(p, m)| (p.clone(), m.mtime, m.size))
+                        .collect();
+
+                    // キャッシュ検証を試みる
+                    match loader.validate(&files_for_validation) {
+                        Ok(validation) => {
+                            if !validation.valid_files.is_empty() {
+                                // 進捗トークンを作成
+                                let token = NumberOrString::String("angularjs-lsp/cache".to_string());
+                                let _ = self.client.send_request::<request::WorkDoneProgressCreate>(
+                                    WorkDoneProgressCreateParams { token: token.clone() }
+                                ).await;
+
+                                self.send_progress(&token, WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                                    title: "Loading from cache".to_string(),
+                                    cancellable: Some(false),
+                                    message: Some(format!("Validating {} files...", validation.valid_files.len())),
+                                    percentage: Some(0),
+                                })).await;
+
+                                // キャッシュからロード
+                                self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                                    cancellable: Some(false),
+                                    message: Some("Loading cached data...".to_string()),
+                                    percentage: Some(20),
+                                })).await;
+
+                                if let Err(e) = loader.load(&self.index, &validation.valid_files) {
+                                    self.send_progress(&token, WorkDoneProgress::End(WorkDoneProgressEnd {
+                                        message: Some("Cache load failed, falling back to full scan".to_string()),
+                                    })).await;
+                                    self.client
+                                        .log_message(
+                                            MessageType::WARNING,
+                                            format!("Cache load failed: {:?}, falling back to full scan", e),
+                                        )
+                                        .await;
+                                    // 全スキャンにフォールバック
+                                    drop(path_matcher);
+                                    self.scan_workspace().await;
+                                } else if !validation.invalid_files.is_empty() {
+                                    // 変更されたファイルのみJS解析
+                                    let invalid_files: Vec<_> = validation.invalid_files.into_iter().collect();
+
+                                    // キャッシュからロードされたHTMLファイルをanalyzed_html_filesにマーク
+                                    let mut cached_html_count = 0;
+                                    for path in &validation.valid_files {
+                                        if path.extension().map_or(false, |e| e == "html" || e == "htm") {
+                                            cached_html_count += 1;
+                                            if let Ok(uri) = Url::from_file_path(path) {
+                                                self.index.mark_html_analyzed_for_cache(&uri);
+                                            }
+                                        }
+                                    }
+
+                                    let definitions_count = self.index.get_all_definitions().len();
+                                    self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                                        cancellable: Some(false),
+                                        message: Some(format!("Loaded {} definitions, {} HTML; scanning {} changed...", definitions_count, cached_html_count, invalid_files.len())),
+                                        percentage: Some(50),
+                                    })).await;
+
+                                    drop(path_matcher);
+                                    self.scan_js_files_only(&invalid_files).await;
+
+                                    self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                                        cancellable: Some(false),
+                                        message: Some("Parsing changed HTML files...".to_string()),
+                                        percentage: Some(70),
+                                    })).await;
+
+                                    // 変更されたHTMLファイルのみ解析
+                                    self.scan_html_files_only(&invalid_files).await;
+
+                                    self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                                        cancellable: Some(false),
+                                        message: Some("Saving cache...".to_string()),
+                                        percentage: Some(90),
+                                    })).await;
+
+                                    // キャッシュを更新
+                                    let writer = CacheWriter::new(&root_path);
+                                    let save_result = writer.save_full(&self.index, &file_metadata)
+                                        .map_err(|e| e.to_string());
+                                    if let Err(e) = save_result {
+                                        self.client
+                                            .log_message(
+                                                MessageType::WARNING,
+                                                format!("Cache save failed: {}", e),
+                                            )
+                                            .await;
+                                    }
+
+                                    self.send_progress(&token, WorkDoneProgress::End(WorkDoneProgressEnd {
+                                        message: Some(format!("Loaded {} definitions (scanned {} changed files)", definitions_count, invalid_files.len())),
+                                    })).await;
+                                } else {
+                                    // すべてのファイルがキャッシュヒット - HTMLもキャッシュからロード済み
+                                    self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
+                                        cancellable: Some(false),
+                                        message: Some("Restoring HTML data...".to_string()),
+                                        percentage: Some(80),
+                                    })).await;
+
+                                    // キャッシュからロードされたHTMLファイルをanalyzed_html_filesにマーク
+                                    let mut html_count = 0;
+                                    for path in &validation.valid_files {
+                                        if path.extension().map_or(false, |e| e == "html" || e == "htm") {
+                                            html_count += 1;
+                                            if let Ok(uri) = Url::from_file_path(path) {
+                                                self.index.mark_html_analyzed_for_cache(&uri);
+                                            }
+                                        }
+                                    }
+
+                                    let definitions_count = self.index.get_all_definitions().len();
+
+                                    self.send_progress(&token, WorkDoneProgress::End(WorkDoneProgressEnd {
+                                        message: Some(format!("Loaded {} definitions, {} HTML files from cache", definitions_count, html_count)),
+                                    })).await;
+
+                                    drop(path_matcher);
+                                    // HTML解析はスキップ（キャッシュからロード済み）
+                                }
+                            } else {
+                                // すべてのファイルが無効（新規または変更）
+                                drop(path_matcher);
+                                self.scan_workspace().await;
+
+                                // キャッシュを保存
+                                let writer = CacheWriter::new(&root_path);
+                                let save_result = writer.save_full(&self.index, &file_metadata)
+                                    .map_err(|e| e.to_string());
+                                if let Err(e) = save_result {
+                                    self.client
+                                        .log_message(
+                                            MessageType::WARNING,
+                                            format!("Cache save failed: {}", e),
+                                        )
+                                        .await;
+                                } else {
+                                    self.client
+                                        .log_message(MessageType::INFO, "Cache saved")
+                                        .await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.client
+                                .log_message(
+                                    MessageType::INFO,
+                                    format!("Cache not available: {:?}, performing full scan", e),
+                                )
+                                .await;
+                            drop(path_matcher);
+                            self.scan_workspace().await;
+
+                            // キャッシュを保存
+                            let writer = CacheWriter::new(&root_path);
+                            let save_result = writer.save_full(&self.index, &file_metadata)
+                                .map_err(|e| e.to_string());
+                            if let Err(e) = save_result {
+                                self.client
+                                    .log_message(
+                                        MessageType::WARNING,
+                                        format!("Cache save failed: {}", e),
+                                    )
+                                    .await;
+                            } else {
+                                self.client
+                                    .log_message(MessageType::INFO, "Cache saved")
+                                    .await;
+                            }
+                        }
+                    }
+                } else {
+                    self.scan_workspace().await;
+                }
+            } else {
+                self.scan_workspace().await;
+            }
+        } else {
+            // キャッシュ無効の場合は通常のスキャン
+            self.scan_workspace().await;
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
+        // キャッシュを保存
+        if let Some(ref uri) = *self.root_uri.read().await {
+            if let Ok(root_path) = uri.to_file_path() {
+                // 設定からキャッシュが有効か確認
+                let config_path = root_path.join("ajsconfig.json");
+                let cache_enabled = if config_path.exists() {
+                    fs::read_to_string(&config_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<AjsConfig>(&s).ok())
+                        .map(|c| c.cache)
+                        .unwrap_or(true)
+                } else {
+                    true
+                };
+
+                if cache_enabled {
+                    let path_matcher = self.path_matcher.read().await;
+                    let mut file_metadata = HashMap::new();
+                    self.collect_file_metadata(&root_path, &root_path, path_matcher.as_ref(), &mut file_metadata);
+
+                    let writer = CacheWriter::new(&root_path);
+                    if let Err(e) = writer.save_full(&self.index, &file_metadata) {
+                        tracing::warn!("Failed to save cache on shutdown: {}", e);
+                    } else {
+                        tracing::info!("Cache saved on shutdown");
+                    }
+                }
+            }
+        }
+
         // ts_proxyをシャットダウン
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             proxy.shutdown().await;

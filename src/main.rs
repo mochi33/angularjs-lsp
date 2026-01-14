@@ -1,4 +1,5 @@
 mod analyzer;
+mod cache;
 mod config;
 mod handlers;
 mod index;

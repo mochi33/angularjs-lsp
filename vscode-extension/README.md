@@ -54,7 +54,8 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
   "interpolate": {
     "startSymbol": "{{",
     "endSymbol": "}}"
-  }
+  },
+  "cache": true
 }
 ```
 
@@ -66,6 +67,7 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 | `exclude` | `string[]` | (see below) | Glob patterns for files/directories to exclude. |
 | `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. |
 | `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. |
+| `cache` | `boolean` | `true` | Enable caching of parsed symbols. Cache is stored in `.angularjs-lsp/cache/`. |
 
 ### Default Exclude Patterns
 
