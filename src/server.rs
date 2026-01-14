@@ -851,6 +851,10 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec!["angularjs.refreshIndex".to_string()],
+                    work_done_progress_options: Default::default(),
+                }),
                 ..Default::default()
             },
         })
@@ -1136,6 +1140,34 @@ impl LanguageServer for Backend {
         } else {
             // キャッシュ無効の場合は通常のスキャン
             self.scan_workspace().await;
+        }
+    }
+
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
+        match params.command.as_str() {
+            "angularjs.refreshIndex" => {
+                self.client
+                    .log_message(MessageType::INFO, "Refreshing AngularJS index...")
+                    .await;
+
+                // インデックスをクリア
+                self.index.clear_all();
+
+                // ワークスペースを再スキャン
+                self.scan_workspace().await;
+
+                self.client
+                    .log_message(MessageType::INFO, "AngularJS index refreshed")
+                    .await;
+
+                Ok(Some(serde_json::json!({ "success": true })))
+            }
+            _ => {
+                self.client
+                    .log_message(MessageType::WARNING, format!("Unknown command: {}", params.command))
+                    .await;
+                Ok(None)
+            }
         }
     }
 

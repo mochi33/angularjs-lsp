@@ -72,6 +72,14 @@ export async function activate(context: vscode.ExtensionContext) {
     );
     context.subscriptions.push(installServerDisposable);
 
+    const refreshIndexDisposable = vscode.commands.registerCommand(
+        'angularjs.refreshIndex',
+        async () => {
+            await refreshIndexCommand(outputChannel);
+        }
+    );
+    context.subscriptions.push(refreshIndexDisposable);
+
     // Ensure dependencies are installed (non-blocking for dialogs)
     await ensureDependencies(context, outputChannel);
 
@@ -545,6 +553,41 @@ async function openSingleLocation(location: LspLocation): Promise<void> {
 
     editor.selection = new vscode.Selection(range.start, range.start);
     editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+}
+
+/**
+ * Command to refresh the AngularJS index
+ */
+async function refreshIndexCommand(
+    outputChannel: vscode.OutputChannel
+): Promise<void> {
+    if (!client) {
+        vscode.window.showWarningMessage('AngularJS LSP: Language server is not running');
+        return;
+    }
+
+    outputChannel.appendLine('AngularJS LSP: Refreshing index...');
+
+    try {
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: 'Refreshing AngularJS index...',
+                cancellable: false,
+            },
+            async () => {
+                await client!.sendRequest('workspace/executeCommand', {
+                    command: 'angularjs.refreshIndex',
+                });
+            }
+        );
+
+        outputChannel.appendLine('AngularJS LSP: Index refreshed');
+        vscode.window.showInformationMessage('AngularJS index refreshed');
+    } catch (error) {
+        outputChannel.appendLine(`AngularJS LSP: Failed to refresh index: ${error}`);
+        vscode.window.showErrorMessage(`Failed to refresh index: ${error}`);
+    }
 }
 
 export async function deactivate(): Promise<void> {

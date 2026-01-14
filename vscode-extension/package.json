@@ -71,6 +71,10 @@
       {
         "command": "angularjs.installServer",
         "title": "AngularJS: Install/Update Language Server"
+      },
+      {
+        "command": "angularjs.refreshIndex",
+        "title": "AngularJS: Refresh Index"
       }
     ]
   },

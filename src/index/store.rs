@@ -568,6 +568,26 @@ impl SymbolIndex {
         self.html_directive_references.remove(uri);
     }
 
+    /// 全てのインデックスデータをクリア（ワークスペース再スキャン用）
+    pub fn clear_all(&self) {
+        self.definitions.clear();
+        self.references.clear();
+        self.document_symbols.clear();
+        self.controller_scopes.clear();
+        self.html_controller_scopes.clear();
+        self.html_scope_references.clear();
+        self.template_bindings.clear();
+        self.ng_include_bindings.clear();
+        self.ng_include_by_filename.clear();
+        self.ng_include_by_path.clear();
+        self.pending_reanalysis.clear();
+        self.html_local_variables.clear();
+        self.html_local_variable_references.clear();
+        self.html_form_bindings.clear();
+        self.html_directive_references.clear();
+        self.analyzed_html_files.clear();
+    }
+
     pub fn remove_document(&self, uri: &Url) {
         self.clear_document(uri);
     }
