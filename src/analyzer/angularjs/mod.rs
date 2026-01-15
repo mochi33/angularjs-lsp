@@ -1,6 +1,7 @@
 mod component;
 mod context;
 mod di;
+mod export;
 mod reference;
 mod scope;
 mod service_method;
@@ -118,6 +119,9 @@ impl AngularJsAnalyzer {
             }
             "identifier" => {
                 self.analyze_identifier(node, source, uri, ctx);
+            }
+            "export_statement" => {
+                self.analyze_export_statement(node, source, uri, ctx);
             }
             _ => {}
         }

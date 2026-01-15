@@ -69,7 +69,7 @@ impl AngularJsAnalyzer {
     /// ```
     ///
     /// `MyService.getData`, `MyService.postData` として登録（constructorは除外）
-    fn extract_methods_from_class(&self, class_node: Node, source: &str, uri: &Url, service_name: &str) {
+    pub(super) fn extract_methods_from_class(&self, class_node: Node, source: &str, uri: &Url, service_name: &str) {
         // class_body を取得
         if let Some(body) = class_node.child_by_field_name("body") {
             let mut cursor = body.walk();
@@ -611,7 +611,7 @@ impl AngularJsAnalyzer {
     /// const vm = this;
     /// let vm = this;
     /// ```
-    fn collect_this_aliases(&self, node: Node, source: &str) -> Vec<String> {
+    pub(super) fn collect_this_aliases(&self, node: Node, source: &str) -> Vec<String> {
         let mut aliases = Vec::new();
         self.collect_this_aliases_recursive(node, source, &mut aliases);
         aliases

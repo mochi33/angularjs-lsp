@@ -337,6 +337,7 @@ impl CompletionHandler {
             SymbolKind::RootScopeProperty => CompletionItemKind::PROPERTY,
             SymbolKind::RootScopeMethod => CompletionItemKind::FUNCTION,
             SymbolKind::FormBinding => CompletionItemKind::VARIABLE,
+            SymbolKind::ExportedComponent => CompletionItemKind::CLASS,
         }
     }
 }

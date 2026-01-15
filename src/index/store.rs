@@ -188,6 +188,26 @@ pub struct InheritedFormBinding {
     pub name_end_col: u32,
 }
 
+/// ES6 export default で公開されたコンポーネントの情報
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExportInfo {
+    /// ファイルのURI
+    pub uri: Url,
+    /// コンポーネント名（関数参照名またはファイル名から導出）
+    pub component_name: String,
+    /// DI配列からの依存関係
+    pub dependencies: Vec<String>,
+    /// export文の開始位置
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    /// $scopeを依存に持つか
+    pub has_scope: bool,
+    /// $rootScopeを依存に持つか
+    pub has_root_scope: bool,
+}
+
 /// HTML内でのディレクティブ使用タイプ
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DirectiveUsageType {
@@ -244,6 +264,8 @@ pub struct SymbolIndex {
     pending_reanalysis: DashSet<Url>,
     /// 解析済みのHTMLファイルのURI（再解析判定用）
     analyzed_html_files: DashSet<Url>,
+    /// ES6 export default 情報（ファイルパス -> ExportInfo）
+    exports: DashMap<String, ExportInfo>,
 }
 
 impl SymbolIndex {
@@ -265,6 +287,7 @@ impl SymbolIndex {
             html_directive_references: DashMap::new(),
             pending_reanalysis: DashSet::new(),
             analyzed_html_files: DashSet::new(),
+            exports: DashMap::new(),
         }
     }
 
@@ -597,6 +620,8 @@ impl SymbolIndex {
         self.html_form_bindings.remove(uri);
         // HTMLディレクティブ参照もクリア
         self.html_directive_references.remove(uri);
+        // ES6 exportもクリア
+        self.clear_exports(uri);
     }
 
     /// 全てのインデックスデータをクリア（ワークスペース再スキャン用）
@@ -617,6 +642,7 @@ impl SymbolIndex {
         self.html_form_bindings.clear();
         self.html_directive_references.clear();
         self.analyzed_html_files.clear();
+        self.exports.clear();
     }
 
     pub fn remove_document(&self, uri: &Url) {
@@ -2084,6 +2110,32 @@ impl SymbolIndex {
     /// HTMLファイルを解析済みとしてマーク（キャッシュ復元時用）
     pub fn mark_html_analyzed_for_cache(&self, uri: &Url) {
         self.analyzed_html_files.insert(uri.clone());
+    }
+
+    // ========== ES6 export関連 ==========
+
+    /// ES6 export default 情報を追加
+    pub fn add_export(&self, export_info: ExportInfo) {
+        let path = export_info.uri.path().to_string();
+        self.exports.insert(path, export_info);
+    }
+
+    /// ファイルパスからexport情報を取得
+    pub fn get_export(&self, uri: &Url) -> Option<ExportInfo> {
+        self.exports.get(uri.path()).map(|e| e.value().clone())
+    }
+
+    /// 指定URIのexport情報をクリア
+    pub fn clear_exports(&self, uri: &Url) {
+        self.exports.remove(uri.path());
+    }
+
+    /// 全export情報を取得（キャッシュ用）
+    pub fn get_all_exports(&self) -> Vec<ExportInfo> {
+        self.exports
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 }
 

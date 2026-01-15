@@ -23,6 +23,8 @@ pub enum SymbolKind {
     RootScopeMethod,
     /// <form name="x">で$scopeに自動バインドされるフォーム
     FormBinding,
+    /// ES6 export default で公開されたコンポーネント
+    ExportedComponent,
 }
 
 impl SymbolKind {
@@ -43,6 +45,7 @@ impl SymbolKind {
             SymbolKind::RootScopeProperty => "root scope property",
             SymbolKind::RootScopeMethod => "root scope method",
             SymbolKind::FormBinding => "form binding",
+            SymbolKind::ExportedComponent => "exported component",
         }
     }
 }
