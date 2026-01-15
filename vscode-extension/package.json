@@ -2,7 +2,7 @@
   "name": "angularjs-lsp",
   "displayName": "AngularJS 1.x IntelliSense",
   "description": "Language Server Protocol implementation for AngularJS 1.x projects",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "publisher": "mochi33",
   "license": "MIT",
   "repository": {
@@ -75,6 +75,10 @@
       {
         "command": "angularjs.refreshIndex",
         "title": "AngularJS: Refresh Index"
+      },
+      {
+        "command": "angularjs.refreshCache",
+        "title": "AngularJS: Refresh Cache"
       }
     ]
   },

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html ng-app="testApp">
+<head>
+    <title>Class Syntax Test</title>
+</head>
+<body>
+
+    <!-- UserController (class参照パターン) -->
+    <div ng-controller="UserController">
+        <h2>Users</h2>
+        <p ng-show="loading">Loading...</p>
+        <ul>
+            <li ng-repeat="user in users">
+                {{ user.name }}
+            </li>
+        </ul>
+        <button ng-click="loadUsers()">Load Users</button>
+    </div>
+
+    <!-- UserController as構文 (classメソッド使用) -->
+    <div ng-controller="UserController as userCtrl">
+        <h2>Users (controller as)</h2>
+        <button ng-click=" userCtrl.refresh()">Refresh</button>
+        <button ng-click="userCtrl.selectUser(user)">Select</button>
+    </div>
+
+    <!-- ProductController (class + $inject) -->
+    <div ng-controller="ProductController as pc">
+        <h2>Products</h2>
+        <ul>
+            <li ng-repeat="product in pc.products">
+                {{ product.name }} - {{ product.price }}
+            </li>
+        </ul>
+    </div>
+
+    <!-- InlineController (class式直接) -->
+    <div ng-controller="InlineController">
+        <h2>{{ message }}</h2>
+        <p>Count: {{ count }}</p>
+        <button ng-click="increment()">Increment</button>
+    </div>
+
+    <!-- ArrayController (DI配列内class) -->
+    <div ng-controller="ArrayController">
+        <h2>Status: {{ status }}</h2>
+    </div>
+
+    <!-- ==========================================
+         $rootScope テストセクション
+         ========================================== -->
+
+    <!-- $rootScopeプロパティのグローバル参照（コントローラー外） -->
+    <header>
+        <h1>{{ appName }}</h1>
+        <span ng-show="showWelcome">Welcome!</span>
+        <span ng-if="isLoggedIn">Logged in as: {{ currentUser.name }}</span>
+    </header>
+
+    <!-- RootScopeTestController -->
+    <div ng-controller="RootScopeTestController">
+        <h2>$rootScope Test</h2>
+
+        <!-- $scopeプロパティ（$rootScopeから取得） -->
+        <p>App Title: {{ appTitle }}</p>
+        <p>User: {{ user.name }}</p>
+
+        <!-- $scopeメソッド（内部で$rootScopeメソッドを呼び出し） -->
+        <button ng-click="login({name: 'Test User'})">Login</button>
+        <button ng-click="doLogout()">Logout</button>
+
+        <!-- $rootScopeプロパティの直接参照 -->
+        <div>
+            <p>Direct $rootScope access:</p>
+            <p>App Name: {{ appName }}</p>
+            <p>Is Logged In: {{ isLoggedIn }}</p>
+            <p>Current User: {{ currentUser.name }}</p>
+            <p>Init Time: {{ initTime }}</p>
+        </div>
+
+        <!-- $rootScopeメソッドの直接呼び出し -->
+        <button ng-click="setCurrentUser({name: 'Direct User'})">Direct Set User</button>
+        <button ng-click="logout()">Direct Logout</button>
+    </div>
+
+    <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.2/angular.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

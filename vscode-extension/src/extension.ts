@@ -80,6 +80,14 @@ export async function activate(context: vscode.ExtensionContext) {
     );
     context.subscriptions.push(refreshIndexDisposable);
 
+    const refreshCacheDisposable = vscode.commands.registerCommand(
+        'angularjs.refreshCache',
+        async () => {
+            await refreshCacheCommand(outputChannel);
+        }
+    );
+    context.subscriptions.push(refreshCacheDisposable);
+
     // Ensure dependencies are installed (non-blocking for dialogs)
     await ensureDependencies(context, outputChannel);
 
@@ -587,6 +595,42 @@ async function refreshIndexCommand(
     } catch (error) {
         outputChannel.appendLine(`AngularJS LSP: Failed to refresh index: ${error}`);
         vscode.window.showErrorMessage(`Failed to refresh index: ${error}`);
+    }
+}
+
+/**
+ * Command to refresh the AngularJS cache (re-index and save cache)
+ */
+async function refreshCacheCommand(
+    outputChannel: vscode.OutputChannel
+): Promise<void> {
+    if (!client) {
+        vscode.window.showWarningMessage('AngularJS LSP: Language server is not running');
+        return;
+    }
+
+    outputChannel.appendLine('AngularJS LSP: Refreshing cache...');
+
+    try {
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: 'Refreshing AngularJS cache...',
+                cancellable: false,
+            },
+            async () => {
+                // Use existing refreshIndex command which will re-scan and save cache
+                await client!.sendRequest('workspace/executeCommand', {
+                    command: 'angularjs.refreshIndex',
+                });
+            }
+        );
+
+        outputChannel.appendLine('AngularJS LSP: Cache refreshed');
+        vscode.window.showInformationMessage('AngularJS cache refreshed');
+    } catch (error) {
+        outputChannel.appendLine(`AngularJS LSP: Failed to refresh cache: ${error}`);
+        vscode.window.showErrorMessage(`Failed to refresh cache: ${error}`);
     }
 }
 

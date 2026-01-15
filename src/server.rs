@@ -1156,6 +1156,46 @@ impl LanguageServer for Backend {
                 // ワークスペースを再スキャン
                 self.scan_workspace().await;
 
+                // キャッシュを保存
+                if let Some(ref uri) = *self.root_uri.read().await {
+                    if let Ok(root_path) = uri.to_file_path() {
+                        // 設定からキャッシュが有効か確認
+                        let config_path = root_path.join("ajsconfig.json");
+                        let cache_enabled = if config_path.exists() {
+                            fs::read_to_string(&config_path)
+                                .ok()
+                                .and_then(|s| serde_json::from_str::<AjsConfig>(&s).ok())
+                                .map(|c| c.cache)
+                                .unwrap_or(true)
+                        } else {
+                            true
+                        };
+
+                        if cache_enabled {
+                            // ファイルメタデータを収集
+                            let path_matcher = self.path_matcher.read().await;
+                            let mut file_metadata = HashMap::new();
+                            self.collect_file_metadata(&root_path, &root_path, path_matcher.as_ref(), &mut file_metadata);
+
+                            let cache_writer = CacheWriter::new(&root_path);
+                            let save_result = cache_writer.save_full(&self.index, &file_metadata)
+                                .map_err(|e| e.to_string());
+                            if let Err(e) = save_result {
+                                self.client
+                                    .log_message(
+                                        MessageType::WARNING,
+                                        format!("Failed to save cache: {}", e),
+                                    )
+                                    .await;
+                            } else {
+                                self.client
+                                    .log_message(MessageType::INFO, "Cache saved")
+                                    .await;
+                            }
+                        }
+                    }
+                }
+
                 self.client
                     .log_message(MessageType::INFO, "AngularJS index refreshed")
                     .await;
