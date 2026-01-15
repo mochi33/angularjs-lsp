@@ -46,7 +46,48 @@ impl CompletionHandler {
         let definitions = self.index.get_all_definitions();
 
         let items: Vec<CompletionItem> = if let Some(prefix) = service_prefix {
-            if prefix == "$scope" {
+            if prefix == "$rootScope" {
+                // $rootScope. の場合、全モジュールの $rootScope プロパティを返す
+                let mut seen_props: HashSet<String> = HashSet::new();
+                let mut items: Vec<CompletionItem> = Vec::new();
+
+                for symbol in definitions.iter().filter(|s| {
+                    s.kind == SymbolKind::RootScopeProperty || s.kind == SymbolKind::RootScopeMethod
+                }) {
+                    // "ModuleName.$rootScope.propertyName" から "propertyName" を抽出
+                    if let Some(idx) = symbol.name.find(".$rootScope.") {
+                        let module_name = &symbol.name[..idx];
+                        let prop_name = symbol.name[idx + ".$rootScope.".len()..].to_string();
+
+                        // 重複チェック
+                        if seen_props.contains(&prop_name) {
+                            continue;
+                        }
+                        seen_props.insert(prop_name.clone());
+
+                        let (item_kind, type_str) = if symbol.kind == SymbolKind::RootScopeMethod {
+                            (CompletionItemKind::FUNCTION, "method")
+                        } else {
+                            (CompletionItemKind::PROPERTY, "property")
+                        };
+
+                        items.push(CompletionItem {
+                            label: prop_name,
+                            kind: Some(item_kind),
+                            detail: Some(format!("{} ($rootScope {})", module_name, type_str)),
+                            documentation: symbol.docs.clone().map(|docs| {
+                                Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: docs,
+                                })
+                            }),
+                            ..Default::default()
+                        });
+                    }
+                }
+
+                items
+            } else if prefix == "$scope" {
                 // $scope. の場合、現在のコントローラーの $scope プロパティのみを返す
                 // 重複を排除するために HashSet を使用
                 let mut seen_props: HashSet<String> = HashSet::new();
@@ -98,6 +139,9 @@ impl CompletionHandler {
                 }
 
                 // 参照のみ（定義がない）のプロパティも収集
+                // ただし、既存の定義のプレフィックスはスキップ（入力中の不完全な識別子を除外）
+                // 注: seen_propsには定義から収集したプロパティ名が含まれているため、
+                //     定義のプレフィックスのみをスキップできる
                 for ref_name in self.index.get_reference_only_names() {
                     if ref_name.contains(".$scope.") {
                         let parts: Vec<&str> = ref_name.split(".$scope.").collect();
@@ -112,10 +156,22 @@ impl CompletionHandler {
                                 }
                             }
 
-                            // 重複チェック
+                            // 重複チェック（定義と重複する場合はスキップ）
                             if seen_props.contains(&prop_name) {
                                 continue;
                             }
+
+                            // 既存の「定義」のプレフィックスかどうかチェック
+                            // seen_propsにはこの時点で定義から収集したプロパティ名のみが含まれている
+                            // 例: "mochi"が定義されている場合、"m", "mo", "moc", "moch"はスキップ
+                            // ただし、"mo"自体も定義されていればseen_propsに含まれているため、上の重複チェックでスキップされる
+                            let is_prefix_of_definition = seen_props.iter().any(|existing| {
+                                existing.starts_with(&prop_name) && existing != &prop_name
+                            });
+                            if is_prefix_of_definition {
+                                continue;
+                            }
+
                             seen_props.insert(prop_name.clone());
 
                             items.push(CompletionItem {
@@ -282,5 +338,121 @@ impl CompletionHandler {
             SymbolKind::RootScopeMethod => CompletionItemKind::FUNCTION,
             SymbolKind::FormBinding => CompletionItemKind::VARIABLE,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use crate::index::{SymbolIndex, Symbol, SymbolReference};
+    use tower_lsp::lsp_types::Url;
+
+    #[test]
+    fn test_completion_excludes_prefix_of_definitions() {
+        let index = Arc::new(SymbolIndex::new());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // mochiを定義として追加
+        index.add_definition(Symbol {
+            name: "TestCtrl.$scope.mochi".to_string(),
+            kind: SymbolKind::ScopeProperty,
+            uri: uri.clone(),
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 5,
+            name_start_line: 0,
+            name_start_col: 0,
+            name_end_line: 0,
+            name_end_col: 5,
+            docs: None,
+            parameters: None,
+        });
+
+        // m, mo, moc, moch を参照として追加（入力中のシミュレーション）
+        for prefix in &["m", "mo", "moc", "moch"] {
+            index.add_reference(SymbolReference {
+                name: format!("TestCtrl.$scope.{}", prefix),
+                uri: uri.clone(),
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: prefix.len() as u32,
+            });
+        }
+
+        // 補完を実行
+        let handler = CompletionHandler::new(Arc::clone(&index));
+        let completions = handler.complete_with_context(Some("$scope"), Some("TestCtrl"), &[]);
+
+        let items = match completions {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => panic!("Expected completion array"),
+        };
+
+        // 補完候補にmochiが含まれることを確認
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"mochi"), "mochi should be in completions: {:?}", labels);
+
+        // m, mo, moc, moch は含まれないべき（定義のプレフィックスとして除外）
+        assert!(!labels.contains(&"m"), "m should not be in completions: {:?}", labels);
+        assert!(!labels.contains(&"mo"), "mo should not be in completions: {:?}", labels);
+        assert!(!labels.contains(&"moc"), "moc should not be in completions: {:?}", labels);
+        assert!(!labels.contains(&"moch"), "moch should not be in completions: {:?}", labels);
+    }
+
+    #[test]
+    fn test_completion_includes_both_mo_and_mochi_when_both_defined() {
+        let index = Arc::new(SymbolIndex::new());
+        let uri = Url::parse("file:///test.js").unwrap();
+
+        // moを定義として追加
+        index.add_definition(Symbol {
+            name: "TestCtrl.$scope.mo".to_string(),
+            kind: SymbolKind::ScopeProperty,
+            uri: uri.clone(),
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 2,
+            name_start_line: 0,
+            name_start_col: 0,
+            name_end_line: 0,
+            name_end_col: 2,
+            docs: None,
+            parameters: None,
+        });
+
+        // mochiを定義として追加
+        index.add_definition(Symbol {
+            name: "TestCtrl.$scope.mochi".to_string(),
+            kind: SymbolKind::ScopeProperty,
+            uri: uri.clone(),
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 5,
+            name_start_line: 1,
+            name_start_col: 0,
+            name_end_line: 1,
+            name_end_col: 5,
+            docs: None,
+            parameters: None,
+        });
+
+        // 補完を実行
+        let handler = CompletionHandler::new(Arc::clone(&index));
+        let completions = handler.complete_with_context(Some("$scope"), Some("TestCtrl"), &[]);
+
+        let items = match completions {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => panic!("Expected completion array"),
+        };
+
+        // 両方が補完候補に含まれることを確認
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"mo"), "mo should be in completions: {:?}", labels);
+        assert!(labels.contains(&"mochi"), "mochi should be in completions: {:?}", labels);
     }
 }

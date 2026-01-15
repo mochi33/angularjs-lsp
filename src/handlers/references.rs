@@ -162,6 +162,7 @@ impl ReferencesHandler {
         };
 
         // 4. 各コントローラーを順番に試して、定義が見つかったものを返す
+        // 注意: 定義がある場合のみ返す（参照のみの場合は$rootScopeも検索する）
         for controller_name in &controllers {
             debug!(
                 "find_references_from_html: trying controller '{}'",
@@ -180,8 +181,11 @@ impl ReferencesHandler {
                 symbol_name
             );
 
-            if let Some(locations) = self.collect_references(&symbol_name, include_declaration) {
-                return Some(locations);
+            // 定義がある場合のみ返す
+            if self.index.has_definition(&symbol_name) {
+                if let Some(locations) = self.collect_references(&symbol_name, include_declaration) {
+                    return Some(locations);
+                }
             }
         }
 
@@ -200,10 +204,23 @@ impl ReferencesHandler {
                     symbol_name
                 );
 
-                if let Some(locations) = self.collect_references(&symbol_name, include_declaration) {
-                    return Some(locations);
+                // 定義がある場合のみ返す
+                if self.index.has_definition(&symbol_name) {
+                    if let Some(locations) = self.collect_references(&symbol_name, include_declaration) {
+                        return Some(locations);
+                    }
                 }
             }
+        }
+
+        // 6. $rootScopeからのグローバル参照を検索
+        // $scopeで定義が見つからなかった場合、$rootScopeプロパティとして検索
+        if let Some(root_scope_symbol) = self.index.find_root_scope_symbol_name_by_property(&property_path) {
+            debug!(
+                "find_references_from_html: found $rootScope symbol '{}'",
+                root_scope_symbol
+            );
+            return self.collect_references(&root_scope_symbol, include_declaration);
         }
 
         None
@@ -879,7 +896,37 @@ impl ReferencesHandler {
             }
         }
 
-        debug!("goto_definition_from_html: no definitions found in any controller");
+        // 6. $rootScopeからのグローバル参照を検索
+        // $scopeで見つからなかった場合、$rootScopeプロパティとして検索
+        let root_scope_defs = self.index.find_root_scope_definitions_by_property(&property_path);
+        if !root_scope_defs.is_empty() {
+            debug!(
+                "goto_definition_from_html: found {} $rootScope definitions for '{}'",
+                root_scope_defs.len(),
+                property_path
+            );
+
+            let locations: Vec<Location> = root_scope_defs
+                .into_iter()
+                .map(|def| Location {
+                    uri: def.uri.clone(),
+                    range: Range {
+                        start: Position {
+                            line: def.start_line,
+                            character: def.start_col,
+                        },
+                        end: Position {
+                            line: def.end_line,
+                            character: def.end_col,
+                        },
+                    },
+                })
+                .collect();
+
+            return Some(GotoDefinitionResponse::Array(locations));
+        }
+
+        debug!("goto_definition_from_html: no definitions found in any controller or $rootScope");
         None
     }
 

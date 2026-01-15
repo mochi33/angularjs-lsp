@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Url;
 use tracing::debug;
 
-use super::symbol::{Symbol, SymbolReference};
+use super::symbol::{Symbol, SymbolKind, SymbolReference};
 
 /// コントローラーのスコープ情報
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -527,6 +527,37 @@ impl SymbolIndex {
             .iter()
             .flat_map(|entry| entry.value().clone())
             .collect()
+    }
+
+    /// プロパティパスで$rootScopeシンボルを検索
+    /// 例: "appName" -> "testApp.$rootScope.appName" の定義を返す
+    pub fn find_root_scope_definitions_by_property(&self, property_path: &str) -> Vec<Symbol> {
+        let suffix = format!(".$rootScope.{}", property_path);
+        self.definitions
+            .iter()
+            .filter(|entry| entry.key().ends_with(&suffix))
+            .flat_map(|entry| entry.value().clone())
+            .filter(|s| s.kind == SymbolKind::RootScopeProperty || s.kind == SymbolKind::RootScopeMethod)
+            .collect()
+    }
+
+    /// プロパティパスで$rootScopeの参照を検索
+    pub fn find_root_scope_references_by_property(&self, property_path: &str) -> Vec<SymbolReference> {
+        let suffix = format!(".$rootScope.{}", property_path);
+        self.references
+            .iter()
+            .filter(|entry| entry.key().ends_with(&suffix))
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// プロパティパスに一致する$rootScopeシンボル名を取得
+    pub fn find_root_scope_symbol_name_by_property(&self, property_path: &str) -> Option<String> {
+        let suffix = format!(".$rootScope.{}", property_path);
+        self.definitions
+            .iter()
+            .find(|entry| entry.key().ends_with(&suffix))
+            .map(|entry| entry.key().clone())
     }
 
     /// 参照のみ存在するシンボル名を取得（定義がないもの）
