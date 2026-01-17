@@ -208,6 +208,38 @@ pub struct ExportInfo {
     pub has_root_scope: bool,
 }
 
+/// ES6 export default { name: 'xxx', config: {...} } パターンの情報
+/// AngularJS 1.5+ コンポーネントのモジュールパターン用
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExportedComponentObject {
+    /// ファイルのURI
+    pub uri: Url,
+    /// nameプロパティの値（例: 'userDetails'）
+    pub name: String,
+    /// export文の開始位置
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
+/// コンポーネントのtemplateUrl情報（CodeLens用）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComponentTemplateUrl {
+    /// 定義元のURI（JSファイル）
+    pub uri: Url,
+    /// templateUrlの値（パス）
+    pub template_path: String,
+    /// templateUrlプロパティの行番号
+    pub line: u32,
+    /// templateUrlプロパティの列番号
+    pub col: u32,
+    /// コントローラー名（文字列参照、識別子参照、またはインラインコントローラーの場合はNone）
+    pub controller_name: Option<String>,
+    /// controllerAsエイリアス（デフォルト: "$ctrl"）
+    pub controller_as: String,
+}
+
 /// HTML内でのディレクティブ使用タイプ
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DirectiveUsageType {
@@ -266,6 +298,15 @@ pub struct SymbolIndex {
     analyzed_html_files: DashSet<Url>,
     /// ES6 export default 情報（ファイルパス -> ExportInfo）
     exports: DashMap<String, ExportInfo>,
+    /// ES6 export default { name: 'xxx', ... } オブジェクトパターン（ファイルパス -> ExportedComponentObject）
+    exported_component_objects: DashMap<String, ExportedComponentObject>,
+    /// ES6 import文のマッピング（URI -> (識別子名 -> インポート元パス)）
+    imports: DashMap<Url, DashMap<String, String>>,
+    /// コンポーネントのtemplateUrl情報（URI -> Vec<ComponentTemplateUrl>）
+    component_template_urls: DashMap<Url, Vec<ComponentTemplateUrl>>,
+    /// コンポーネントテンプレートバインディング逆引き（正規化されたtemplate_path -> ComponentTemplateUrl）
+    /// HTMLテンプレートからコンポーネント情報を取得するために使用
+    component_template_bindings: DashMap<String, ComponentTemplateUrl>,
 }
 
 impl SymbolIndex {
@@ -288,6 +329,10 @@ impl SymbolIndex {
             pending_reanalysis: DashSet::new(),
             analyzed_html_files: DashSet::new(),
             exports: DashMap::new(),
+            exported_component_objects: DashMap::new(),
+            imports: DashMap::new(),
+            component_template_urls: DashMap::new(),
+            component_template_bindings: DashMap::new(),
         }
     }
 
@@ -622,6 +667,12 @@ impl SymbolIndex {
         self.html_directive_references.remove(uri);
         // ES6 exportもクリア
         self.clear_exports(uri);
+        // ES6 export default オブジェクトもクリア
+        self.clear_exported_component_objects(uri);
+        // ES6 importもクリア
+        self.clear_imports(uri);
+        // コンポーネントtemplateUrlもクリア
+        self.clear_component_template_urls(uri);
     }
 
     /// 全てのインデックスデータをクリア（ワークスペース再スキャン用）
@@ -1302,7 +1353,9 @@ impl SymbolIndex {
 
     /// 指定位置のHTML内でaliasに対応するコントローラー名を取得
     /// 例: <div ng-controller="UserCtrl as vm">内で"vm"を渡すと"UserCtrl"を返す
+    /// コンポーネントテンプレートの場合は$ctrlなどのcontrollerAsエイリアスも解決する
     pub fn resolve_controller_by_alias(&self, uri: &Url, line: u32, alias: &str) -> Option<String> {
+        // 1. まずng-controllerのaliasを確認（より具体的なスコープを優先）
         if let Some(scopes) = self.html_controller_scopes.get(uri) {
             // 最も内側のスコープを優先するため、逆順で探す
             let mut best_match: Option<&HtmlControllerScope> = None;
@@ -1324,8 +1377,18 @@ impl SymbolIndex {
                     }
                 }
             }
-            return best_match.map(|s| s.controller_name.clone());
+            if let Some(matched) = best_match {
+                return Some(matched.controller_name.clone());
+            }
         }
+
+        // 2. コンポーネントテンプレートのcontrollerAsを確認（$ctrlなど）
+        if let Some(binding) = self.get_component_binding_for_template(uri) {
+            if binding.controller_as == alias {
+                return binding.controller_name.clone();
+            }
+        }
+
         None
     }
 
@@ -1760,10 +1823,19 @@ impl SymbolIndex {
         let local_controllers = self.get_html_controllers_at(uri, line);
         controllers.extend(local_controllers);
 
-        // 3. テンプレートバインディング経由のコントローラー（継承がない場合のみ）
+        // 3. テンプレートバインディング経由のコントローラー（routes/modals）
         if controllers.is_empty() {
             if let Some(controller) = self.get_controller_for_template(uri) {
                 controllers.push(controller);
+            }
+        }
+
+        // 4. コンポーネントテンプレートのコントローラー
+        if controllers.is_empty() {
+            if let Some(binding) = self.get_component_binding_for_template(uri) {
+                if let Some(ref controller_name) = binding.controller_name {
+                    controllers.push(controller_name.clone());
+                }
             }
         }
 
@@ -2136,6 +2208,153 @@ impl SymbolIndex {
             .iter()
             .map(|entry| entry.value().clone())
             .collect()
+    }
+
+    // ========== ES6 export default { name: '...', config: {...} } パターン関連 ==========
+
+    /// export default オブジェクトパターンを追加
+    pub fn add_exported_component_object(&self, obj: ExportedComponentObject) {
+        let path = obj.uri.path().to_string();
+        self.exported_component_objects.insert(path, obj);
+    }
+
+    /// ファイルパスからexported component objectを取得
+    pub fn get_exported_component_object(&self, uri: &Url) -> Option<ExportedComponentObject> {
+        self.exported_component_objects
+            .get(uri.path())
+            .map(|e| e.value().clone())
+    }
+
+    /// 指定URIのexported component objectをクリア
+    pub fn clear_exported_component_objects(&self, uri: &Url) {
+        self.exported_component_objects.remove(uri.path());
+    }
+
+    /// 全exported component objectsを取得（キャッシュ用）
+    pub fn get_all_exported_component_objects(&self) -> Vec<ExportedComponentObject> {
+        self.exported_component_objects
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    // ========== ES6 import文関連 ==========
+
+    /// import文のマッピングを追加
+    /// 例: import UserDetails from 'src/users/components/details/UserDetails'
+    ///     -> add_import(uri, "UserDetails", "src/users/components/details/UserDetails")
+    pub fn add_import(&self, uri: &Url, identifier: String, import_path: String) {
+        self.imports
+            .entry(uri.clone())
+            .or_default()
+            .insert(identifier, import_path);
+    }
+
+    /// 指定識別子のインポート元パスを取得
+    pub fn get_import_path(&self, uri: &Url, identifier: &str) -> Option<String> {
+        self.imports
+            .get(uri)
+            .and_then(|map| map.get(identifier).map(|p| p.value().clone()))
+    }
+
+    /// 指定URIのimport情報をクリア
+    pub fn clear_imports(&self, uri: &Url) {
+        self.imports.remove(uri);
+    }
+
+    /// インポート識別子名からコンポーネント名を取得
+    /// Users.js から .component(UserDetails.name, ...) を呼び出した場合、
+    /// UserDetails のインポート元パスを解決し、そのファイルの export default { name: '...' }
+    /// の name プロパティを返す
+    pub fn get_exported_component_name(&self, identifier: &str) -> Option<String> {
+        // 全インポートを検索
+        for import_entry in self.imports.iter() {
+            if let Some(import_path) = import_entry.value().get(identifier) {
+                // インポートパスからファイルパスを推測
+                // import_path は相対パスなので、すべての exported_component_objects を検索
+                for obj_entry in self.exported_component_objects.iter() {
+                    let obj_path = obj_entry.key();
+                    // パスの末尾がマッチするかチェック
+                    // 例: "src/users/components/details/UserDetails" と
+                    //     "/home/.../app/src/users/components/details/UserDetails.js"
+                    let normalized_import = import_path.value().trim_end_matches(".js");
+                    let normalized_obj = obj_path.trim_end_matches(".js");
+                    if normalized_obj.ends_with(normalized_import) {
+                        return Some(obj_entry.value().name.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // ========== コンポーネント templateUrl 関連 ==========
+
+    /// コンポーネントのtemplateUrl情報を追加
+    pub fn add_component_template_url(&self, template_url: ComponentTemplateUrl) {
+        let uri = template_url.uri.clone();
+
+        // 逆引きインデックスにも追加（テンプレートファイルからコンポーネント情報を取得するため）
+        let normalized_path = Self::normalize_template_path(&template_url.template_path);
+        self.component_template_bindings
+            .insert(normalized_path, template_url.clone());
+
+        self.component_template_urls
+            .entry(uri)
+            .or_default()
+            .push(template_url);
+    }
+
+    /// 指定URIのコンポーネントtemplateUrl情報を取得
+    pub fn get_component_template_urls(&self, uri: &Url) -> Vec<ComponentTemplateUrl> {
+        self.component_template_urls
+            .get(uri)
+            .map(|v| v.value().clone())
+            .unwrap_or_default()
+    }
+
+    /// 指定URIのコンポーネントtemplateUrl情報をクリア
+    pub fn clear_component_template_urls(&self, uri: &Url) {
+        // 逆引きインデックスからも削除
+        if let Some(templates) = self.component_template_urls.get(uri) {
+            for template in templates.iter() {
+                let normalized_path = Self::normalize_template_path(&template.template_path);
+                self.component_template_bindings.remove(&normalized_path);
+            }
+        }
+        self.component_template_urls.remove(uri);
+    }
+
+    /// HTMLテンプレートURIからコンポーネントバインディングを取得
+    /// $ctrl などのエイリアス解決に使用
+    pub fn get_component_binding_for_template(&self, uri: &Url) -> Option<ComponentTemplateUrl> {
+        // URIからファイルパスを抽出
+        let path = uri.path();
+
+        // 完全一致で検索
+        for entry in self.component_template_bindings.iter() {
+            let normalized_path = entry.key();
+            // ファイル名または相対パスで一致
+            if path.ends_with(normalized_path) {
+                return Some(entry.value().clone());
+            }
+        }
+        None
+    }
+
+    /// コンポーネントテンプレートのcontrollerAsエイリアスを解決
+    /// aliasが一致すればコントローラー名を返す
+    pub fn resolve_component_controller_by_alias(
+        &self,
+        uri: &Url,
+        alias: &str,
+    ) -> Option<String> {
+        if let Some(binding) = self.get_component_binding_for_template(uri) {
+            if binding.controller_as == alias {
+                return binding.controller_name.clone();
+            }
+        }
+        None
     }
 }
 

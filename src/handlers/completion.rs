@@ -271,10 +271,10 @@ impl CompletionHandler {
     ) -> Option<CompletionResponse> {
         let definitions = self.index.get_all_definitions();
 
-        // ディレクティブのみをフィルタ
+        // ディレクティブとコンポーネントをフィルタ
         let directives: Vec<_> = definitions
             .into_iter()
-            .filter(|s| s.kind == SymbolKind::Directive)
+            .filter(|s| s.kind == SymbolKind::Directive || s.kind == SymbolKind::Component)
             .collect();
 
         if directives.is_empty() {
@@ -292,7 +292,13 @@ impl CompletionHandler {
                     return None;
                 }
 
-                let detail = if is_tag_name {
+                let detail = if symbol.kind == SymbolKind::Component {
+                    if is_tag_name {
+                        "component (element)".to_string()
+                    } else {
+                        "component (attribute)".to_string()
+                    }
+                } else if is_tag_name {
                     "directive (element)".to_string()
                 } else {
                     "directive (attribute)".to_string()
@@ -327,6 +333,7 @@ impl CompletionHandler {
             SymbolKind::Service => CompletionItemKind::CLASS,
             SymbolKind::Factory => CompletionItemKind::CLASS,
             SymbolKind::Directive => CompletionItemKind::CLASS,
+            SymbolKind::Component => CompletionItemKind::CLASS,
             SymbolKind::Provider => CompletionItemKind::CLASS,
             SymbolKind::Filter => CompletionItemKind::FUNCTION,
             SymbolKind::Constant => CompletionItemKind::CONSTANT,
@@ -338,6 +345,7 @@ impl CompletionHandler {
             SymbolKind::RootScopeMethod => CompletionItemKind::FUNCTION,
             SymbolKind::FormBinding => CompletionItemKind::VARIABLE,
             SymbolKind::ExportedComponent => CompletionItemKind::CLASS,
+            SymbolKind::ComponentBinding => CompletionItemKind::PROPERTY,
         }
     }
 }

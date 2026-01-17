@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
-use crate::index::{BindingSource, SymbolIndex, SymbolKind, TemplateBinding};
+use crate::index::{BindingSource, ComponentTemplateUrl, SymbolIndex, SymbolKind, TemplateBinding};
 
 pub struct CodeLensHandler {
     index: Arc<SymbolIndex>,
@@ -64,13 +64,18 @@ impl CodeLensHandler {
             }
         }
 
-        // 3. ng-include継承コントローラー
+        // 3. コンポーネントテンプレートのコントローラー（ファイル先頭に表示）
+        if let Some(binding) = self.index.get_component_binding_for_template(uri) {
+            lenses.push(self.create_component_controller_lens(&binding));
+        }
+
+        // 4. ng-include継承コントローラー
         let inherited = self.index.get_inherited_controllers_for_template(uri);
         for controller in inherited {
             lenses.push(self.create_controller_lens(&controller, 0, "Inherited"));
         }
 
-        // 4. HTML内のng-controllerスコープ
+        // 5. HTML内のng-controllerスコープ
         let html_scopes = self.index.get_all_html_controller_scopes(uri);
         for scope in html_scopes {
             lenses.push(self.create_controller_lens(
@@ -80,13 +85,13 @@ impl CodeLensHandler {
             ));
         }
 
-        // 5. ng-includeの呼び出し先ファイル（各ng-includeの行に表示）
+        // 6. ng-includeの呼び出し先ファイル（各ng-includeの行に表示）
         let ng_includes = self.index.get_ng_includes_in_file(uri);
         for (line, template_path, resolved_uri) in ng_includes {
             lenses.push(self.create_ng_include_lens(line, &template_path, resolved_uri));
         }
 
-        // 6. <script>タグ内のコントローラー定義（JSファイルと同様の処理）
+        // 7. <script>タグ内のコントローラー定義（JSファイルと同様の処理）
         let symbols = self.index.get_document_symbols(uri);
         for symbol in symbols {
             if symbol.kind == SymbolKind::Controller {
@@ -97,7 +102,7 @@ impl CodeLensHandler {
             }
         }
 
-        // 7. <script>タグ内のテンプレートバインディング定義
+        // 8. <script>タグ内のテンプレートバインディング定義
         let bindings = self.index.get_template_bindings_for_js_file(uri);
         for binding in bindings {
             lenses.push(self.create_binding_lens(&binding));
@@ -129,6 +134,12 @@ impl CodeLensHandler {
         let bindings = self.index.get_template_bindings_for_js_file(uri);
         for binding in bindings {
             lenses.push(self.create_binding_lens(&binding));
+        }
+
+        // このファイル内のコンポーネント templateUrl を取得
+        let template_urls = self.index.get_component_template_urls(uri);
+        for template_url in template_urls {
+            lenses.push(self.create_component_template_url_lens(&template_url));
         }
 
         if lenses.is_empty() {
@@ -413,6 +424,126 @@ impl CodeLensHandler {
             range: Range {
                 start: Position { line: binding.binding_line, character: 0 },
                 end: Position { line: binding.binding_line, character: 0 },
+            },
+            command: Some(command),
+            data: None,
+        }
+    }
+
+    /// コンポーネントテンプレートのコントローラー表示用CodeLens（HTMLファイル先頭に表示）
+    fn create_component_controller_lens(&self, binding: &ComponentTemplateUrl) -> CodeLens {
+        let controller_display = if let Some(ref controller_name) = binding.controller_name {
+            controller_name.clone()
+        } else {
+            "(inline)".to_string()
+        };
+
+        let title = format!(
+            "Component: {} (as {})",
+            controller_display, binding.controller_as
+        );
+
+        // コントローラー定義を検索
+        let command = if let Some(ref controller_name) = binding.controller_name {
+            let definitions = self.index.get_definitions(controller_name);
+            if definitions.is_empty() {
+                Command {
+                    title: format!("{} (not found)", title),
+                    command: "".to_string(),
+                    arguments: None,
+                }
+            } else {
+                let locations: Vec<serde_json::Value> = definitions
+                    .iter()
+                    .map(|def| {
+                        serde_json::json!({
+                            "uri": def.uri.to_string(),
+                            "range": {
+                                "start": { "line": def.start_line, "character": def.start_col },
+                                "end": { "line": def.start_line, "character": def.start_col }
+                            }
+                        })
+                    })
+                    .collect();
+
+                Command {
+                    title,
+                    command: "angularjs.openLocation".to_string(),
+                    arguments: Some(vec![serde_json::json!(locations)]),
+                }
+            }
+        } else {
+            // インラインコントローラーの場合、コンポーネント定義にジャンプ
+            let locations = vec![serde_json::json!({
+                "uri": binding.uri.to_string(),
+                "range": {
+                    "start": { "line": binding.line, "character": binding.col },
+                    "end": { "line": binding.line, "character": binding.col }
+                }
+            })];
+
+            Command {
+                title,
+                command: "angularjs.openLocation".to_string(),
+                arguments: Some(vec![serde_json::json!(locations)]),
+            }
+        };
+
+        CodeLens {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 },
+            },
+            command: Some(command),
+            data: None,
+        }
+    }
+
+    /// コンポーネントのtemplateUrl用のCodeLens
+    fn create_component_template_url_lens(&self, template_url: &ComponentTemplateUrl) -> CodeLens {
+        let template_filename = template_url
+            .template_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&template_url.template_path);
+
+        let title = format!("Open template: {}", template_filename);
+
+        // テンプレートURIを解決
+        let resolved_uri = self.index.resolve_template_uri(&template_url.template_path);
+
+        let command = if let Some(uri) = resolved_uri {
+            let locations = vec![serde_json::json!({
+                "uri": uri.to_string(),
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 0 }
+                }
+            })];
+
+            Command {
+                title,
+                command: "angularjs.openLocation".to_string(),
+                arguments: Some(vec![serde_json::json!(locations)]),
+            }
+        } else {
+            Command {
+                title: format!("{} (not found)", title),
+                command: "".to_string(),
+                arguments: None,
+            }
+        };
+
+        CodeLens {
+            range: Range {
+                start: Position {
+                    line: template_url.line,
+                    character: 0,
+                },
+                end: Position {
+                    line: template_url.line,
+                    character: 0,
+                },
             },
             command: Some(command),
             data: None,

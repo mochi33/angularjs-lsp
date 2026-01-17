@@ -8,6 +8,8 @@ pub enum SymbolKind {
     Service,
     Factory,
     Directive,
+    /// AngularJS 1.5+ コンポーネント（.component() で登録）
+    Component,
     Provider,
     Filter,
     Constant,
@@ -25,6 +27,8 @@ pub enum SymbolKind {
     FormBinding,
     /// ES6 export default で公開されたコンポーネント
     ExportedComponent,
+    /// コンポーネントのbindingsプロパティ（'<', '=', '@', '&'）
+    ComponentBinding,
 }
 
 impl SymbolKind {
@@ -35,6 +39,7 @@ impl SymbolKind {
             SymbolKind::Service => "service",
             SymbolKind::Factory => "factory",
             SymbolKind::Directive => "directive",
+            SymbolKind::Component => "component",
             SymbolKind::Provider => "provider",
             SymbolKind::Filter => "filter",
             SymbolKind::Constant => "constant",
@@ -46,6 +51,7 @@ impl SymbolKind {
             SymbolKind::RootScopeMethod => "root scope method",
             SymbolKind::FormBinding => "form binding",
             SymbolKind::ExportedComponent => "exported component",
+            SymbolKind::ComponentBinding => "component binding",
         }
     }
 }

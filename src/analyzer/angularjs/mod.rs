@@ -99,6 +99,7 @@ impl AngularJsAnalyzer {
     /// - `expression_statement`: 式文（$inject パターン）
     /// - `assignment_expression`: 代入式（$scope.property = value）
     /// - `identifier`: 識別子（サービス名等の参照）
+    /// - `import_statement`: ES6 import文
     fn visit_node(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         match node.kind() {
             "call_expression" => {
@@ -123,12 +124,56 @@ impl AngularJsAnalyzer {
             "export_statement" => {
                 self.analyze_export_statement(node, source, uri, ctx);
             }
+            "import_statement" => {
+                self.analyze_import_statement(node, source, uri);
+            }
             _ => {}
         }
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             self.visit_node(child, source, uri, ctx);
+        }
+    }
+
+    /// ES6 import文を解析する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// import UserDetails from 'src/users/components/details/UserDetails';
+    /// import { something } from 'path';  // named imports (現在は対象外)
+    /// ```
+    fn analyze_import_statement(&self, node: Node, source: &str, uri: &Url) {
+        // デフォルトインポートの識別子を探す
+        // import UserDetails from '...'
+        //        ^^^^^^^^^^^ -> identifier inside import_clause
+        let mut import_name: Option<String> = None;
+        let mut import_path: Option<String> = None;
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "import_clause" => {
+                    // import_clause 内の identifier を探す（デフォルトインポート）
+                    let mut clause_cursor = child.walk();
+                    for clause_child in child.children(&mut clause_cursor) {
+                        if clause_child.kind() == "identifier" {
+                            import_name = Some(self.node_text(clause_child, source));
+                            break;
+                        }
+                    }
+                }
+                "string" => {
+                    // import元のパス
+                    import_path = Some(self.extract_string_value(child, source));
+                }
+                _ => {}
+            }
+        }
+
+        // デフォルトインポートとパスの両方が見つかった場合、マッピングを登録
+        if let (Some(name), Some(path)) = (import_name, import_path) {
+            self.index.add_import(uri, name, path);
         }
     }
 }

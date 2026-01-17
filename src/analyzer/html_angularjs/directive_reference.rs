@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use super::directives::is_ng_directive;
 use super::HtmlAngularJsAnalyzer;
-use crate::index::{DirectiveUsageType, HtmlDirectiveReference, SymbolKind};
+use crate::index::{DirectiveUsageType, HtmlDirectiveReference};
 
 /// kebab-case を camelCase に変換
 /// 例: "my-directive" -> "myDirective"
@@ -60,6 +60,9 @@ impl HtmlAngularJsAnalyzer {
     }
 
     /// タグからディレクティブ参照を抽出
+    ///
+    /// ハイフンを含む要素名・属性名を全て潜在的なカスタムディレクティブとして登録する。
+    /// 定義の有無は定義ジャンプ時にチェックするため、解析順序に依存しない。
     fn extract_directive_from_tag(&self, tag_node: Node, source: &str, uri: &Url) {
         // 1. 要素名としてのディレクティブをチェック
         if let Some(tag_name_node) = self.find_child_by_kind(tag_node, "tag_name") {
@@ -68,24 +71,19 @@ impl HtmlAngularJsAnalyzer {
             // カスタムディレクティブの可能性があるかチェック
             if is_potential_custom_directive(&tag_name) {
                 let camel_name = kebab_to_camel_case(&tag_name);
+                let start = tag_name_node.start_position();
+                let end = tag_name_node.end_position();
 
-                // インデックスにディレクティブ定義が存在するか確認
-                if self.is_directive_defined(&camel_name) {
-                    // ディレクティブ定義が存在する場合のみ参照を登録
-                    let start = tag_name_node.start_position();
-                    let end = tag_name_node.end_position();
-
-                    let reference = HtmlDirectiveReference {
-                        directive_name: camel_name,
-                        uri: uri.clone(),
-                        start_line: start.row as u32,
-                        start_col: self.byte_col_to_utf16_col(source, start.row, start.column),
-                        end_line: end.row as u32,
-                        end_col: self.byte_col_to_utf16_col(source, end.row, end.column),
-                        usage_type: DirectiveUsageType::Element,
-                    };
-                    self.index.add_html_directive_reference(reference);
-                }
+                let reference = HtmlDirectiveReference {
+                    directive_name: camel_name,
+                    uri: uri.clone(),
+                    start_line: start.row as u32,
+                    start_col: self.byte_col_to_utf16_col(source, start.row, start.column),
+                    end_line: end.row as u32,
+                    end_col: self.byte_col_to_utf16_col(source, end.row, end.column),
+                    usage_type: DirectiveUsageType::Element,
+                };
+                self.index.add_html_directive_reference(reference);
             }
         }
 
@@ -111,37 +109,27 @@ impl HtmlAngularJsAnalyzer {
                     // カスタムディレクティブの可能性があるかチェック
                     if is_potential_custom_directive(normalized_attr) {
                         let camel_name = kebab_to_camel_case(normalized_attr);
+                        let start = name_node.start_position();
+                        let end = name_node.end_position();
 
-                        // インデックスにディレクティブ定義が存在するか確認
-                        if self.is_directive_defined(&camel_name) {
-                            let start = name_node.start_position();
-                            let end = name_node.end_position();
-
-                            let reference = HtmlDirectiveReference {
-                                directive_name: camel_name,
-                                uri: uri.clone(),
-                                start_line: start.row as u32,
-                                start_col: self.byte_col_to_utf16_col(
-                                    source,
-                                    start.row,
-                                    start.column,
-                                ),
-                                end_line: end.row as u32,
-                                end_col: self.byte_col_to_utf16_col(source, end.row, end.column),
-                                usage_type: DirectiveUsageType::Attribute,
-                            };
-                            self.index.add_html_directive_reference(reference);
-                        }
+                        let reference = HtmlDirectiveReference {
+                            directive_name: camel_name,
+                            uri: uri.clone(),
+                            start_line: start.row as u32,
+                            start_col: self.byte_col_to_utf16_col(
+                                source,
+                                start.row,
+                                start.column,
+                            ),
+                            end_line: end.row as u32,
+                            end_col: self.byte_col_to_utf16_col(source, end.row, end.column),
+                            usage_type: DirectiveUsageType::Attribute,
+                        };
+                        self.index.add_html_directive_reference(reference);
                     }
                 }
             }
         }
-    }
-
-    /// 指定名のディレクティブ定義が存在するかチェック
-    fn is_directive_defined(&self, name: &str) -> bool {
-        let definitions = self.index.get_definitions(name);
-        definitions.iter().any(|d| d.kind == SymbolKind::Directive)
     }
 }
 

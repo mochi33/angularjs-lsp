@@ -3,7 +3,7 @@ use tree_sitter::Node;
 
 use super::context::{AnalyzerContext, DiScope};
 use super::AngularJsAnalyzer;
-use crate::index::{BindingSource, ControllerScope, Symbol, SymbolKind, TemplateBinding};
+use crate::index::{BindingSource, ComponentTemplateUrl, ControllerScope, Symbol, SymbolKind, TemplateBinding};
 
 impl AngularJsAnalyzer {
     /// AngularJSのコンポーネント定義呼び出しを解析する
@@ -35,6 +35,7 @@ impl AngularJsAnalyzer {
                         "service" => self.extract_component_definition(node, source, uri, SymbolKind::Service, ctx),
                         "factory" => self.extract_component_definition(node, source, uri, SymbolKind::Factory, ctx),
                         "directive" => self.extract_component_definition(node, source, uri, SymbolKind::Directive, ctx),
+                        "component" => self.extract_angular_component(node, source, uri, ctx),
                         "provider" => self.extract_component_definition(node, source, uri, SymbolKind::Provider, ctx),
                         "filter" => self.extract_component_definition(node, source, uri, SymbolKind::Filter, ctx),
                         "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant, ctx),
@@ -557,5 +558,254 @@ impl AngularJsAnalyzer {
         }
 
         None
+    }
+
+    /// AngularJS 1.5+ の `.component()` 呼び出しを解析する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// // パターン1: 文字列リテラル + オブジェクト
+    /// .component('myComponent', { bindings: {}, controller: ..., templateUrl: '...' })
+    ///
+    /// // パターン2: 識別子.name + 識別子.config（ES6 module パターン）
+    /// // UserDetails.js: export default { name: 'userDetails', config: {...} }
+    /// // Users.js: .component(UserDetails.name, UserDetails.config)
+    /// ```
+    pub(super) fn extract_angular_component(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
+        if let Some(args) = node.child_by_field_name("arguments") {
+            if let Some(first_arg) = args.named_child(0) {
+                // パターン1: .component('myComponent', {...})
+                if first_arg.kind() == "string" {
+                    let component_name = self.extract_string_value(first_arg, source);
+                    self.register_component_symbol(
+                        &component_name,
+                        first_arg,
+                        args.named_child(1),
+                        source,
+                        uri,
+                        ctx,
+                    );
+                }
+                // パターン2: .component(Identifier.name, Identifier.config)
+                else if first_arg.kind() == "member_expression" {
+                    if let Some(property) = first_arg.child_by_field_name("property") {
+                        let prop_name = self.node_text(property, source);
+                        if prop_name == "name" {
+                            // Identifier.name パターン - export default オブジェクトから名前を解決
+                            if let Some(object) = first_arg.child_by_field_name("object") {
+                                let import_name = self.node_text(object, source);
+                                // インデックスから export default オブジェクトの name プロパティを検索
+                                if let Some(component_name) = self.index.get_exported_component_name(&import_name) {
+                                    self.register_component_symbol(
+                                        &component_name,
+                                        first_arg,
+                                        args.named_child(1),
+                                        source,
+                                        uri,
+                                        ctx,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// コンポーネントシンボルを登録する
+    fn register_component_symbol(
+        &self,
+        component_name: &str,
+        name_node: Node,
+        config_node: Option<Node>,
+        source: &str,
+        uri: &Url,
+        _ctx: &mut AnalyzerContext,
+    ) {
+        let name_start = name_node.start_position();
+        let name_end = name_node.end_position();
+
+        // 定義位置はconfig objectがあればその位置、なければname_nodeの位置
+        let (start, end) = if let Some(config) = config_node {
+            // config オブジェクトから templateUrl, bindings を抽出
+            if config.kind() == "object" {
+                self.extract_component_template_url(config, source, uri, Some(component_name));
+            }
+            (config.start_position(), config.end_position())
+        } else {
+            (name_start, name_end)
+        };
+
+        let docs = self.extract_jsdoc_for_line(name_start.row, source);
+
+        let symbol = Symbol {
+            name: component_name.to_string(),
+            kind: SymbolKind::Component,
+            uri: uri.clone(),
+            start_line: self.offset_line(start.row as u32),
+            start_col: start.column as u32,
+            end_line: self.offset_line(end.row as u32),
+            end_col: end.column as u32,
+            name_start_line: self.offset_line(name_start.row as u32),
+            name_start_col: name_start.column as u32,
+            name_end_line: self.offset_line(name_end.row as u32),
+            name_end_col: name_end.column as u32,
+            docs,
+            parameters: None,
+        };
+
+        self.index.add_definition(symbol);
+    }
+
+    /// コンポーネント設定オブジェクトから templateUrl, controller, controllerAs, bindings を抽出
+    fn extract_component_template_url(&self, config_node: Node, source: &str, uri: &Url, component_name: Option<&str>) {
+        let mut template_path: Option<String> = None;
+        let mut template_line: Option<u32> = None;
+        let mut template_col: Option<u32> = None;
+        let mut controller_name: Option<String> = None;
+        let mut controller_as: Option<String> = None;
+        let mut bindings_node: Option<Node> = None;
+
+        let mut cursor = config_node.walk();
+        for child in config_node.children(&mut cursor) {
+            if child.kind() == "pair" {
+                if let Some(key) = child.child_by_field_name("key") {
+                    let key_text = self.node_text(key, source);
+                    let key_name = key_text.trim_matches(|c| c == '"' || c == '\'');
+
+                    if let Some(value) = child.child_by_field_name("value") {
+                        match key_name {
+                            "templateUrl" => {
+                                if value.kind() == "string" {
+                                    template_path = Some(self.extract_string_value(value, source));
+                                    let start = value.start_position();
+                                    template_line = Some(self.offset_line(start.row as u32));
+                                    template_col = Some(start.column as u32);
+                                }
+                            }
+                            "controller" => {
+                                // controller: 'ControllerName' (文字列参照)
+                                if value.kind() == "string" {
+                                    controller_name = Some(self.extract_string_value(value, source));
+                                }
+                                // controller: ControllerName (識別子参照)
+                                else if value.kind() == "identifier" {
+                                    controller_name = Some(self.node_text(value, source).to_string());
+                                }
+                                // controller: ['$dep1', '$dep2', ControllerName] (DI配列パターン)
+                                else if value.kind() == "array" {
+                                    // 配列の最後の要素がコントローラー
+                                    let mut cursor = value.walk();
+                                    let mut last_element: Option<tree_sitter::Node> = None;
+                                    for child in value.children(&mut cursor) {
+                                        if child.is_named() {
+                                            last_element = Some(child);
+                                        }
+                                    }
+                                    if let Some(last) = last_element {
+                                        if last.kind() == "identifier" {
+                                            controller_name = Some(self.node_text(last, source).to_string());
+                                        }
+                                        // 最後の要素が function/class の場合はNone（インラインコントローラー）
+                                    }
+                                }
+                                // controller: function() {} または controller: class {} はNoneのまま
+                                // （インラインコントローラーは別途this.methodパターンで処理）
+                            }
+                            "controllerAs" => {
+                                if value.kind() == "string" {
+                                    controller_as = Some(self.extract_string_value(value, source));
+                                }
+                            }
+                            "bindings" => {
+                                if value.kind() == "object" {
+                                    bindings_node = Some(value);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // コントローラー名がない場合はコンポーネント名を使用
+        // これにより $ctrl.xxx でバインディングにアクセス可能になる
+        let effective_controller_name = controller_name.clone().or_else(|| component_name.map(|s| s.to_string()));
+
+        // templateUrlが存在する場合のみ登録
+        if let (Some(path), Some(line), Some(col)) = (template_path, template_line, template_col) {
+            let template_url = ComponentTemplateUrl {
+                uri: uri.clone(),
+                template_path: path,
+                line,
+                col,
+                controller_name: effective_controller_name.clone(),
+                // controllerAs が指定されていない場合は "$ctrl" がデフォルト
+                controller_as: controller_as.unwrap_or_else(|| "$ctrl".to_string()),
+            };
+            self.index.add_component_template_url(template_url);
+        }
+
+        // bindings を抽出してシンボルとして登録
+        if let (Some(bindings), Some(prefix)) = (bindings_node, effective_controller_name.as_deref()) {
+            self.extract_component_bindings(bindings, source, uri, prefix);
+        }
+    }
+
+    /// コンポーネントのbindingsオブジェクトからバインディングを抽出
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// bindings: { users: '<', selected: '<', showDetails: '&onSelected' }
+    /// ```
+    fn extract_component_bindings(&self, bindings_node: Node, source: &str, uri: &Url, controller_name: &str) {
+        let mut cursor = bindings_node.walk();
+        for child in bindings_node.children(&mut cursor) {
+            if child.kind() == "pair" {
+                if let Some(key) = child.child_by_field_name("key") {
+                    let key_text = self.node_text(key, source);
+                    // 識別子の場合はそのまま、文字列の場合はクォートを除去
+                    let binding_name = key_text.trim_matches(|c| c == '"' || c == '\'');
+
+                    // バインディングタイプを取得（'<', '=', '@', '&'など）
+                    let binding_type = if let Some(value) = child.child_by_field_name("value") {
+                        if value.kind() == "string" {
+                            Some(self.extract_string_value(value, source))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let start = key.start_position();
+                    let end = key.end_position();
+
+                    // ControllerName.bindingName として登録
+                    let full_name = format!("{}.{}", controller_name, binding_name);
+                    let docs = binding_type.map(|t| format!("Component binding: {}", t));
+
+                    let symbol = Symbol {
+                        name: full_name,
+                        kind: SymbolKind::ComponentBinding,
+                        uri: uri.clone(),
+                        start_line: self.offset_line(start.row as u32),
+                        start_col: start.column as u32,
+                        end_line: self.offset_line(end.row as u32),
+                        end_col: end.column as u32,
+                        name_start_line: self.offset_line(start.row as u32),
+                        name_start_col: start.column as u32,
+                        name_end_line: self.offset_line(end.row as u32),
+                        name_end_col: end.column as u32,
+                        docs,
+                        parameters: None,
+                    };
+
+                    self.index.add_definition(symbol);
+                }
+            }
+        }
     }
 }

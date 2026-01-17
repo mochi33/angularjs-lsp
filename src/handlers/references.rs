@@ -36,9 +36,12 @@ impl ReferencesHandler {
             position.character,
         )?;
 
-        // シンボルがディレクティブの場合、HTML参照も収集
+        // シンボルがディレクティブまたはコンポーネントの場合、HTML参照も収集
         let definitions = self.index.get_definitions(&symbol_name);
-        if definitions.iter().any(|d| d.kind == SymbolKind::Directive) {
+        if definitions
+            .iter()
+            .any(|d| d.kind == SymbolKind::Directive || d.kind == SymbolKind::Component)
+        {
             return self.collect_directive_all_references(&symbol_name, include_declaration);
         }
 
@@ -281,10 +284,10 @@ impl ReferencesHandler {
     ) -> Option<Vec<Location>> {
         let mut locations = Vec::new();
 
-        // 定義位置を追加（SymbolKind::Directiveのみ）
+        // 定義位置を追加（SymbolKind::Directive または SymbolKind::Component）
         if include_declaration {
             for def in self.index.get_definitions(directive_name) {
-                if def.kind == SymbolKind::Directive {
+                if def.kind == SymbolKind::Directive || def.kind == SymbolKind::Component {
                     locations.push(Location {
                         uri: def.uri.clone(),
                         range: Range {
@@ -553,17 +556,17 @@ impl ReferencesHandler {
 
     /// HTMLファイルからの定義ジャンプ
     fn goto_definition_from_html(&self, uri: &Url, position: Position, source: Option<&str>) -> Option<GotoDefinitionResponse> {
-        // 0. まずカスタムディレクティブ参照をチェック
+        // 0. まずカスタムディレクティブ/コンポーネント参照をチェック
         if let Some(directive_ref) = self.index.find_html_directive_reference_at(
             uri,
             position.line,
             position.character,
         ) {
-            // ディレクティブ定義を検索
+            // ディレクティブまたはコンポーネント定義を検索
             let definitions = self.index.get_definitions(&directive_ref.directive_name);
             let directive_defs: Vec<_> = definitions
                 .into_iter()
-                .filter(|d| d.kind == SymbolKind::Directive)
+                .filter(|d| d.kind == SymbolKind::Directive || d.kind == SymbolKind::Component)
                 .collect();
 
             if !directive_defs.is_empty() {

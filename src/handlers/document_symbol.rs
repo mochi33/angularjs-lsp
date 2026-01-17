@@ -85,6 +85,7 @@ impl DocumentSymbolHandler {
             AngularSymbolKind::Service => SymbolKind::CLASS,
             AngularSymbolKind::Factory => SymbolKind::CLASS,
             AngularSymbolKind::Directive => SymbolKind::CLASS,
+            AngularSymbolKind::Component => SymbolKind::CLASS,
             AngularSymbolKind::Provider => SymbolKind::CLASS,
             AngularSymbolKind::Filter => SymbolKind::FUNCTION,
             AngularSymbolKind::Constant => SymbolKind::CONSTANT,
@@ -96,6 +97,7 @@ impl DocumentSymbolHandler {
             AngularSymbolKind::RootScopeMethod => SymbolKind::METHOD,
             AngularSymbolKind::FormBinding => SymbolKind::VARIABLE,
             AngularSymbolKind::ExportedComponent => SymbolKind::CLASS,
+            AngularSymbolKind::ComponentBinding => SymbolKind::PROPERTY,
         }
     }
 }
