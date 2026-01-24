@@ -19,6 +19,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 globset = "0.4"
 bincode = "1"
+phf = { version = "0.11", features = ["macros"] }
 
 [dev-dependencies]
 rstest = "0.24"
