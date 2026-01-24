@@ -12,6 +12,7 @@ Language Server Protocol implementation for AngularJS 1.x projects.
 - **Rename Symbol** - Safely rename AngularJS components across files
 - **Document Symbols** - Outline view for AngularJS components
 - **Code Lens** - Reference counts and controller-template bindings
+- **Diagnostics** - Warnings for undefined scope properties and local variables in HTML templates
 
 ## Supported AngularJS Components
 
@@ -55,7 +56,11 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
     "startSymbol": "{{",
     "endSymbol": "}}"
   },
-  "cache": true
+  "cache": true,
+  "diagnostics": {
+    "enabled": true,
+    "severity": "warning"
+  }
 }
 ```
 
@@ -68,6 +73,8 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 | `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. |
 | `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. |
 | `cache` | `boolean` | `true` | Enable caching of parsed symbols. Cache is stored in `.angularjs-lsp/cache/`. |
+| `diagnostics.enabled` | `boolean` | `true` | Enable diagnostics for undefined scope properties and local variables. |
+| `diagnostics.severity` | `string` | `"warning"` | Severity level: `"error"`, `"warning"`, `"hint"`, or `"information"`. |
 
 ### Default Exclude Patterns
 

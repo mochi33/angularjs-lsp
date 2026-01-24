@@ -10,10 +10,22 @@ impl HtmlAngularJsAnalyzer {
     pub(super) fn parse_angular_expression(&self, expr: &str, directive: &str) -> Vec<String> {
         let mut local_vars: Vec<String> = Vec::new();
 
-        // ng-repeat: "item in items" or "(key, value) in items" -> ローカル変数を抽出
-        let expr_to_parse = if directive.contains("ng-repeat") || directive.contains("data-ng-repeat") {
+        // ng-repeat / ng-options: "item in items" or "(key, value) in items" -> ローカル変数を抽出
+        // ng-options: "label for value in array" や "select as label for value in array" 形式もサポート
+        let expr_to_parse = if directive.contains("ng-repeat") || directive.contains("data-ng-repeat")
+            || directive.contains("ng-options") || directive.contains("data-ng-options")
+        {
             if let Some(in_idx) = expr.find(" in ") {
-                let iter_part = expr[..in_idx].trim();
+                let before_in = expr[..in_idx].trim();
+
+                // ng-options: "label for value" や "select as label for value" 形式
+                // "for" の後にある変数を抽出
+                let iter_part = if let Some(for_idx) = before_in.rfind(" for ") {
+                    before_in[for_idx + 5..].trim()
+                } else {
+                    before_in
+                };
+
                 // (key, value) 形式
                 if iter_part.starts_with('(') && iter_part.ends_with(')') {
                     let inner = &iter_part[1..iter_part.len()-1];

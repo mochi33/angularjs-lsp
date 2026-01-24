@@ -208,6 +208,22 @@ impl HtmlAngularJsAnalyzer {
             });
         }
 
+        // ng-viewからの継承を追加（$routeProviderテンプレートの場合）
+        // TODO: DashMapロック競合問題のため一時無効化
+        // self.index.apply_ng_view_inheritance_as_ng_include(uri);
+
+        // TODO: DashMapロック競合問題のため一時無効化
+        // let ng_view_inherited = self.index.get_ng_view_inherited_controllers(uri);
+        // for name in ng_view_inherited {
+        //     if !controller_stack.iter().any(|c| c.name == name) {
+        //         controller_stack.push(ControllerScopeInfo {
+        //             name,
+        //             start_line: 0,
+        //             end_line: u32::MAX,
+        //         });
+        //     }
+        // }
+
         // テンプレートバインディング経由のコントローラーを追加
         if let Some(controller) = self.index.get_controller_for_template(uri) {
             if !controller_stack.iter().any(|c| c.name == controller) {

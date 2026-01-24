@@ -95,6 +95,22 @@ pub struct NgIncludeBinding {
     pub inherited_form_bindings: Vec<InheritedFormBinding>,
 }
 
+/// ng-viewによるルーティングテンプレートの継承関係
+/// ng-viewがあるHTMLの親Controllerが、$routeProviderで設定されたテンプレートに継承される
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NgViewBinding {
+    /// ng-viewがあるHTMLファイルのURI
+    pub parent_uri: Url,
+    /// ng-viewがある行
+    pub line: u32,
+    /// ng-view位置での継承コントローラーリスト（外側から内側への順）
+    pub inherited_controllers: Vec<String>,
+    /// ng-view位置での継承ローカル変数リスト
+    pub inherited_local_variables: Vec<InheritedLocalVariable>,
+    /// ng-view位置での継承フォームバインディングリスト
+    pub inherited_form_bindings: Vec<InheritedFormBinding>,
+}
+
 /// HTML内で定義されたローカル変数のソース
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HtmlLocalVariableSource {
@@ -284,6 +300,10 @@ pub struct SymbolIndex {
     ng_include_by_filename: DashMap<String, Vec<String>>,
     /// ng-include逆引きインデックス: normalized_template_path -> Vec<複合キー>
     ng_include_by_path: DashMap<String, Vec<String>>,
+    /// ng-viewによるルーティングテンプレート継承（parent_uri.to_string() -> binding）
+    ng_view_bindings: DashMap<String, NgViewBinding>,
+    /// $routeProviderで設定されたテンプレートパス（ファイル名のみ）の逆引きインデックス
+    route_provider_templates: DashSet<String>,
     /// HTML内のローカル変数定義（URI -> Vec<HtmlLocalVariable>）
     html_local_variables: DashMap<Url, Vec<HtmlLocalVariable>>,
     /// HTML内のローカル変数参照（変数名 -> Vec<HtmlLocalVariableReference>）
@@ -322,6 +342,8 @@ impl SymbolIndex {
             ng_include_bindings: DashMap::new(),
             ng_include_by_filename: DashMap::new(),
             ng_include_by_path: DashMap::new(),
+            ng_view_bindings: DashMap::new(),
+            route_provider_templates: DashSet::new(),
             html_local_variables: DashMap::new(),
             html_local_variable_references: DashMap::new(),
             html_form_bindings: DashMap::new(),
@@ -655,6 +677,8 @@ impl SymbolIndex {
         self.html_scope_references.remove(uri);
         // このURIが親のng-includeバインディングをクリア
         self.clear_ng_include_bindings_for_parent(uri);
+        // このURIのng-viewバインディングをクリア
+        self.ng_view_bindings.remove(&uri.to_string());
         // HTMLローカル変数もクリア
         self.html_local_variables.remove(uri);
         // このURIのローカル変数参照をクリア
@@ -687,6 +711,8 @@ impl SymbolIndex {
         self.ng_include_bindings.clear();
         self.ng_include_by_filename.clear();
         self.ng_include_by_path.clear();
+        self.ng_view_bindings.clear();
+        self.route_provider_templates.clear();
         self.pending_reanalysis.clear();
         self.html_local_variables.clear();
         self.html_local_variable_references.clear();
@@ -739,6 +765,7 @@ impl SymbolIndex {
     pub fn add_template_binding(&self, binding: TemplateBinding) {
         let normalized_path = Self::normalize_template_path(&binding.template_path);
         let controller_name = binding.controller_name.clone();
+        let source = binding.source.clone();
 
         // template_pathも正規化済みの値で保存
         let normalized_binding = TemplateBinding {
@@ -752,6 +779,14 @@ impl SymbolIndex {
         // これにより同じテンプレートへの複数のバインディングを保持できる
         let binding_key = format!("{}#{}#{}", binding.binding_uri.as_str(), binding.binding_line, normalized_path);
         self.template_bindings.insert(binding_key, normalized_binding);
+
+        // RouteProviderの場合、逆引きインデックスに追加
+        if source == BindingSource::RouteProvider {
+            // ファイル名のみを抽出して登録
+            let filename = normalized_path.rsplit('/').next().unwrap_or(&normalized_path);
+            self.route_provider_templates.insert(filename.to_string());
+            self.route_provider_templates.insert(normalized_path.clone());
+        }
 
         // このテンプレートが親として持っているng-include bindingの継承情報を更新
         // （$uibModalでバインドされたコントローラーをng-includeの子に伝播）
@@ -978,6 +1013,17 @@ impl SymbolIndex {
         );
     }
 
+    /// ng-viewバインディングを追加
+    /// ng-viewがあるHTMLの親Controllerが、$routeProviderで設定されたテンプレートに継承される
+    pub fn add_ng_view_binding(&self, binding: NgViewBinding) {
+        let key = binding.parent_uri.to_string();
+        debug!(
+            "add_ng_view_binding: {} -> {:?}",
+            key, binding.inherited_controllers
+        );
+        self.ng_view_bindings.insert(key, binding);
+    }
+
     /// 子HTMLが解析済みなら再解析キューに追加
     fn queue_child_for_reanalysis(&self, resolved_filename: &str, normalized_path: &str) {
         // 解析済みHTMLファイルを走査して、ファイル名が一致するものを探す
@@ -1137,6 +1183,10 @@ impl SymbolIndex {
             if path.ends_with(&format!("/{}", template_path))
                 || path == format!("/{}", template_path)
             {
+                debug!(
+                    "find_all_ng_include_keys_for_template: path '{}' matches template_path '{}', keys: {:?}",
+                    path, template_path, entry.value()
+                );
                 keys.extend(entry.value().iter().cloned());
             }
         }
@@ -1144,38 +1194,266 @@ impl SymbolIndex {
         // 方法2: filenameで逆引き（方法1で見つからなかった場合のみ）
         if keys.is_empty() {
             if let Some(filename_keys) = self.ng_include_by_filename.get(filename) {
+                debug!(
+                    "find_all_ng_include_keys_for_template: fallback to filename '{}', keys: {:?}",
+                    filename, filename_keys
+                );
                 keys.extend(filename_keys.iter().cloned());
             }
         }
+
+        // 方法3: 直接イテレーション（逆引きインデックスで見つからなかった場合のフォールバック）
+        // get_parent_templates_for_childと同じマッチングロジックを使用
+        if keys.is_empty() {
+            for entry in self.ng_include_bindings.iter() {
+                let binding = entry.value();
+                let template_path = Self::extract_template_path_from_key(entry.key());
+
+                // マッチング方法1: URIのパスがtemplate_pathで終わる
+                let matches_path = path.ends_with(&format!("/{}", template_path))
+                    || path == format!("/{}", template_path);
+
+                // マッチング方法2: resolved_filenameが一致
+                let matches_resolved = binding.resolved_filename == filename;
+
+                if matches_path || matches_resolved {
+                    debug!(
+                        "find_all_ng_include_keys_for_template: fallback direct iteration found key '{}'",
+                        entry.key()
+                    );
+                    keys.push(entry.key().clone());
+                }
+            }
+        }
+
+        debug!(
+            "find_all_ng_include_keys_for_template: uri={}, found keys={:?}",
+            uri, keys
+        );
 
         keys
     }
 
     /// ng-includeで継承されるコントローラーリストを取得
     /// 複数の親からng-includeされている場合、すべての親からのコントローラーをマージ
+    /// Note: ng-viewからの継承はcollect_ng_include_bindings_with_treeで処理される
     pub fn get_inherited_controllers_for_template(&self, uri: &Url) -> Vec<String> {
-        let keys = self.find_all_ng_include_keys_for_template(uri);
         let mut controllers = Vec::new();
 
-        for key in keys {
-            if let Some(binding) = self.ng_include_bindings.get(&key) {
+        // ng-includeからの継承
+        let keys = self.find_all_ng_include_keys_for_template(uri);
+        for key in &keys {
+            if let Some(binding) = self.ng_include_bindings.get(key) {
+                debug!(
+                    "get_inherited_controllers_for_template: key='{}' has controllers {:?}",
+                    key, binding.inherited_controllers
+                );
                 for controller in &binding.inherited_controllers {
                     if !controllers.contains(controller) {
                         controllers.push(controller.clone());
                     }
                 }
+            } else {
+                debug!(
+                    "get_inherited_controllers_for_template: key='{}' not found in ng_include_bindings",
+                    key
+                );
             }
         }
 
+        debug!(
+            "get_inherited_controllers_for_template: uri={}, result={:?}",
+            uri, controllers
+        );
+
         controllers
+    }
+
+    /// ng-viewから継承されるコントローラーリストを取得
+    /// $routeProviderで設定されたテンプレートの場合のみ継承を適用
+    /// Note: この関数は他のDashMapロックを保持していない状態で呼ぶこと
+    pub fn get_ng_view_inherited_controllers(&self, uri: &Url) -> Vec<String> {
+        // $routeProviderテンプレートかどうかをチェック
+        if !self.is_route_provider_template_safe(uri) {
+            return Vec::new();
+        }
+
+        // ng_view_bindingsから継承コントローラーを収集
+        let mut controllers = Vec::new();
+        for entry in self.ng_view_bindings.iter() {
+            for controller in &entry.inherited_controllers {
+                if !controllers.contains(controller) {
+                    controllers.push(controller.clone());
+                }
+            }
+        }
+        controllers
+    }
+
+    /// 全ての$routeProviderテンプレートに対してng-view継承を適用
+    /// Pass 1.5の後に呼び出す（他のDashMapロックを保持していない状態で）
+    pub fn apply_all_ng_view_inheritances(&self) {
+        // route_provider_templatesのファイル名を取得
+        let templates: Vec<String> = self.route_provider_templates
+            .iter()
+            .map(|t| t.clone())
+            .collect();
+
+        debug!(
+            "apply_all_ng_view_inheritances: route_provider_templates = {:?}",
+            templates
+        );
+
+        // ng_view_bindingsから継承情報を収集
+        let mut inherited_controllers = Vec::new();
+        let mut inherited_local_variables = Vec::new();
+        let mut inherited_form_bindings = Vec::new();
+
+        for entry in self.ng_view_bindings.iter() {
+            debug!(
+                "apply_all_ng_view_inheritances: ng_view_binding at {:?} with controllers {:?}",
+                entry.parent_uri,
+                entry.inherited_controllers
+            );
+            for controller in &entry.inherited_controllers {
+                if !inherited_controllers.contains(controller) {
+                    inherited_controllers.push(controller.clone());
+                }
+            }
+            for var in &entry.inherited_local_variables {
+                if !inherited_local_variables.iter().any(|v: &InheritedLocalVariable| v.name == var.name) {
+                    inherited_local_variables.push(var.clone());
+                }
+            }
+            for form in &entry.inherited_form_bindings {
+                if !inherited_form_bindings.iter().any(|f: &InheritedFormBinding| f.name == form.name) {
+                    inherited_form_bindings.push(form.clone());
+                }
+            }
+        }
+
+        debug!(
+            "apply_all_ng_view_inheritances: collected controllers = {:?}",
+            inherited_controllers
+        );
+
+        // 継承情報がなければ終了
+        if inherited_controllers.is_empty() {
+            debug!("apply_all_ng_view_inheritances: no controllers to inherit, returning early");
+            return;
+        }
+
+        // 各テンプレートに対してng-includeバインディングを登録
+        for template_path in templates {
+            // resolved_filenameはファイル名のみ（パスの最後の部分）
+            let resolved_filename = template_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&template_path)
+                .to_string();
+
+            let binding = NgIncludeBinding {
+                parent_uri: Url::parse("file:///ng-view-virtual-parent").unwrap(),
+                template_path: template_path.clone(),
+                resolved_filename,
+                line: 0,
+                inherited_controllers: inherited_controllers.clone(),
+                inherited_local_variables: inherited_local_variables.clone(),
+                inherited_form_bindings: inherited_form_bindings.clone(),
+            };
+            self.add_ng_include_binding_with_key(
+                format!("ng-view##{}", template_path),
+                binding,
+            );
+        }
+    }
+
+    /// ng-viewからの継承を仮想的なng-includeバインディングとして登録
+    /// これにより、get_inherited_controllers_for_templateでもng-view継承が取得できる
+    #[allow(dead_code)]
+    fn apply_ng_view_inheritance_as_ng_include(&self, uri: &Url) {
+        // $routeProviderテンプレートかどうかをチェック
+        if !self.is_route_provider_template_safe(uri) {
+            return;
+        }
+
+        // ファイル名を取得
+        let path = uri.path();
+        let filename = match path.rsplit('/').next() {
+            Some(f) => f,
+            None => return,
+        };
+
+        // ng_view_bindingsから継承情報を収集
+        let mut inherited_controllers = Vec::new();
+        let mut inherited_local_variables = Vec::new();
+        let mut inherited_form_bindings = Vec::new();
+
+        for entry in self.ng_view_bindings.iter() {
+            for controller in &entry.inherited_controllers {
+                if !inherited_controllers.contains(controller) {
+                    inherited_controllers.push(controller.clone());
+                }
+            }
+            for var in &entry.inherited_local_variables {
+                if !inherited_local_variables.iter().any(|v: &InheritedLocalVariable| v.name == var.name) {
+                    inherited_local_variables.push(var.clone());
+                }
+            }
+            for form in &entry.inherited_form_bindings {
+                if !inherited_form_bindings.iter().any(|f: &InheritedFormBinding| f.name == form.name) {
+                    inherited_form_bindings.push(form.clone());
+                }
+            }
+        }
+
+        // 継承情報がある場合のみ登録
+        if !inherited_controllers.is_empty() {
+            let binding = NgIncludeBinding {
+                parent_uri: Url::parse("file:///ng-view-virtual-parent").unwrap(),
+                template_path: filename.to_string(),
+                resolved_filename: filename.to_string(),
+                line: 0,
+                inherited_controllers,
+                inherited_local_variables,
+                inherited_form_bindings,
+            };
+            self.add_ng_include_binding_with_key(
+                format!("ng-view##{}", filename),
+                binding,
+            );
+        }
+    }
+
+    /// このテンプレートが$routeProviderで設定されたものかどうかを判定（安全版）
+    /// Note: この関数は他のDashMapロックを保持していない状態で呼ぶこと
+    fn is_route_provider_template_safe(&self, uri: &Url) -> bool {
+        let path = uri.path();
+        let filename = match path.rsplit('/').next() {
+            Some(f) => f,
+            None => return false,
+        };
+
+        // 逆引きインデックスを使用
+        self.route_provider_templates.contains(filename)
+    }
+
+    /// このテンプレートが$routeProviderで設定されたものかどうかを判定
+    /// 警告: get_inherited_controllers_for_template内からは呼ばないこと（ロック競合の原因）
+    #[allow(dead_code)]
+    fn is_route_provider_template(&self, _uri: &Url) -> bool {
+        // get_inherited_controllers_for_template内からの呼び出しは無効化
+        // 代わりにget_ng_view_inherited_controllersを使用
+        false
     }
 
     /// ng-includeで継承されるローカル変数リストを取得
     /// 複数の親からng-includeされている場合、すべての親からの変数をマージ
     pub fn get_inherited_local_variables_for_template(&self, uri: &Url) -> Vec<InheritedLocalVariable> {
-        let keys = self.find_all_ng_include_keys_for_template(uri);
         let mut variables = Vec::new();
 
+        // ng-includeからの継承
+        let keys = self.find_all_ng_include_keys_for_template(uri);
         for key in keys {
             if let Some(binding) = self.ng_include_bindings.get(&key) {
                 for var in &binding.inherited_local_variables {
@@ -1746,12 +2024,12 @@ impl SymbolIndex {
     }
 
     /// ng-includeで継承されるフォームバインディングリストを取得
-    /// ng-includeで継承されるフォームバインディングリストを取得
     /// 複数の親からng-includeされている場合、すべての親からのフォームバインディングをマージ
     pub fn get_inherited_form_bindings_for_template(&self, uri: &Url) -> Vec<InheritedFormBinding> {
-        let keys = self.find_all_ng_include_keys_for_template(uri);
         let mut bindings = Vec::new();
 
+        // ng-includeからの継承
+        let keys = self.find_all_ng_include_keys_for_template(uri);
         for key in keys {
             if let Some(binding) = self.ng_include_bindings.get(&key) {
                 for form in &binding.inherited_form_bindings {
@@ -1855,8 +2133,9 @@ impl SymbolIndex {
         controllers.extend(local_controllers);
 
         // 3. テンプレートバインディング経由のコントローラー（routes/modals）
-        if controllers.is_empty() {
-            if let Some(controller) = self.get_controller_for_template(uri) {
+        // ng-view継承があっても、このテンプレート自体のコントローラーも追加する
+        if let Some(controller) = self.get_controller_for_template(uri) {
+            if !controllers.contains(&controller) {
                 controllers.push(controller);
             }
         }

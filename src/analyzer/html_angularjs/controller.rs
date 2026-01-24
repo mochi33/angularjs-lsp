@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use crate::index::{
     HtmlControllerScope, HtmlFormBinding, HtmlLocalVariableSource, InheritedFormBinding,
-    InheritedLocalVariable, NgIncludeBinding, SymbolIndex,
+    InheritedLocalVariable, NgIncludeBinding, NgViewBinding, SymbolIndex,
 };
 
 use super::variable_parser::{is_valid_identifier, parse_ng_init_expression, parse_ng_repeat_expression};
@@ -296,6 +296,53 @@ impl HtmlAngularJsAnalyzer {
                     inherited_form_bindings,
                 };
                 self.index.add_ng_include_binding(binding);
+            }
+
+            // ng-viewをチェック（<ng-view>, <div ng-view>, <div data-ng-view>）
+            if self.is_ng_view_element(start_tag, source) {
+                // ローカル変数を継承情報に変換
+                let inherited_local_variables: Vec<InheritedLocalVariable> = local_var_stack
+                    .iter()
+                    .map(|v| InheritedLocalVariable {
+                        name: v.name.clone(),
+                        source: v.source.clone(),
+                        uri: v.uri.clone(),
+                        scope_start_line: v.scope_start_line,
+                        scope_end_line: v.scope_end_line,
+                        name_start_line: v.name_start_line,
+                        name_start_col: v.name_start_col,
+                        name_end_line: v.name_end_line,
+                        name_end_col: v.name_end_col,
+                    })
+                    .collect();
+
+                // フォームバインディングを継承情報に変換
+                let inherited_form_bindings: Vec<InheritedFormBinding> = form_binding_stack
+                    .iter()
+                    .map(|f| InheritedFormBinding {
+                        name: f.name.clone(),
+                        uri: f.uri.clone(),
+                        scope_start_line: f.scope_start_line,
+                        scope_end_line: f.scope_end_line,
+                        name_start_line: f.name_start_line,
+                        name_start_col: f.name_start_col,
+                        name_end_line: f.name_end_line,
+                        name_end_col: f.name_end_col,
+                    })
+                    .collect();
+
+                // コントローラー名を収集
+                let inherited_controller_names: Vec<String> =
+                    controller_stack.iter().map(|c| c.name.clone()).collect();
+
+                let binding = NgViewBinding {
+                    parent_uri: uri.clone(),
+                    line: scope_start_line,
+                    inherited_controllers: inherited_controller_names,
+                    inherited_local_variables,
+                    inherited_form_bindings,
+                };
+                self.index.add_ng_view_binding(binding);
             }
 
             // 子要素を再帰的に処理（elementの場合のみ）
@@ -628,6 +675,35 @@ impl HtmlAngularJsAnalyzer {
         }
 
         None
+    }
+
+    /// ng-view要素かどうかを判定
+    /// 対象パターン:
+    /// - `<ng-view>` / `<data-ng-view>` タグ
+    /// - `ng-view` / `data-ng-view` 属性を持つ要素
+    fn is_ng_view_element(&self, start_tag: Node, source: &str) -> bool {
+        // タグ名をチェック（<ng-view>または<data-ng-view>）
+        if let Some(tag_name_node) = self.find_child_by_kind(start_tag, "tag_name") {
+            let tag_name = self.node_text(tag_name_node, source);
+            if tag_name == "ng-view" || tag_name == "data-ng-view" {
+                return true;
+            }
+        }
+
+        // 属性をチェック（ng-viewまたはdata-ng-view属性）
+        let mut cursor = start_tag.walk();
+        for child in start_tag.children(&mut cursor) {
+            if child.kind() == "attribute" {
+                if let Some(name_node) = self.find_child_by_kind(child, "attribute_name") {
+                    let attr_name = self.node_text(name_node, source);
+                    if attr_name == "ng-view" || attr_name == "data-ng-view" {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// フォームバインディングのみを収集（Pass 1.5用）

@@ -40,7 +40,11 @@ impl CodeLensHandler {
         let mut lenses = Vec::new();
 
         // 1. このファイルをng-includeしている親ファイル（ファイル先頭に表示）
-        let parents = self.index.get_parent_templates_for_child(uri);
+        // ng-view-virtual-parentは内部用なので除外
+        let parents: Vec<_> = self.index.get_parent_templates_for_child(uri)
+            .into_iter()
+            .filter(|(url, _)| !url.path().contains("ng-view-virtual-parent"))
+            .collect();
         if !parents.is_empty() {
             lenses.push(self.create_included_by_lens(&parents));
         }

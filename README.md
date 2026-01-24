@@ -13,6 +13,7 @@ Language Server Protocol (LSP) implementation for AngularJS 1.x applications.
 - **Hover Information** - Display type and documentation information on hover
 - **Signature Help** - Display function parameter hints while typing
 - **CodeLens** - Show controller/template relationships with navigation support
+- **Diagnostics** - Show warnings for undefined scope properties and local variables in HTML templates
 - **TypeScript Fallback** - Automatically falls back to `typescript-language-server` for non-AngularJS symbols
 
 ## Supported AngularJS Constructs
@@ -126,7 +127,11 @@ Create an `ajsconfig.json` file in your project root to customize the language s
     "startSymbol": "{{",
     "endSymbol": "}}"
   },
-  "cache": true
+  "cache": true,
+  "diagnostics": {
+    "enabled": true,
+    "severity": "warning"
+  }
 }
 ```
 
@@ -139,6 +144,8 @@ Create an `ajsconfig.json` file in your project root to customize the language s
 | `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. |
 | `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. |
 | `cache` | `boolean` | `true` | Enable caching of parsed symbols. Cache is stored in `.angularjs-lsp/cache/`. |
+| `diagnostics.enabled` | `boolean` | `true` | Enable diagnostics for undefined scope properties and local variables. |
+| `diagnostics.severity` | `string` | `"warning"` | Severity level: `"error"`, `"warning"`, `"hint"`, or `"information"`. |
 
 ### Default Exclude Patterns
 
@@ -171,6 +178,23 @@ By default, the following patterns are excluded:
   "interpolate": {
     "startSymbol": "[[",
     "endSymbol": "]]"
+  }
+}
+```
+
+**Disable diagnostics or change severity:**
+```json
+{
+  "diagnostics": {
+    "enabled": false
+  }
+}
+```
+
+```json
+{
+  "diagnostics": {
+    "severity": "hint"
   }
 }
 ```

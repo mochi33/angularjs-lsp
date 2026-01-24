@@ -1,6 +1,7 @@
 mod analyzer;
 mod cache;
 mod config;
+mod diagnostics;
 mod handlers;
 mod index;
 mod server;

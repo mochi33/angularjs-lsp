@@ -18,6 +18,37 @@ pub struct AjsConfig {
     /// キャッシュ機能を有効にする（デフォルト: false）
     #[serde(default)]
     pub cache: bool,
+    /// 診断（警告表示）設定
+    #[serde(default)]
+    pub diagnostics: DiagnosticsConfig,
+}
+
+/// 診断（警告表示）設定
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagnosticsConfig {
+    /// 診断機能を有効にする（デフォルト: true）
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 診断の重要度: "error", "warning", "hint", "information"（デフォルト: "warning"）
+    #[serde(default = "default_severity")]
+    pub severity: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_severity() -> String {
+    "warning".to_string()
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            severity: default_severity(),
+        }
+    }
 }
 
 fn default_exclude() -> Vec<String> {
@@ -67,6 +98,7 @@ impl Default for AjsConfig {
             include: Vec::new(),
             exclude: default_exclude(),
             cache: false,
+            diagnostics: DiagnosticsConfig::default(),
         }
     }
 }
@@ -352,5 +384,45 @@ mod tests {
         // 他のフォルダはマッチしない
         assert!(!matcher.should_include(Path::new("other/file.js")));
         assert!(!matcher.should_include(Path::new("other/file.html")));
+    }
+
+    #[test]
+    fn test_diagnostics_default_config() {
+        let config = DiagnosticsConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.severity, "warning");
+    }
+
+    #[test]
+    fn test_diagnostics_parse_config() {
+        let json = r#"{
+            "diagnostics": {
+                "enabled": false,
+                "severity": "error"
+            }
+        }"#;
+        let config: AjsConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.diagnostics.enabled);
+        assert_eq!(config.diagnostics.severity, "error");
+    }
+
+    #[test]
+    fn test_diagnostics_partial_config() {
+        let json = r#"{
+            "diagnostics": {
+                "severity": "hint"
+            }
+        }"#;
+        let config: AjsConfig = serde_json::from_str(json).unwrap();
+        assert!(config.diagnostics.enabled); // デフォルトはtrue
+        assert_eq!(config.diagnostics.severity, "hint");
+    }
+
+    #[test]
+    fn test_diagnostics_empty_config() {
+        let json = r#"{}"#;
+        let config: AjsConfig = serde_json::from_str(json).unwrap();
+        assert!(config.diagnostics.enabled);
+        assert_eq!(config.diagnostics.severity, "warning");
     }
 }

@@ -35,6 +35,9 @@ impl InheritanceTestContext {
             self.html_analyzer.collect_ng_include_bindings(uri, content);
         }
 
+        // Pass 1.6: ng-view継承を$routeProviderテンプレートに適用
+        self.index.apply_all_ng_view_inheritances();
+
         // Pass 2: フォームバインディング収集
         for (uri, content) in files {
             self.html_analyzer.collect_form_bindings_only(uri, content);
@@ -890,4 +893,209 @@ fn test_local_variable_inheritance_to_grandchild() {
     let child_var_names: Vec<_> = child_inherited_vars.iter().map(|v| v.name.as_str()).collect();
     assert!(child_var_names.contains(&"item"),
         "grandchild should inherit 'item' from grandparent through parent, got: {:?}", child_var_names);
+}
+
+// =============================================================================
+// ng-view テスト
+// TODO: DashMapロック競合問題を解決後に有効化
+// =============================================================================
+
+/// ng-viewの基本的な継承テスト
+/// ng-viewがあるHTMLの親Controllerが、$routeProviderで設定されたテンプレートに継承される
+#[test]
+fn test_ng_view_controller_inheritance() {
+    use crate::index::BindingSource;
+    let ctx = InheritanceTestContext::new();
+
+    // メインHTML: ng-viewを含む
+    let main_html = r#"<div ng-controller="MainController as mainVm">
+    <header>Header</header>
+    <ng-view></ng-view>
+    <footer>Footer</footer>
+</div>"#;
+
+    // ルートテンプレート: $routeProviderで設定される
+    let route_html = r#"<div>
+    <span ng-click="mainVm.doSomething()">Action</span>
+</div>"#;
+
+    let main_uri = Url::parse("file:///app/index.html").unwrap();
+    let route_uri = Url::parse("file:///app/views/users.html").unwrap();
+
+    // $routeProviderでのテンプレートバインディングを登録
+    ctx.index.add_template_binding(crate::index::TemplateBinding {
+        template_path: "views/users.html".to_string(),
+        controller_name: "UsersController".to_string(),
+        source: BindingSource::RouteProvider,
+        binding_uri: Url::parse("file:///app/app.js").unwrap(),
+        binding_line: 10,
+    });
+
+    let files = vec![
+        (main_uri.clone(), main_html),
+        (route_uri.clone(), route_html),
+    ];
+
+    ctx.analyze_files_4pass(&files);
+
+    // ng-viewバインディングが登録されているか確認
+    let inherited = ctx.index.get_inherited_controllers_for_template(&route_uri);
+    assert!(inherited.contains(&"MainController".to_string()),
+        "Route template should inherit MainController from ng-view parent, got: {:?}", inherited);
+}
+
+/// ng-viewのdata-プレフィックス対応テスト
+#[test]
+fn test_ng_view_with_data_prefix() {
+    use crate::index::BindingSource;
+    let ctx = InheritanceTestContext::new();
+
+    // data-ng-viewプレフィックスを使用
+    let main_html = r#"<div ng-controller="AppController">
+    <div data-ng-view></div>
+</div>"#;
+
+    let route_html = r#"<div>
+    <span>Route content</span>
+</div>"#;
+
+    let main_uri = Url::parse("file:///app/index.html").unwrap();
+    let route_uri = Url::parse("file:///app/views/home.html").unwrap();
+
+    ctx.index.add_template_binding(crate::index::TemplateBinding {
+        template_path: "views/home.html".to_string(),
+        controller_name: "HomeController".to_string(),
+        source: BindingSource::RouteProvider,
+        binding_uri: Url::parse("file:///app/app.js").unwrap(),
+        binding_line: 5,
+    });
+
+    let files = vec![
+        (main_uri.clone(), main_html),
+        (route_uri.clone(), route_html),
+    ];
+
+    ctx.analyze_files_4pass(&files);
+
+    let inherited = ctx.index.get_inherited_controllers_for_template(&route_uri);
+    assert!(inherited.contains(&"AppController".to_string()),
+        "Route template should inherit AppController (data-ng-view), got: {:?}", inherited);
+}
+
+/// ng-view要素（タグ形式）のテスト
+#[test]
+fn test_ng_view_as_element() {
+    use crate::index::BindingSource;
+    let ctx = InheritanceTestContext::new();
+
+    // <ng-view>タグとして使用
+    let main_html = r#"<div ng-controller="RootController">
+    <ng-view></ng-view>
+</div>"#;
+
+    let route_html = r#"<div>Content</div>"#;
+
+    let main_uri = Url::parse("file:///app/main.html").unwrap();
+    let route_uri = Url::parse("file:///app/page.html").unwrap();
+
+    ctx.index.add_template_binding(crate::index::TemplateBinding {
+        template_path: "page.html".to_string(),
+        controller_name: "PageController".to_string(),
+        source: BindingSource::RouteProvider,
+        binding_uri: Url::parse("file:///app/config.js").unwrap(),
+        binding_line: 1,
+    });
+
+    let files = vec![
+        (main_uri.clone(), main_html),
+        (route_uri.clone(), route_html),
+    ];
+
+    ctx.analyze_files_4pass(&files);
+
+    let inherited = ctx.index.get_inherited_controllers_for_template(&route_uri);
+    assert!(inherited.contains(&"RootController".to_string()),
+        "Route template should inherit RootController (<ng-view> element), got: {:?}", inherited);
+}
+
+/// ng-viewとネストしたControllerの継承テスト
+#[test]
+fn test_ng_view_with_nested_controllers() {
+    use crate::index::BindingSource;
+    let ctx = InheritanceTestContext::new();
+
+    // 複数のネストしたController
+    let main_html = r#"<div ng-controller="AppController">
+    <div ng-controller="LayoutController">
+        <nav>Navigation</nav>
+        <ng-view></ng-view>
+    </div>
+</div>"#;
+
+    let route_html = r#"<div>
+    <span>Route content</span>
+</div>"#;
+
+    let main_uri = Url::parse("file:///app/index.html").unwrap();
+    let route_uri = Url::parse("file:///app/views/dashboard.html").unwrap();
+
+    ctx.index.add_template_binding(crate::index::TemplateBinding {
+        template_path: "views/dashboard.html".to_string(),
+        controller_name: "DashboardController".to_string(),
+        source: BindingSource::RouteProvider,
+        binding_uri: Url::parse("file:///app/routes.js").unwrap(),
+        binding_line: 15,
+    });
+
+    let files = vec![
+        (main_uri.clone(), main_html),
+        (route_uri.clone(), route_html),
+    ];
+
+    ctx.analyze_files_4pass(&files);
+
+    let inherited = ctx.index.get_inherited_controllers_for_template(&route_uri);
+    // 両方のControllerが継承される
+    assert!(inherited.contains(&"AppController".to_string()),
+        "Route template should inherit AppController, got: {:?}", inherited);
+    assert!(inherited.contains(&"LayoutController".to_string()),
+        "Route template should inherit LayoutController, got: {:?}", inherited);
+}
+
+/// ng-viewがない場合のテスト（$routeProviderテンプレートは継承されない）
+#[test]
+fn test_no_ng_view_no_inheritance() {
+    use crate::index::BindingSource;
+    let ctx = InheritanceTestContext::new();
+
+    // ng-viewがないHTML
+    let main_html = r#"<div ng-controller="MainController">
+    <div ng-include="'content.html'"></div>
+</div>"#;
+
+    // これは$routeProviderのテンプレートだが、ng-viewがないので継承されない
+    let route_html = r#"<div>Route content</div>"#;
+
+    let main_uri = Url::parse("file:///app/index.html").unwrap();
+    let route_uri = Url::parse("file:///app/route.html").unwrap();
+
+    ctx.index.add_template_binding(crate::index::TemplateBinding {
+        template_path: "route.html".to_string(),
+        controller_name: "RouteController".to_string(),
+        source: BindingSource::RouteProvider,
+        binding_uri: Url::parse("file:///app/app.js").unwrap(),
+        binding_line: 1,
+    });
+
+    let files = vec![
+        (main_uri.clone(), main_html),
+        (route_uri.clone(), route_html),
+    ];
+
+    ctx.analyze_files_4pass(&files);
+
+    // ng-viewがないので継承はない（ng-includeからの継承もない）
+    let inherited = ctx.index.get_inherited_controllers_for_template(&route_uri);
+    assert!(!inherited.contains(&"MainController".to_string()),
+        "Route template should NOT inherit MainController without ng-view, got: {:?}", inherited);
 }

@@ -272,13 +272,15 @@ impl HtmlAngularJsAnalyzer {
                 if let Some(name_node) = self.find_child_by_kind(child, "attribute_name") {
                     let attr_name = self.node_text(name_node, source);
 
-                    // ng-repeatとng-initは変数定義なのでスキップ（ただし右辺は参照としてチェック）
+                    // ng-repeat, ng-options, ng-initは変数定義なのでスキップ（ただし右辺は参照としてチェック）
                     if attr_name == "ng-repeat"
                         || attr_name == "data-ng-repeat"
+                        || attr_name == "ng-options"
+                        || attr_name == "data-ng-options"
                         || attr_name == "ng-init"
                         || attr_name == "data-ng-init"
                     {
-                        // ng-repeatの右辺（"in"の後）とng-initの右辺（=の後）のみチェック
+                        // ng-repeat/ng-optionsの右辺（"in"の後）とng-initの右辺（=の後）のみチェック
                         if let Some(value_node) =
                             self.find_child_by_kind(child, "quoted_attribute_value")
                         {
@@ -288,9 +290,9 @@ impl HtmlAngularJsAnalyzer {
                             let value_byte_col = value_node.start_position().column + 1;
                             let value_start_col = self.byte_col_to_utf16_col(source, value_start_line, value_byte_col);
 
-                            // ng-repeatの場合は"in"の後の部分のみ
+                            // ng-repeat/ng-optionsの場合は"in"の後の部分のみ
                             let expr_to_check =
-                                if attr_name.contains("ng-repeat") {
+                                if attr_name.contains("ng-repeat") || attr_name.contains("ng-options") {
                                     if let Some(in_idx) = value.find(" in ") {
                                         // track byを除去
                                         let after_in = &value[in_idx + 4..];

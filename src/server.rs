@@ -11,7 +11,8 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::analyzer::{AngularJsAnalyzer, HtmlAngularJsAnalyzer, HtmlParser, EmbeddedScript};
 use crate::cache::{CacheLoader, CacheWriter, FileMetadata};
-use crate::config::{AjsConfig, PathMatcher};
+use crate::config::{AjsConfig, DiagnosticsConfig, PathMatcher};
+use crate::diagnostics::DiagnosticsHandler;
 use crate::handlers::{CodeLensHandler, CompletionHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler, SemanticTokensHandler, SignatureHelpHandler};
 use crate::index::SymbolIndex;
 use crate::ts_proxy::TsProxy;
@@ -28,6 +29,8 @@ pub struct Backend {
     ts_opened_files: DashMap<Url, bool>,
     /// パスマッチング（include/exclude）
     path_matcher: RwLock<Option<PathMatcher>>,
+    /// 診断設定
+    diagnostics_config: RwLock<DiagnosticsConfig>,
 }
 
 impl Backend {
@@ -46,6 +49,7 @@ impl Backend {
             documents: DashMap::new(),
             ts_opened_files: DashMap::new(),
             path_matcher: RwLock::new(None),
+            diagnostics_config: RwLock::new(DiagnosticsConfig::default()),
         }
     }
 
@@ -58,6 +62,16 @@ impl Backend {
     /// ファイルがJSかどうか判定
     fn is_js_file(uri: &Url) -> bool {
         uri.path().ends_with(".js")
+    }
+
+    /// HTMLファイルの診断を実行してpublish
+    async fn publish_diagnostics_for_html(&self, uri: &Url) {
+        let config = self.diagnostics_config.read().await.clone();
+        let handler = DiagnosticsHandler::new(Arc::clone(&self.index), config);
+        let diagnostics = handler.diagnose_html(uri);
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
     }
 
     async fn on_change(&self, uri: Url, text: String, version: i32) {
@@ -73,6 +87,8 @@ impl Backend {
             }
             // 再解析が必要な子HTMLを処理
             self.process_pending_reanalysis(&uri);
+            // 診断を実行
+            self.publish_diagnostics_for_html(&uri).await;
         } else if Self::is_js_file(&uri) {
             self.analyzer.analyze_document(&uri, &text);
         }
@@ -96,6 +112,8 @@ impl Backend {
             }
             // 再解析が必要な子HTMLを処理
             self.process_pending_reanalysis(&uri);
+            // 診断を実行
+            self.publish_diagnostics_for_html(&uri).await;
         } else if Self::is_js_file(&uri) {
             self.analyzer.analyze_document(&uri, &text);
         }
@@ -333,6 +351,9 @@ impl Backend {
                     }
                 }
 
+                // Pass 1.6: Apply ng-view inheritance to $routeProvider templates
+                self.index.apply_all_ng_view_inheritances();
+
                 // Pass 2: Collect form bindings (ng-include bindings are now available)
                 self.send_progress(&token, WorkDoneProgress::Report(WorkDoneProgressReport {
                     cancellable: Some(false),
@@ -460,6 +481,9 @@ impl Backend {
                     }
                 }
 
+                // Pass 1.6: Apply ng-view inheritance to $routeProvider templates
+                self.index.apply_all_ng_view_inheritances();
+
                 // Pass 2: Collect form bindings
                 for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
                     self.html_analyzer.collect_form_bindings_only_with_tree(uri, content, tree);
@@ -554,6 +578,9 @@ impl Backend {
         for (uri, content, tree) in &parsed_html_files {
             self.html_analyzer.collect_ng_include_bindings_with_tree(uri, content, tree);
         }
+
+        // Pass 1.6: Apply ng-view inheritance to $routeProvider templates
+        self.index.apply_all_ng_view_inheritances();
 
         // Pass 2: Collect form bindings
         for (uri, content, tree) in &parsed_html_files {
@@ -875,6 +902,7 @@ impl LanguageServer for Backend {
                 cache_enabled = config.cache;
 
                 self.html_analyzer.set_interpolate_config(config.interpolate.clone());
+                *self.diagnostics_config.write().await = config.diagnostics.clone();
                 self.client
                     .log_message(
                         MessageType::INFO,
