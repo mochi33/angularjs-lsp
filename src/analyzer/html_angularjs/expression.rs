@@ -1,6 +1,6 @@
 //! Angular式のパースとコンテキスト判定
 
-use super::directives::NG_DIRECTIVES;
+use super::directives::is_ng_directive;
 use super::JsParser;
 
 use super::HtmlAngularJsAnalyzer;
@@ -185,27 +185,49 @@ impl HtmlAngularJsAnalyzer {
 
         // 2. AngularJSディレクティブ属性内かチェック
         // ng-if="...", ng-model="...", ng-click="..." など
-        for directive in NG_DIRECTIVES {
-            // ng-if="..." パターンを検索
-            let pattern = format!("{}=\"", directive);
-            if let Some(attr_start) = before_cursor.rfind(&pattern) {
-                let after_attr = &before_cursor[attr_start + pattern.len()..];
-                // 属性値の閉じクォートがないかチェック
-                if !after_attr.contains('"') {
-                    return true;
+        // ダブルクォートパターンをチェック
+        if let Some(eq_idx) = before_cursor.rfind("=\"") {
+            let after_eq = &before_cursor[eq_idx + 2..];
+            // 属性値の閉じクォートがない場合、属性値内にいる
+            if !after_eq.contains('"') {
+                // 属性名を抽出（`="` の前の部分）
+                if let Some(attr_name) = Self::extract_attr_name(&before_cursor[..eq_idx]) {
+                    if is_ng_directive(attr_name) {
+                        return true;
+                    }
                 }
             }
-            // シングルクォートパターンもチェック
-            let pattern_single = format!("{}='", directive);
-            if let Some(attr_start) = before_cursor.rfind(&pattern_single) {
-                let after_attr = &before_cursor[attr_start + pattern_single.len()..];
-                if !after_attr.contains('\'') {
-                    return true;
+        }
+
+        // シングルクォートパターンをチェック
+        if let Some(eq_idx) = before_cursor.rfind("='") {
+            let after_eq = &before_cursor[eq_idx + 2..];
+            // 属性値の閉じクォートがない場合、属性値内にいる
+            if !after_eq.contains('\'') {
+                // 属性名を抽出（`='` の前の部分）
+                if let Some(attr_name) = Self::extract_attr_name(&before_cursor[..eq_idx]) {
+                    if is_ng_directive(attr_name) {
+                        return true;
+                    }
                 }
             }
         }
 
         false
+    }
+
+    /// 文字列の末尾から属性名を抽出
+    fn extract_attr_name(s: &str) -> Option<&str> {
+        // 末尾から属性名の開始位置を探す（スペースまたは < まで）
+        let start = s.rfind(|c: char| c.is_whitespace() || c == '<')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let attr_name = &s[start..];
+        if attr_name.is_empty() {
+            None
+        } else {
+            Some(attr_name)
+        }
     }
 
     /// カーソル位置がHTMLタグ名または属性名の位置かを判定（ディレクティブ補完用）

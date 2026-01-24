@@ -1121,13 +1121,15 @@ impl SymbolIndex {
     }
 
     /// URIに対応するng-includeバインディングの複合キーを逆引きインデックスで検索
-    /// O(1)でルックアップし、最初にマッチしたキーを返す
-    fn find_ng_include_key_for_template(&self, uri: &Url) -> Option<String> {
+    /// 同じファイルが複数の親からng-includeされている場合、すべてのキーを返す
+    fn find_all_ng_include_keys_for_template(&self, uri: &Url) -> Vec<String> {
         let path = uri.path();
         let filename = match path.rsplit('/').next() {
             Some(f) => f,
-            None => return None,
+            None => return Vec::new(),
         };
+
+        let mut keys = Vec::new();
 
         // 方法1: normalized_pathで逆引き（パス末尾でマッチング）
         for entry in self.ng_include_by_path.iter() {
@@ -1135,40 +1137,57 @@ impl SymbolIndex {
             if path.ends_with(&format!("/{}", template_path))
                 || path == format!("/{}", template_path)
             {
-                if let Some(key) = entry.value().first() {
-                    return Some(key.clone());
+                keys.extend(entry.value().iter().cloned());
+            }
+        }
+
+        // 方法2: filenameで逆引き（方法1で見つからなかった場合のみ）
+        if keys.is_empty() {
+            if let Some(filename_keys) = self.ng_include_by_filename.get(filename) {
+                keys.extend(filename_keys.iter().cloned());
+            }
+        }
+
+        keys
+    }
+
+    /// ng-includeで継承されるコントローラーリストを取得
+    /// 複数の親からng-includeされている場合、すべての親からのコントローラーをマージ
+    pub fn get_inherited_controllers_for_template(&self, uri: &Url) -> Vec<String> {
+        let keys = self.find_all_ng_include_keys_for_template(uri);
+        let mut controllers = Vec::new();
+
+        for key in keys {
+            if let Some(binding) = self.ng_include_bindings.get(&key) {
+                for controller in &binding.inherited_controllers {
+                    if !controllers.contains(controller) {
+                        controllers.push(controller.clone());
+                    }
                 }
             }
         }
 
-        // 方法2: filenameで逆引き
-        if let Some(keys) = self.ng_include_by_filename.get(filename) {
-            if let Some(key) = keys.first() {
-                return Some(key.clone());
-            }
-        }
-
-        None
-    }
-
-    /// ng-includeで継承されるコントローラーリストを取得
-    pub fn get_inherited_controllers_for_template(&self, uri: &Url) -> Vec<String> {
-        if let Some(key) = self.find_ng_include_key_for_template(uri) {
-            if let Some(binding) = self.ng_include_bindings.get(&key) {
-                return binding.inherited_controllers.clone();
-            }
-        }
-        Vec::new()
+        controllers
     }
 
     /// ng-includeで継承されるローカル変数リストを取得
+    /// 複数の親からng-includeされている場合、すべての親からの変数をマージ
     pub fn get_inherited_local_variables_for_template(&self, uri: &Url) -> Vec<InheritedLocalVariable> {
-        if let Some(key) = self.find_ng_include_key_for_template(uri) {
+        let keys = self.find_all_ng_include_keys_for_template(uri);
+        let mut variables = Vec::new();
+
+        for key in keys {
             if let Some(binding) = self.ng_include_bindings.get(&key) {
-                return binding.inherited_local_variables.clone();
+                for var in &binding.inherited_local_variables {
+                    // 同名変数は最初に見つかったものを優先（親の順序に依存）
+                    if !variables.iter().any(|v: &InheritedLocalVariable| v.name == var.name) {
+                        variables.push(var.clone());
+                    }
+                }
             }
         }
-        Vec::new()
+
+        variables
     }
 
     /// 特定のローカル変数を継承しているテンプレートの参照を取得
@@ -1189,6 +1208,7 @@ impl SymbolIndex {
                 }
 
                 // このファイルが指定された変数を継承しているか確認
+                // 複数の親からng-includeされている場合も正しく処理
                 let inherited = self.get_inherited_local_variables_for_template(&var_ref.uri);
                 let inherits_var = inherited.iter().any(|v| {
                     v.name == var_name && &v.uri == parent_uri
@@ -1726,13 +1746,24 @@ impl SymbolIndex {
     }
 
     /// ng-includeで継承されるフォームバインディングリストを取得
+    /// ng-includeで継承されるフォームバインディングリストを取得
+    /// 複数の親からng-includeされている場合、すべての親からのフォームバインディングをマージ
     pub fn get_inherited_form_bindings_for_template(&self, uri: &Url) -> Vec<InheritedFormBinding> {
-        if let Some(key) = self.find_ng_include_key_for_template(uri) {
+        let keys = self.find_all_ng_include_keys_for_template(uri);
+        let mut bindings = Vec::new();
+
+        for key in keys {
             if let Some(binding) = self.ng_include_bindings.get(&key) {
-                return binding.inherited_form_bindings.clone();
+                for form in &binding.inherited_form_bindings {
+                    // 同名フォームは最初に見つかったものを優先
+                    if !bindings.iter().any(|b: &InheritedFormBinding| b.name == form.name) {
+                        bindings.push(form.clone());
+                    }
+                }
             }
         }
-        Vec::new()
+
+        bindings
     }
 
     // ========== HTMLディレクティブ参照関連 ==========
