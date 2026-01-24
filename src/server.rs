@@ -852,7 +852,7 @@ impl LanguageServer for Backend {
                     ),
                 ),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["angularjs.refreshIndex".to_string()],
+                    commands: vec!["angularjs-lsp.refreshIndex".to_string()],
                     work_done_progress_options: Default::default(),
                 }),
                 ..Default::default()
@@ -1145,7 +1145,7 @@ impl LanguageServer for Backend {
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
         match params.command.as_str() {
-            "angularjs.refreshIndex" => {
+            "angularjs-lsp.refreshIndex" => {
                 self.client
                     .log_message(MessageType::INFO, "Refreshing AngularJS index...")
                     .await;

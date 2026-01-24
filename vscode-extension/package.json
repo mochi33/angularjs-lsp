@@ -2,7 +2,7 @@
   "name": "angularjs-lsp",
   "displayName": "AngularJS 1.x IntelliSense",
   "description": "Language Server Protocol implementation for AngularJS 1.x projects",
-  "version": "0.2.8",
+  "version": "0.2.10",
   "publisher": "mochi33",
   "license": "MIT",
   "repository": {

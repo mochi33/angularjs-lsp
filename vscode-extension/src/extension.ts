@@ -585,7 +585,7 @@ async function refreshIndexCommand(
             },
             async () => {
                 await client!.sendRequest('workspace/executeCommand', {
-                    command: 'angularjs.refreshIndex',
+                    command: 'angularjs-lsp.refreshIndex',
                 });
             }
         );
@@ -621,7 +621,7 @@ async function refreshCacheCommand(
             async () => {
                 // Use existing refreshIndex command which will re-scan and save cache
                 await client!.sendRequest('workspace/executeCommand', {
-                    command: 'angularjs.refreshIndex',
+                    command: 'angularjs-lsp.refreshIndex',
                 });
             }
         );
