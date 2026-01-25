@@ -463,8 +463,17 @@ impl SymbolIndex {
             // controller as 構文の this.method パターン (ControllerName.methodName)
             parsed
         } else {
+            debug!(
+                "get_html_references_for_symbol: cannot parse symbol_name='{}'",
+                symbol_name
+            );
             return Vec::new();
         };
+
+        debug!(
+            "get_html_references_for_symbol: symbol='{}', controller='{}', property='{}'",
+            symbol_name, controller_name, property_path
+        );
 
         let mut references = Vec::new();
 
@@ -504,6 +513,11 @@ impl SymbolIndex {
 
                 // このHTML参照がどのコントローラーに属するか確認
                 let controllers = self.resolve_controllers_for_html(uri, html_ref.start_line);
+                debug!(
+                    "get_html_references_for_symbol: html_ref='{}' at {}:{}, controllers={:?}, controller_name='{}', direct_match={}, alias_match={}",
+                    html_ref.property_path, html_ref.start_line, html_ref.start_col,
+                    controllers, controller_name, direct_match, alias_match
+                );
                 if controllers.contains(&controller_name.to_string()) || alias_match {
                     references.push(SymbolReference {
                         name: symbol_name.to_string(),
@@ -617,6 +631,32 @@ impl SymbolIndex {
             .iter()
             .flat_map(|entry| entry.value().clone())
             .collect()
+    }
+
+    /// 指定JSファイルの全スコープ変数定義を取得
+    /// $scope.xxx および this.xxx (controller as 構文) を返す
+    pub fn get_scope_definitions_for_js(&self, uri: &Url) -> Vec<Symbol> {
+        self.definitions
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .filter(|s| {
+                &s.uri == uri
+                    && (s.kind == SymbolKind::ScopeProperty
+                        || s.kind == SymbolKind::ScopeMethod)
+            })
+            .collect()
+    }
+
+    /// スコープ変数がHTMLから参照されているかチェック
+    /// JS参照は無視し、HTML参照のみをチェック（スコープ変数の目的はHTMLで使用されること）
+    pub fn is_scope_variable_referenced(&self, symbol_name: &str) -> bool {
+        let html_refs = self.get_html_references_for_symbol(symbol_name);
+        debug!(
+            "is_scope_variable_referenced: symbol='{}', html_refs_count={}",
+            symbol_name,
+            html_refs.len()
+        );
+        !html_refs.is_empty()
     }
 
     /// プロパティパスで$rootScopeシンボルを検索

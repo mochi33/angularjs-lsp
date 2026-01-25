@@ -74,6 +74,30 @@ impl Backend {
             .await;
     }
 
+    /// JSファイルの診断を実行してpublish
+    async fn publish_diagnostics_for_js(&self, uri: &Url) {
+        let config = self.diagnostics_config.read().await.clone();
+        let handler = DiagnosticsHandler::new(Arc::clone(&self.index), config);
+        let diagnostics = handler.diagnose_js(uri);
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
+    }
+
+    /// 開いている全JSファイルの診断を再実行
+    /// HTML解析後に呼び出して、スコープ変数の参照状態を更新する
+    async fn republish_diagnostics_for_open_js_files(&self) {
+        let js_uris: Vec<Url> = self.documents
+            .iter()
+            .filter(|entry| Self::is_js_file(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for uri in js_uris {
+            self.publish_diagnostics_for_js(&uri).await;
+        }
+    }
+
     async fn on_change(&self, uri: Url, text: String, version: i32) {
         self.documents.insert(uri.clone(), text.clone());
 
@@ -89,8 +113,12 @@ impl Backend {
             self.process_pending_reanalysis(&uri);
             // 診断を実行
             self.publish_diagnostics_for_html(&uri).await;
+            // HTML参照が更新されたので、開いているJSファイルの診断も再実行
+            self.republish_diagnostics_for_open_js_files().await;
         } else if Self::is_js_file(&uri) {
             self.analyzer.analyze_document(&uri, &text);
+            // 診断を実行
+            self.publish_diagnostics_for_js(&uri).await;
         }
 
         // ts_proxyにも変更を通知
@@ -114,8 +142,12 @@ impl Backend {
             self.process_pending_reanalysis(&uri);
             // 診断を実行
             self.publish_diagnostics_for_html(&uri).await;
+            // HTML参照が更新されたので、開いているJSファイルの診断も再実行
+            self.republish_diagnostics_for_open_js_files().await;
         } else if Self::is_js_file(&uri) {
             self.analyzer.analyze_document(&uri, &text);
+            // 診断を実行
+            self.publish_diagnostics_for_js(&uri).await;
         }
 
         // ts_proxyにも通知
@@ -397,6 +429,10 @@ impl Backend {
                 self.client
                     .log_message(MessageType::INFO, format!("Indexed {} HTML files", html_count))
                     .await;
+
+                // ワークスペーススキャン完了後、開いているJSファイルの診断を再実行
+                // （スキャン中に開かれたファイルのHTML参照が更新されているため）
+                self.republish_diagnostics_for_open_js_files().await;
 
                 // 進捗完了を通知
                 self.send_progress(&token, WorkDoneProgress::End(WorkDoneProgressEnd {

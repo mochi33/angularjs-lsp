@@ -32,6 +32,9 @@ pub struct DiagnosticsConfig {
     /// 診断の重要度: "error", "warning", "hint", "information"（デフォルト: "warning"）
     #[serde(default = "default_severity")]
     pub severity: String,
+    /// 未使用スコープ変数の警告を有効にする（デフォルト: true）
+    #[serde(default = "default_true")]
+    pub unused_scope_variables: bool,
 }
 
 fn default_true() -> bool {
@@ -47,6 +50,7 @@ impl Default for DiagnosticsConfig {
         Self {
             enabled: default_true(),
             severity: default_severity(),
+            unused_scope_variables: default_true(),
         }
     }
 }
@@ -391,6 +395,7 @@ mod tests {
         let config = DiagnosticsConfig::default();
         assert!(config.enabled);
         assert_eq!(config.severity, "warning");
+        assert!(config.unused_scope_variables);
     }
 
     #[test]
@@ -404,6 +409,7 @@ mod tests {
         let config: AjsConfig = serde_json::from_str(json).unwrap();
         assert!(!config.diagnostics.enabled);
         assert_eq!(config.diagnostics.severity, "error");
+        assert!(config.diagnostics.unused_scope_variables); // デフォルトはtrue
     }
 
     #[test]
@@ -416,6 +422,7 @@ mod tests {
         let config: AjsConfig = serde_json::from_str(json).unwrap();
         assert!(config.diagnostics.enabled); // デフォルトはtrue
         assert_eq!(config.diagnostics.severity, "hint");
+        assert!(config.diagnostics.unused_scope_variables); // デフォルトはtrue
     }
 
     #[test]
@@ -424,5 +431,19 @@ mod tests {
         let config: AjsConfig = serde_json::from_str(json).unwrap();
         assert!(config.diagnostics.enabled);
         assert_eq!(config.diagnostics.severity, "warning");
+        assert!(config.diagnostics.unused_scope_variables);
+    }
+
+    #[test]
+    fn test_diagnostics_unused_scope_variables_disabled() {
+        let json = r#"{
+            "diagnostics": {
+                "unused_scope_variables": false
+            }
+        }"#;
+        let config: AjsConfig = serde_json::from_str(json).unwrap();
+        assert!(config.diagnostics.enabled); // デフォルトはtrue
+        assert_eq!(config.diagnostics.severity, "warning"); // デフォルトはwarning
+        assert!(!config.diagnostics.unused_scope_variables); // falseに設定
     }
 }
