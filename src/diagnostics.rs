@@ -65,6 +65,11 @@ impl DiagnosticsHandler {
                 continue;
             }
 
+            // $で始まるシンボル（$index, $first, $scope等）はスキップ
+            if reference.property_path.starts_with('$') {
+                continue;
+            }
+
             // property_pathを解析
             // 形式: "alias.property" または "property"
             let (alias, property) = if reference.property_path.contains('.') {
@@ -237,6 +242,11 @@ impl DiagnosticsHandler {
         let references = self.index.get_all_local_variable_references_for_uri(uri);
 
         for reference in references {
+            // $で始まるシンボル（$index, $first等）はスキップ
+            if reference.variable_name.starts_with('$') {
+                continue;
+            }
+
             // 定義があるかチェック
             if self
                 .index

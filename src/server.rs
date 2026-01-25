@@ -1447,14 +1447,33 @@ impl LanguageServer for Backend {
                 // 2. Angularコンテキスト内かチェック（属性値内）
                 if self.html_analyzer.is_in_angular_context(source, line, col) {
                     // Angularコンテキスト内 → $scope補完とローカル変数を返す
-                    let controller_name = self.index.resolve_controller_for_html(uri, line);
+                    let controllers = self.index.resolve_controllers_for_html(uri, line);
                     let handler = CompletionHandler::new(Arc::clone(&self.index));
 
                     let mut items: Vec<CompletionItem> = Vec::new();
+                    let mut seen_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-                    // 1. $scope 補完を追加
-                    if let Some(CompletionResponse::Array(scope_items)) = handler.complete_with_context(Some("$scope"), controller_name.as_deref(), &[]) {
-                        items.extend(scope_items);
+                    // 1. $scope 補完を追加（すべてのコントローラーから）
+                    if controllers.is_empty() {
+                        // コントローラーが見つからない場合は全$scopeプロパティを返す
+                        if let Some(CompletionResponse::Array(scope_items)) = handler.complete_with_context(Some("$scope"), None, &[]) {
+                            for item in scope_items {
+                                if seen_labels.insert(item.label.clone()) {
+                                    items.push(item);
+                                }
+                            }
+                        }
+                    } else {
+                        // 各コントローラーの$scopeプロパティを追加
+                        for controller_name in &controllers {
+                            if let Some(CompletionResponse::Array(scope_items)) = handler.complete_with_context(Some("$scope"), Some(controller_name), &[]) {
+                                for item in scope_items {
+                                    if seen_labels.insert(item.label.clone()) {
+                                        items.push(item);
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // 2. 現在のファイル内のローカル変数を追加（ng-repeat, ng-init由来）
