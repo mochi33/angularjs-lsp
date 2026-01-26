@@ -16,6 +16,23 @@ const execAsync = promisify(exec);
 
 let client: LanguageClient | undefined;
 
+/**
+ * Safely register a command, checking if it already exists first.
+ * This prevents "command already exists" errors when vscode-languageclient
+ * auto-registers commands from the server's executeCommandProvider.
+ */
+async function safeRegisterCommand(
+    commandId: string,
+    callback: (...args: any[]) => any
+): Promise<vscode.Disposable | undefined> {
+    const existingCommands = await vscode.commands.getCommands(true);
+    if (existingCommands.includes(commandId)) {
+        console.warn(`Command ${commandId} already registered, skipping`);
+        return undefined;
+    }
+    return vscode.commands.registerCommand(commandId, callback);
+}
+
 interface LspLocation {
     uri: string;
     range: {
@@ -48,45 +65,57 @@ export async function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('AngularJS LSP');
     context.subscriptions.push(outputChannel);
 
-    const openLocationDisposable = vscode.commands.registerCommand(
+    // Register commands with safe registration to avoid "command already exists" errors
+    // when vscode-languageclient auto-registers commands from the server
+    const openLocationDisposable = await safeRegisterCommand(
         'angularjs.openLocation',
         async (locations: LspLocation[]) => {
             await handleOpenLocation(locations, outputChannel);
         }
     );
-    context.subscriptions.push(openLocationDisposable);
+    if (openLocationDisposable) {
+        context.subscriptions.push(openLocationDisposable);
+    }
 
-    const restartDisposable = vscode.commands.registerCommand(
+    const restartDisposable = await safeRegisterCommand(
         'angularjs.restartServer',
         async () => {
             await restartServer(context, outputChannel);
         }
     );
-    context.subscriptions.push(restartDisposable);
+    if (restartDisposable) {
+        context.subscriptions.push(restartDisposable);
+    }
 
-    const installServerDisposable = vscode.commands.registerCommand(
+    const installServerDisposable = await safeRegisterCommand(
         'angularjs.installServer',
         async () => {
             await installServerCommand(context, outputChannel);
         }
     );
-    context.subscriptions.push(installServerDisposable);
+    if (installServerDisposable) {
+        context.subscriptions.push(installServerDisposable);
+    }
 
-    const refreshIndexDisposable = vscode.commands.registerCommand(
+    const refreshIndexDisposable = await safeRegisterCommand(
         'angularjs.refreshIndex',
         async () => {
             await refreshIndexCommand(outputChannel);
         }
     );
-    context.subscriptions.push(refreshIndexDisposable);
+    if (refreshIndexDisposable) {
+        context.subscriptions.push(refreshIndexDisposable);
+    }
 
-    const refreshCacheDisposable = vscode.commands.registerCommand(
+    const refreshCacheDisposable = await safeRegisterCommand(
         'angularjs.refreshCache',
         async () => {
             await refreshCacheCommand(outputChannel);
         }
     );
-    context.subscriptions.push(refreshCacheDisposable);
+    if (refreshCacheDisposable) {
+        context.subscriptions.push(refreshCacheDisposable);
+    }
 
     // Ensure dependencies are installed (non-blocking for dialogs)
     await ensureDependencies(context, outputChannel);
@@ -407,7 +436,7 @@ async function fileExists(filePath: string): Promise<boolean> {
 }
 
 async function startServer(
-    _context: vscode.ExtensionContext,
+    context: vscode.ExtensionContext,
     outputChannel: vscode.OutputChannel
 ): Promise<void> {
     const config = vscode.workspace.getConfiguration('angularjsLsp');
@@ -480,6 +509,8 @@ async function startServer(
     try {
         await client.start();
         outputChannel.appendLine('AngularJS LSP: Server started successfully');
+        // Add client to subscriptions for proper disposal on extension deactivate/reload
+        context.subscriptions.push(client);
     } catch (error) {
         outputChannel.appendLine(`AngularJS LSP: Failed to start server: ${error}`);
         vscode.window.showErrorMessage(`AngularJS LSP: Failed to start server: ${error}`);
