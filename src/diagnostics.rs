@@ -86,14 +86,22 @@ impl DiagnosticsHandler {
                 continue;
             };
 
-            // 参照があるかチェック
-            let is_referenced = self.index.is_scope_variable_referenced(&symbol.name);
+            // HTML内での参照があるかチェック
+            let is_referenced_in_html = self.index.is_scope_variable_referenced(&symbol.name);
+
+            // 他のJSファイル（他のコントローラー）からの参照があるかチェック
+            let js_refs = self.index.get_references(&symbol.name);
+            let is_referenced_in_other_js = js_refs
+                .iter()
+                .any(|r| r.uri != *uri);
+
             debug!(
-                "check_unused_scope_variables: symbol='{}', property='{}', is_referenced={}",
-                symbol.name, property_name, is_referenced
+                "check_unused_scope_variables: symbol='{}', property='{}', html_ref={}, other_js_ref={}",
+                symbol.name, property_name, is_referenced_in_html, is_referenced_in_other_js
             );
 
-            if is_referenced {
+            // HTMLか他のJSで参照されていればスキップ
+            if is_referenced_in_html || is_referenced_in_other_js {
                 continue;
             }
 
@@ -114,7 +122,7 @@ impl DiagnosticsHandler {
                 code_description: None,
                 source: Some("angularjs-lsp".to_string()),
                 message: format!(
-                    "'{}' is defined but never used in HTML templates",
+                    "'{}' is defined but not used in HTML templates or other controllers",
                     property_name
                 ),
                 related_information: None,
@@ -191,6 +199,12 @@ impl DiagnosticsHandler {
                     reference.start_line,
                     alias_name,
                 ) {
+                    // コントローラー自体がJS側で定義されているかチェック
+                    // JSファイルがまだ解析されていない場合は警告を出さない
+                    if !self.index.has_definition(&controller_name) {
+                        continue;
+                    }
+
                     // コントローラーの$scopeまたはthisにプロパティが定義されているかチェック
                     let scope_symbol = format!("{}.$scope.{}", controller_name, property);
                     let this_symbol = format!("{}.{}", controller_name, property);
@@ -233,45 +247,43 @@ impl DiagnosticsHandler {
                         tags: None,
                         data: None,
                     });
-                } else {
-                    // aliasが解決できない場合（コントローラーが見つからない）
-                    // ローカル変数やフォームバインディングではない場合のみ警告
-                    diagnostics.push(Diagnostic {
-                        range: Range {
-                            start: Position {
-                                line: reference.start_line,
-                                character: reference.start_col,
-                            },
-                            end: Position {
-                                line: reference.end_line,
-                                character: reference.end_col,
-                            },
-                        },
-                        severity: Some(severity),
-                        code: None,
-                        code_description: None,
-                        source: Some("angularjs-lsp".to_string()),
-                        message: format!(
-                            "Variable '{}' is not defined in scope",
-                            alias_name
-                        ),
-                        related_information: None,
-                        tags: None,
-                        data: None,
-                    });
                 }
+                // aliasが解決できない場合（コントローラーが見つからない）は警告を出さない
+                // JSファイルがまだ解析されていない可能性があるため
             } else {
                 // aliasがない場合（直接プロパティアクセス）
+
+                // まず、propertyがコントローラーエイリアスとして定義されているかチェック
+                // 例: ng-controller="FreeItemController as freeItem" で freeItem が単独で参照される場合
+                if self
+                    .index
+                    .resolve_controller_by_alias(uri, reference.start_line, property)
+                    .is_some()
+                {
+                    // コントローラーエイリアスとして定義されている場合はスキップ
+                    continue;
+                }
+
                 // すべてのコントローラーを取得して$scopeプロパティをチェック
                 let controllers =
                     self.index.resolve_controllers_for_html(uri, reference.start_line);
 
                 let mut found = false;
+                let mut any_controller_defined = false;
 
                 // いずれかのコントローラーで定義されているか確認
                 for controller_name in &controllers {
+                    // コントローラー自体がJS側で定義されているかチェック
+                    if !self.index.has_definition(controller_name) {
+                        continue;
+                    }
+                    any_controller_defined = true;
+
                     let scope_symbol = format!("{}.$scope.{}", controller_name, property);
-                    if self.index.has_definition(&scope_symbol) {
+                    let this_symbol = format!("{}.{}", controller_name, property);
+                    if self.index.has_definition(&scope_symbol)
+                        || self.index.has_definition(&this_symbol)
+                    {
                         found = true;
                         break;
                     }
@@ -287,7 +299,8 @@ impl DiagnosticsHandler {
                     found = true;
                 }
 
-                if !found && !controllers.is_empty() {
+                // コントローラーのJS定義が存在する場合のみ警告
+                if !found && any_controller_defined {
                     diagnostics.push(Diagnostic {
                         range: Range {
                             start: Position {

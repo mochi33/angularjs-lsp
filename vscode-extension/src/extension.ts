@@ -466,10 +466,25 @@ async function startServer(
 
     outputChannel.appendLine(`AngularJS LSP: Starting server from ${serverPath}`);
 
+    // Find typescript-language-server and add its directory to PATH
+    const tsLspPath = await findExecutable('typescript-language-server');
+    let envPath = process.env.PATH || '';
+    if (tsLspPath) {
+        const tsLspDir = path.dirname(tsLspPath);
+        outputChannel.appendLine(`Adding typescript-language-server directory to PATH: ${tsLspDir}`);
+        envPath = `${tsLspDir}${path.delimiter}${envPath}`;
+    }
+
     const serverOptions: ServerOptions = {
         run: {
             command: serverPath,
             transport: TransportKind.stdio,
+            options: {
+                env: {
+                    ...process.env,
+                    PATH: envPath,
+                },
+            },
         },
         debug: {
             command: serverPath,
@@ -477,6 +492,7 @@ async function startServer(
             options: {
                 env: {
                     ...process.env,
+                    PATH: envPath,
                     RUST_LOG: 'debug',
                 },
             },
