@@ -164,26 +164,8 @@ impl AngularJsAnalyzer {
 
                     if key_name == "controller" {
                         if let Some(value) = child.child_by_field_name("value") {
-                            // controller: function($scope) {} パターン
-                            // controller: ['$scope', function($scope) {}] パターン
-                            // controller: 'ControllerName' パターン（文字列の場合は参照を登録）
-                            // controller: ControllerName パターン（識別子の場合は関数参照を探す）
-                            let (injected_services, has_scope, has_root_scope) = if value.kind() == "array" {
-                                self.extract_dependencies(value, source, uri);
-                                (self.collect_injected_services(value, source),
-                                 self.has_scope_in_di_array(value, source),
-                                 self.has_root_scope_in_di_array(value, source))
-                            } else if value.kind() == "function_expression" || value.kind() == "arrow_function" {
-                                (self.collect_services_from_function_params(value, source),
-                                 self.has_scope_in_function_params(value, source),
-                                 self.has_root_scope_in_function_params(value, source))
-                            } else if value.kind() == "identifier" {
-                                (self.collect_services_from_function_ref(value, source),
-                                 self.has_scope_in_function_ref(value, source),
-                                 self.has_root_scope_in_function_ref(value, source))
-                            } else if value.kind() == "string" {
-                                // controller: 'ControllerName' パターン
-                                // コントローラー名への参照を登録
+                            // controller: 'ControllerName' パターンは参照登録のみ
+                            if value.kind() == "string" {
                                 let controller_name = self.extract_string_value(value, source);
                                 let start = value.start_position();
                                 let end = value.end_position();
@@ -198,35 +180,33 @@ impl AngularJsAnalyzer {
                                     ),
                                 };
                                 self.index.definitions.add_reference(reference);
-                                // 文字列パターンではDIスコープは抽出しない
-                                (Vec::new(), false, false)
                             } else {
-                                (Vec::new(), false, false)
-                            };
+                                // 配列・関数・class・識別子を統一的にDI解析
+                                self.extract_dependencies(value, source, uri);
+                                let di_info = self.extract_di_info(value, source);
 
-                            // DIサービスがあるか、$scopeまたは$rootScopeがある場合はスコープを追加
-                            if !injected_services.is_empty() || has_scope || has_root_scope {
-                                if let Some((body_start, body_end)) = self.find_function_body_range(value, source) {
-                                    // $scopeがある場合はControllerScopeも登録
-                                    if has_scope {
-                                        self.index.controllers.add_controller_scope(ControllerScope {
-                                            name: "route".to_string(),
-                                            uri: uri.clone(),
-                                            start_line: body_start,
-                                            end_line: body_end,
-                                            injected_services: injected_services.clone(),
-                                        });
+                                if di_info.has_any() {
+                                    if let Some((body_start, body_end)) = self.find_function_body_range(value, source) {
+                                        if di_info.has_scope {
+                                            self.index.controllers.add_controller_scope(ControllerScope {
+                                                name: "route".to_string(),
+                                                uri: uri.clone(),
+                                                start_line: body_start,
+                                                end_line: body_end,
+                                                injected_services: di_info.injected_services.clone(),
+                                            });
+                                        }
+
+                                        let di_scope = DiScope {
+                                            component_name: "route".to_string(),
+                                            injected_services: di_info.injected_services,
+                                            body_start_line: body_start,
+                                            body_end_line: body_end,
+                                            has_scope: di_info.has_scope,
+                                            has_root_scope: di_info.has_root_scope,
+                                        };
+                                        ctx.push_scope(di_scope);
                                     }
-
-                                    let di_scope = DiScope {
-                                        component_name: "route".to_string(),
-                                        injected_services,
-                                        body_start_line: body_start,
-                                        body_end_line: body_end,
-                                        has_scope,
-                                        has_root_scope,
-                                    };
-                                    ctx.push_scope(di_scope);
                                 }
                             }
                         }
@@ -243,35 +223,17 @@ impl AngularJsAnalyzer {
     fn extract_run_config_di(&self, node: Node, source: &str, ctx: &mut AnalyzerContext) {
         if let Some(args) = node.child_by_field_name("arguments") {
             if let Some(first_arg) = args.named_child(0) {
-                let (injected_services, has_scope, has_root_scope) = if first_arg.kind() == "array" {
-                    // 配列記法: ['$rootScope', function($rootScope) {}]
-                    (self.collect_injected_services(first_arg, source),
-                     self.has_scope_in_di_array(first_arg, source),
-                     self.has_root_scope_in_di_array(first_arg, source))
-                } else if first_arg.kind() == "function_expression" || first_arg.kind() == "arrow_function" {
-                    // 直接関数記法: function($rootScope) {}
-                    (self.collect_services_from_function_params(first_arg, source),
-                     self.has_scope_in_function_params(first_arg, source),
-                     self.has_root_scope_in_function_params(first_arg, source))
-                } else if first_arg.kind() == "identifier" {
-                    // 関数参照: .run(AppInit)
-                    (self.collect_services_from_function_ref(first_arg, source),
-                     self.has_scope_in_function_ref(first_arg, source),
-                     self.has_root_scope_in_function_ref(first_arg, source))
-                } else {
-                    (Vec::new(), false, false)
-                };
+                let di_info = self.extract_di_info(first_arg, source);
 
-                // DIサービスがあるか、$scopeまたは$rootScopeがある場合はスコープを追加
-                if !injected_services.is_empty() || has_scope || has_root_scope {
+                if di_info.has_any() {
                     if let Some((body_start, body_end)) = self.find_function_body_range(first_arg, source) {
                         let di_scope = DiScope {
                             component_name: "run".to_string(), // run/config には名前がない
-                            injected_services,
+                            injected_services: di_info.injected_services,
                             body_start_line: body_start,
                             body_end_line: body_end,
-                            has_scope,
-                            has_root_scope,
+                            has_scope: di_info.has_scope,
+                            has_root_scope: di_info.has_root_scope,
                         };
                         ctx.push_scope(di_scope);
                     }
@@ -344,36 +306,10 @@ impl AngularJsAnalyzer {
                     let (start, end, docs_line) = if let Some(second_arg) = args.named_child(1) {
                         self.extract_dependencies(second_arg, source, uri);
 
-                        // DIスコープを追加
-                        // 配列記法、直接関数記法、class式、関数参照の全パターンをサポート
-                        let (injected_services, has_scope, has_root_scope) = if second_arg.kind() == "array" {
-                            // 配列記法: ['$scope', 'Service', function($scope, Service) {}]
-                            // または: ['$scope', 'Service', class { constructor($scope, Service) {} }]
-                            (self.collect_injected_services(second_arg, source),
-                             self.has_scope_in_di_array(second_arg, source),
-                             self.has_root_scope_in_di_array(second_arg, source))
-                        } else if second_arg.kind() == "function_expression" || second_arg.kind() == "arrow_function" {
-                            // 直接関数記法: function($scope, Service) {}
-                            (self.collect_services_from_function_params(second_arg, source),
-                             self.has_scope_in_function_params(second_arg, source),
-                             self.has_root_scope_in_function_params(second_arg, source))
-                        } else if second_arg.kind() == "class" {
-                            // ES6 class式: class { constructor($scope, Service) {} }
-                            (self.collect_services_from_function_params(second_arg, source),
-                             self.has_scope_in_function_params(second_arg, source),
-                             self.has_root_scope_in_function_params(second_arg, source))
-                        } else if second_arg.kind() == "identifier" {
-                            // 関数参照またはclass参照: .controller('Ctrl', MyController)
-                            // $inject がある場合は別途処理されるが、ない場合はここで関数宣言/class宣言のパラメータを解析
-                            (self.collect_services_from_function_ref(second_arg, source),
-                             self.has_scope_in_function_ref(second_arg, source),
-                             self.has_root_scope_in_function_ref(second_arg, source))
-                        } else {
-                            (Vec::new(), false, false)
-                        };
+                        // DIスコープを追加（配列・関数・class・識別子を統一的に処理）
+                        let di_info = self.extract_di_info(second_arg, source);
 
-                        // DIサービスがあるか、$scopeまたは$rootScopeがある場合はスコープを追加
-                        if !injected_services.is_empty() || has_scope || has_root_scope {
+                        if di_info.has_any() {
                             if let Some((body_start, body_end)) = self.find_function_body_range(second_arg, source) {
                                 // Controller/Service/Factory の場合はスコープ情報を Index に登録
                                 // これにより補完時にInjectされたサービスを優先表示できる
@@ -383,17 +319,17 @@ impl AngularJsAnalyzer {
                                         uri: uri.clone(),
                                         start_line: body_start,
                                         end_line: body_end,
-                                        injected_services: injected_services.clone(),
+                                        injected_services: di_info.injected_services.clone(),
                                     });
                                 }
 
                                 let di_scope = DiScope {
                                     component_name: component_name.clone(),
-                                    injected_services,
+                                    injected_services: di_info.injected_services,
                                     body_start_line: body_start,
                                     body_end_line: body_end,
-                                    has_scope,
-                                    has_root_scope,
+                                    has_scope: di_info.has_scope,
+                                    has_root_scope: di_info.has_root_scope,
                                 };
                                 ctx.push_scope(di_scope);
                             }
