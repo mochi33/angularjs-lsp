@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::sync::RwLock;
@@ -37,10 +38,56 @@ pub struct Backend {
     index: Arc<Index>,
     root_uri: RwLock<Option<Url>>,
     ts_proxy: RwLock<Option<TsProxy>>,
-    documents: DashMap<Url, String>,
+    documents: Arc<DashMap<Url, String>>,
     ts_opened_files: DashMap<Url, bool>,
     path_matcher: RwLock<Option<PathMatcher>>,
-    diagnostics_config: RwLock<DiagnosticsConfig>,
+    diagnostics_config: Arc<RwLock<DiagnosticsConfig>>,
+    debounce_versions: Arc<DashMap<Url, u64>>,
+}
+
+async fn publish_html_diagnostics(
+    client: &Client,
+    index: &Arc<Index>,
+    diagnostics_config: &Arc<RwLock<DiagnosticsConfig>>,
+    uri: &Url,
+) {
+    let config = diagnostics_config.read().await.clone();
+    let handler = DiagnosticsHandler::new(Arc::clone(index), config);
+    let diagnostics = handler.diagnose_html(uri);
+    client
+        .publish_diagnostics(uri.clone(), diagnostics, None)
+        .await;
+}
+
+async fn publish_js_diagnostics(
+    client: &Client,
+    index: &Arc<Index>,
+    diagnostics_config: &Arc<RwLock<DiagnosticsConfig>>,
+    uri: &Url,
+) {
+    let config = diagnostics_config.read().await.clone();
+    let handler = DiagnosticsHandler::new(Arc::clone(index), config);
+    let diagnostics = handler.diagnose_js(uri);
+    client
+        .publish_diagnostics(uri.clone(), diagnostics, None)
+        .await;
+}
+
+async fn republish_all_js_diagnostics(
+    client: &Client,
+    index: &Arc<Index>,
+    diagnostics_config: &Arc<RwLock<DiagnosticsConfig>>,
+    documents: &Arc<DashMap<Url, String>>,
+) {
+    let js_uris: Vec<Url> = documents
+        .iter()
+        .filter(|entry| is_js_file(entry.key()))
+        .map(|entry| entry.key().clone())
+        .collect();
+
+    for uri in js_uris {
+        publish_js_diagnostics(client, index, diagnostics_config, &uri).await;
+    }
 }
 
 impl Backend {
@@ -59,61 +106,164 @@ impl Backend {
             index,
             root_uri: RwLock::new(None),
             ts_proxy: RwLock::new(None),
-            documents: DashMap::new(),
+            documents: Arc::new(DashMap::new()),
             ts_opened_files: DashMap::new(),
             path_matcher: RwLock::new(None),
-            diagnostics_config: RwLock::new(DiagnosticsConfig::default()),
+            diagnostics_config: Arc::new(RwLock::new(DiagnosticsConfig::default())),
+            debounce_versions: Arc::new(DashMap::new()),
         }
     }
 
     async fn publish_diagnostics_for_html(&self, uri: &Url) {
-        let config = self.diagnostics_config.read().await.clone();
-        let handler = DiagnosticsHandler::new(Arc::clone(&self.index), config);
-        let diagnostics = handler.diagnose_html(uri);
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
-            .await;
+        publish_html_diagnostics(&self.client, &self.index, &self.diagnostics_config, uri).await;
     }
 
     async fn publish_diagnostics_for_js(&self, uri: &Url) {
-        let config = self.diagnostics_config.read().await.clone();
-        let handler = DiagnosticsHandler::new(Arc::clone(&self.index), config);
-        let diagnostics = handler.diagnose_js(uri);
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
-            .await;
+        publish_js_diagnostics(&self.client, &self.index, &self.diagnostics_config, uri).await;
     }
 
     async fn republish_diagnostics_for_open_js_files(&self) {
-        let js_uris: Vec<Url> = self
-            .documents
-            .iter()
-            .filter(|entry| is_js_file(entry.key()))
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for uri in js_uris {
-            self.publish_diagnostics_for_js(&uri).await;
-        }
+        republish_all_js_diagnostics(
+            &self.client,
+            &self.index,
+            &self.diagnostics_config,
+            &self.documents,
+        )
+        .await;
     }
 
     async fn on_change(&self, uri: Url, text: String, version: i32) {
         self.documents.insert(uri.clone(), text.clone());
 
         if is_html_file(&uri) {
-            let scripts = self
-                .html_analyzer
-                .analyze_document_and_extract_scripts(&uri, &text);
-            for script in scripts {
-                self.analyzer
-                    .analyze_embedded_script(&uri, &script.source, script.line_offset);
-            }
-            self.process_pending_reanalysis(&uri);
-            self.publish_diagnostics_for_html(&uri).await;
-            self.republish_diagnostics_for_open_js_files().await;
+            // Increment version counter for debounce
+            let ver = {
+                let mut entry = self.debounce_versions.entry(uri.clone()).or_insert(0);
+                *entry += 1;
+                *entry
+            };
+
+            // Clone Arc handles (cheap reference count increment only)
+            let client = self.client.clone();
+            let analyzer = Arc::clone(&self.analyzer);
+            let html_analyzer = Arc::clone(&self.html_analyzer);
+            let index = Arc::clone(&self.index);
+            let documents = Arc::clone(&self.documents);
+            let diagnostics_config = Arc::clone(&self.diagnostics_config);
+            let debounce_versions = Arc::clone(&self.debounce_versions);
+            let spawn_uri = uri.clone();
+
+            tokio::spawn(async move {
+                let uri = spawn_uri;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                // Check version: skip if a newer keystroke has arrived
+                if debounce_versions.get(&uri).map(|v| *v) != Some(ver) {
+                    return;
+                }
+
+                // Clone Arc handles for spawn_blocking (outer scope keeps copies for diagnostics)
+                let bl_uri = uri.clone();
+                let bl_analyzer = Arc::clone(&analyzer);
+                let bl_html_analyzer = Arc::clone(&html_analyzer);
+                let bl_index = Arc::clone(&index);
+                let bl_documents = Arc::clone(&documents);
+
+                // Run CPU-intensive analysis on the blocking thread pool
+                let analysis_done = tokio::task::spawn_blocking(move || {
+                    let latest_text = match bl_documents.get(&bl_uri) {
+                        Some(doc) => doc.value().clone(),
+                        None => return false,
+                    };
+
+                    let scripts = bl_html_analyzer
+                        .analyze_document_and_extract_scripts(&bl_uri, &latest_text);
+                    for script in scripts {
+                        bl_analyzer.analyze_embedded_script(
+                            &bl_uri,
+                            &script.source,
+                            script.line_offset,
+                        );
+                    }
+
+                    bl_index.remove_from_pending_reanalysis(&bl_uri);
+                    let pending_uris = bl_index.take_pending_reanalysis();
+                    for child_uri in pending_uris {
+                        if child_uri == bl_uri {
+                            continue;
+                        }
+                        if let Some(doc) = bl_documents.get(&child_uri) {
+                            tracing::debug!(
+                                "process_pending_reanalysis: reanalyzing {} (triggered by {})",
+                                child_uri,
+                                bl_uri
+                            );
+                            bl_html_analyzer.analyze_document(&child_uri, doc.value());
+                        }
+                    }
+                    true
+                })
+                .await
+                .unwrap_or(false);
+
+                if analysis_done {
+                    publish_html_diagnostics(&client, &index, &diagnostics_config, &uri).await;
+                    republish_all_js_diagnostics(
+                        &client,
+                        &index,
+                        &diagnostics_config,
+                        &documents,
+                    )
+                    .await;
+                    let _ = client.semantic_tokens_refresh().await;
+                    let _ = client.code_lens_refresh().await;
+                }
+            });
         } else if is_js_file(&uri) {
-            self.analyzer.analyze_document(&uri, &text);
-            self.publish_diagnostics_for_js(&uri).await;
+            // Increment version counter for debounce
+            let ver = {
+                let mut entry = self.debounce_versions.entry(uri.clone()).or_insert(0);
+                *entry += 1;
+                *entry
+            };
+
+            let client = self.client.clone();
+            let analyzer = Arc::clone(&self.analyzer);
+            let index = Arc::clone(&self.index);
+            let documents = Arc::clone(&self.documents);
+            let diagnostics_config = Arc::clone(&self.diagnostics_config);
+            let debounce_versions = Arc::clone(&self.debounce_versions);
+            let spawn_uri = uri.clone();
+
+            tokio::spawn(async move {
+                let uri = spawn_uri;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                if debounce_versions.get(&uri).map(|v| *v) != Some(ver) {
+                    return;
+                }
+
+                let bl_uri = uri.clone();
+                let bl_analyzer = Arc::clone(&analyzer);
+                let bl_documents = Arc::clone(&documents);
+
+                let analysis_done = tokio::task::spawn_blocking(move || {
+                    let latest_text = match bl_documents.get(&bl_uri) {
+                        Some(doc) => doc.value().clone(),
+                        None => return false,
+                    };
+                    bl_analyzer.analyze_document(&bl_uri, &latest_text);
+                    true
+                })
+                .await
+                .unwrap_or(false);
+
+                if analysis_done {
+                    publish_js_diagnostics(&client, &index, &diagnostics_config, &uri).await;
+                    let _ = client.semantic_tokens_refresh().await;
+                    let _ = client.code_lens_refresh().await;
+                }
+            });
         }
 
         if let Some(ref proxy) = *self.ts_proxy.read().await {
@@ -125,18 +275,50 @@ impl Backend {
         self.documents.insert(uri.clone(), text.clone());
 
         if is_html_file(&uri) {
-            let scripts = self
-                .html_analyzer
-                .analyze_document_and_extract_scripts(&uri, &text);
-            for script in scripts {
-                self.analyzer
-                    .analyze_embedded_script(&uri, &script.source, script.line_offset);
-            }
-            self.process_pending_reanalysis(&uri);
+            self.debounce_versions.insert(uri.clone(), 0);
+
+            let bl_uri = uri.clone();
+            let bl_analyzer = Arc::clone(&self.analyzer);
+            let bl_html_analyzer = Arc::clone(&self.html_analyzer);
+            let bl_index = Arc::clone(&self.index);
+            let bl_documents = Arc::clone(&self.documents);
+            let bl_text = text.clone();
+            tokio::task::spawn_blocking(move || {
+                let scripts =
+                    bl_html_analyzer.analyze_document_and_extract_scripts(&bl_uri, &bl_text);
+                for script in scripts {
+                    bl_analyzer
+                        .analyze_embedded_script(&bl_uri, &script.source, script.line_offset);
+                }
+                // process_pending_reanalysis inlined (&self cannot be sent to spawn_blocking)
+                bl_index.remove_from_pending_reanalysis(&bl_uri);
+                let pending = bl_index.take_pending_reanalysis();
+                for child_uri in pending {
+                    if child_uri == bl_uri {
+                        continue;
+                    }
+                    if let Some(doc) = bl_documents.get(&child_uri) {
+                        bl_html_analyzer.analyze_document(&child_uri, doc.value());
+                    }
+                }
+            })
+            .await
+            .unwrap_or(());
+
             self.publish_diagnostics_for_html(&uri).await;
             self.republish_diagnostics_for_open_js_files().await;
         } else if is_js_file(&uri) {
-            self.analyzer.analyze_document(&uri, &text);
+            self.debounce_versions.insert(uri.clone(), 0);
+
+            let bl_uri = uri.clone();
+            let bl_analyzer = Arc::clone(&self.analyzer);
+            let bl_text = text.clone();
+            tokio::task::spawn_blocking(move || {
+                bl_analyzer.analyze_document(&bl_uri, &bl_text);
+            })
+            .await
+            .unwrap_or(());
+
             self.publish_diagnostics_for_js(&uri).await;
         }
 
@@ -225,123 +407,8 @@ impl Backend {
                     .collect();
 
                 let html_script_count = html_scripts.len();
-                let total_js_count = js_count + html_script_count;
 
-                // JS Pass 1: Index definitions
-                report_progress(
-                    &self.client,
-                    &token,
-                    format!("JS Pass 1: Indexing definitions (0/{} files)", total_js_count),
-                    0,
-                )
-                .await;
-
-                for (i, (uri, content)) in js_files.iter().enumerate() {
-                    self.analyzer
-                        .analyze_document_with_options(uri, content, true);
-                    if i % 10 == 0 || i == js_count - 1 {
-                        let pct = ((i + 1) * 40 / total_js_count.max(1)) as u32;
-                        report_progress(
-                            &self.client,
-                            &token,
-                            format!(
-                                "JS Pass 1: Indexing definitions ({}/{} files)",
-                                i + 1,
-                                total_js_count
-                            ),
-                            pct,
-                        )
-                        .await;
-                    }
-                }
-
-                for (i, (uri, scripts)) in html_scripts.iter().enumerate() {
-                    let mut first = true;
-                    for script in scripts {
-                        if first {
-                            self.index.clear_document(uri);
-                            first = false;
-                        }
-                        self.analyzer
-                            .analyze_embedded_script(uri, &script.source, script.line_offset);
-                    }
-                    if i % 10 == 0 || i == html_script_count - 1 {
-                        let pct = ((js_count + i + 1) * 40 / total_js_count.max(1)) as u32;
-                        report_progress(
-                            &self.client,
-                            &token,
-                            format!(
-                                "JS Pass 1: Indexing definitions ({}/{} files)",
-                                js_count + i + 1,
-                                total_js_count
-                            ),
-                            pct,
-                        )
-                        .await;
-                    }
-                }
-
-                // JS Pass 2: Index references
-                report_progress(
-                    &self.client,
-                    &token,
-                    format!("JS Pass 2: Indexing references (0/{} files)", total_js_count),
-                    40,
-                )
-                .await;
-
-                for (i, (uri, content)) in js_files.iter().enumerate() {
-                    self.analyzer
-                        .analyze_document_with_options(uri, content, false);
-                    if i % 10 == 0 || i == js_count - 1 {
-                        let pct = 40 + ((i + 1) * 40 / total_js_count.max(1)) as u32;
-                        report_progress(
-                            &self.client,
-                            &token,
-                            format!(
-                                "JS Pass 2: Indexing references ({}/{} files)",
-                                i + 1,
-                                total_js_count
-                            ),
-                            pct,
-                        )
-                        .await;
-                    }
-                }
-
-                for (i, (uri, scripts)) in html_scripts.iter().enumerate() {
-                    for script in scripts {
-                        self.analyzer
-                            .analyze_embedded_script(uri, &script.source, script.line_offset);
-                    }
-                    if i % 10 == 0 || i == html_script_count - 1 {
-                        let pct =
-                            40 + ((js_count + i + 1) * 40 / total_js_count.max(1)) as u32;
-                        report_progress(
-                            &self.client,
-                            &token,
-                            format!(
-                                "JS Pass 2: Indexing references ({}/{} files)",
-                                js_count + i + 1,
-                                total_js_count
-                            ),
-                            pct,
-                        )
-                        .await;
-                    }
-                }
-
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!(
-                            "Indexed {} JS files + {} HTML scripts",
-                            js_count, html_script_count
-                        ),
-                    )
-                    .await;
-
-                // HTML multi-pass indexing
+                // Pre-parse HTML files (HtmlParser is !Send, must be done on one thread)
                 let mut parser = HtmlParser::new();
                 let parsed_html_files: Vec<_> = html_files
                     .iter()
@@ -353,84 +420,128 @@ impl Backend {
                     .collect();
                 let parsed_count = parsed_html_files.len();
 
-                // HTML Pass 1: ng-controller scopes
+                // Phase 1: JS Pass 1 (definitions) ∥ HTML Pass 1 (ng-controller)
                 report_progress(
                     &self.client,
                     &token,
-                    format!("HTML Pass 1: ng-controller (0/{} files)", parsed_count),
+                    "Phase 1: Indexing definitions + ng-controller".to_string(),
+                    0,
+                )
+                .await;
+
+                std::thread::scope(|s| {
+                    s.spawn(|| {
+                        // JS Pass 1: definitions
+                        for (uri, content) in js_files.iter() {
+                            self.analyzer
+                                .analyze_document_with_options(uri, content, true);
+                        }
+                        for (uri, scripts) in html_scripts.iter() {
+                            let mut first = true;
+                            for script in scripts {
+                                if first {
+                                    self.index.clear_document(uri);
+                                    first = false;
+                                }
+                                self.analyzer.analyze_embedded_script(
+                                    uri,
+                                    &script.source,
+                                    script.line_offset,
+                                );
+                            }
+                        }
+                    });
+                    s.spawn(|| {
+                        // HTML Pass 1: ng-controller scopes
+                        for (uri, content, tree) in &parsed_html_files {
+                            self.html_analyzer
+                                .collect_controller_scopes_only_with_tree(uri, content, tree);
+                        }
+                    });
+                });
+
+                report_progress(
+                    &self.client,
+                    &token,
+                    "Phase 1 complete".to_string(),
+                    40,
+                )
+                .await;
+
+                // Phase 2: JS Pass 2 (references) ∥ HTML Pass 1.5 (ng-include)
+                report_progress(
+                    &self.client,
+                    &token,
+                    "Phase 2: Indexing references + ng-include".to_string(),
+                    40,
+                )
+                .await;
+
+                std::thread::scope(|s| {
+                    s.spawn(|| {
+                        // JS Pass 2: references
+                        for (uri, content) in js_files.iter() {
+                            self.analyzer
+                                .analyze_document_with_options(uri, content, false);
+                        }
+                        for (uri, scripts) in html_scripts.iter() {
+                            for script in scripts {
+                                self.analyzer.analyze_embedded_script(
+                                    uri,
+                                    &script.source,
+                                    script.line_offset,
+                                );
+                            }
+                        }
+                    });
+                    s.spawn(|| {
+                        // HTML Pass 1.5: ng-include bindings
+                        for (uri, content, tree) in &parsed_html_files {
+                            self.html_analyzer
+                                .collect_ng_include_bindings_with_tree(uri, content, tree);
+                        }
+                    });
+                });
+
+                report_progress(
+                    &self.client,
+                    &token,
+                    "Phase 2 complete".to_string(),
                     80,
                 )
                 .await;
 
-                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
-                    self.html_analyzer
-                        .collect_controller_scopes_only_with_tree(uri, content, tree);
-                    if i % 10 == 0 || i == parsed_count - 1 {
-                        let pct = 80 + ((i + 1) * 4 / parsed_count.max(1)) as u32;
-                        report_progress(
-                            &self.client,
-                            &token,
-                            format!(
-                                "HTML Pass 1: ng-controller ({}/{} files)",
-                                i + 1,
-                                parsed_count
-                            ),
-                            pct,
-                        )
-                        .await;
-                    }
-                }
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "Indexed {} JS files + {} HTML scripts",
+                            js_count, html_script_count
+                        ),
+                    )
+                    .await;
 
-                // HTML Pass 1.5: ng-include bindings
+                // Phase 3: HTML Pass 1.6 (ng-view) + HTML Pass 2 (form bindings)
                 report_progress(
                     &self.client,
                     &token,
-                    format!("HTML Pass 1.5: ng-include (0/{} files)", parsed_count),
-                    84,
+                    format!("Phase 3: ng-view + form bindings (0/{} files)", parsed_count),
+                    80,
                 )
                 .await;
 
-                for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
-                    self.html_analyzer
-                        .collect_ng_include_bindings_with_tree(uri, content, tree);
-                    if i % 10 == 0 || i == parsed_count - 1 {
-                        let pct = 84 + ((i + 1) * 4 / parsed_count.max(1)) as u32;
-                        report_progress(
-                            &self.client,
-                            &token,
-                            format!(
-                                "HTML Pass 1.5: ng-include ({}/{} files)",
-                                i + 1,
-                                parsed_count
-                            ),
-                            pct,
-                        )
-                        .await;
-                    }
-                }
-
-                // HTML Pass 1.6: ng-view inheritance
                 self.index.templates.apply_all_ng_view_inheritances();
-
-                // HTML Pass 2: form bindings
-                report_progress(
-                    &self.client,
-                    &token,
-                    format!("HTML Pass 2: form bindings (0/{} files)", parsed_count),
-                    88,
-                )
-                .await;
 
                 for (i, (uri, content, tree)) in parsed_html_files.iter().enumerate() {
                     self.html_analyzer
                         .collect_form_bindings_only_with_tree(uri, content, tree);
                     if i % 10 == 0 || i == parsed_count - 1 {
-                        let pct = 88 + ((i + 1) * 5 / parsed_count.max(1)) as u32;
+                        let pct = 80 + ((i + 1) * 10 / parsed_count.max(1)) as u32;
                         report_progress(
                             &self.client,
                             &token,
                             format!(
-                                "HTML Pass 2: form bindings ({}/{} files)",
+                                "Phase 3: ng-view + form bindings ({}/{} files)",
                                 i + 1,
                                 parsed_count
                             ),
@@ -440,12 +551,12 @@ impl Backend {
                     }
                 }
 
-                // HTML Pass 3: references
+                // Phase 4: HTML Pass 3 (references)
                 report_progress(
                     &self.client,
                     &token,
-                    format!("HTML Pass 3: references (0/{} files)", parsed_count),
-                    93,
+                    format!("Phase 4: HTML references (0/{} files)", parsed_count),
+                    90,
                 )
                 .await;
 
@@ -453,12 +564,12 @@ impl Backend {
                     self.html_analyzer
                         .analyze_document_references_only_with_tree(uri, content, tree);
                     if i % 10 == 0 || i == parsed_count - 1 {
-                        let pct = 93 + ((i + 1) * 7 / parsed_count.max(1)) as u32;
+                        let pct = 90 + ((i + 1) * 10 / parsed_count.max(1)) as u32;
                         report_progress(
                             &self.client,
                             &token,
                             format!(
-                                "HTML Pass 3: references ({}/{} files)",
+                                "Phase 4: HTML references ({}/{} files)",
                                 i + 1,
                                 parsed_count
                             ),
@@ -537,17 +648,21 @@ impl Backend {
             })
             .collect();
 
-        // Pass 1
-        for (uri, content, tree) in &parsed_html_files {
-            self.html_analyzer
-                .collect_controller_scopes_only_with_tree(uri, content, tree);
-        }
-
-        // Pass 1.5
-        for (uri, content, tree) in &parsed_html_files {
-            self.html_analyzer
-                .collect_ng_include_bindings_with_tree(uri, content, tree);
-        }
+        // Pass 1 (ng-controller) ∥ Pass 1.5 (ng-include) — parallel
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for (uri, content, tree) in &parsed_html_files {
+                    self.html_analyzer
+                        .collect_controller_scopes_only_with_tree(uri, content, tree);
+                }
+            });
+            s.spawn(|| {
+                for (uri, content, tree) in &parsed_html_files {
+                    self.html_analyzer
+                        .collect_ng_include_bindings_with_tree(uri, content, tree);
+                }
+            });
+        });
 
         // Pass 1.6
         self.index.templates.apply_all_ng_view_inheritances();
