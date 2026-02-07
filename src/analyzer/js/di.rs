@@ -364,7 +364,7 @@ impl AngularJsAnalyzer {
             // ES6 class の場合はconstructorを取得
             "class_declaration" | "class" => self.get_constructor_from_class(node, source),
             "identifier" => {
-                // 変数参照の場合は関数宣言またはclass宣言を探す
+                // 識別子の場合は実体を解決して中身を見る
                 let func_name = self.node_text(node, source);
                 let root = {
                     let mut current = node;
@@ -373,11 +373,15 @@ impl AngularJsAnalyzer {
                     }
                     current
                 };
-                // まず関数宣言を探す
+                // 1. 変数宣言の値を探して再帰的に処理
+                if let Some(value_node) = self.find_variable_value_for_di(root, source, &func_name) {
+                    return self.find_function_body_range(value_node, source);
+                }
+                // 2. 関数宣言を探す
                 if let Some(func_decl) = self.find_function_declaration(root, source, &func_name) {
                     Some(func_decl)
                 } else {
-                    // 次にclass宣言を探してconstructorを返す
+                    // 3. class宣言を探してconstructorを返す
                     self.find_class_declaration(root, source, &func_name)
                         .and_then(|class_decl| self.get_constructor_from_class(class_decl, source))
                 }
