@@ -104,6 +104,22 @@ impl DiagnosticsHandler {
                 continue;
             }
 
+            // 同一ファイル内での参照があるかチェック
+            let is_referenced_in_same_js = js_refs.iter().any(|r| r.uri == *uri);
+
+            // 警告メッセージを分岐: 完全に未参照か、同一ファイル内でのみ参照されているか
+            let message = if is_referenced_in_same_js {
+                format!(
+                    "'{}' is defined but not used in HTML templates or other controllers",
+                    property_name
+                )
+            } else {
+                format!(
+                    "'{}' is defined but never referenced",
+                    property_name
+                )
+            };
+
             // 未使用の場合は警告を追加
             diagnostics.push(Diagnostic {
                 range: Range {
@@ -120,10 +136,7 @@ impl DiagnosticsHandler {
                 code: None,
                 code_description: None,
                 source: Some("angularjs-lsp".to_string()),
-                message: format!(
-                    "'{}' is defined but not used in HTML templates or other controllers",
-                    property_name
-                ),
+                message,
                 related_information: None,
                 tags: Some(vec![DiagnosticTag::UNNECESSARY]),
                 data: None,
