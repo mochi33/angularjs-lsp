@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 
 use transport::{LspReader, LspWriter};
 
-/// typescript-language-server へのプロキシ
+/// Proxy to typescript-language-server
 pub struct TsProxy {
     writer: Arc<Mutex<LspWriter>>,
     pending_requests: Arc<DashMap<i64, oneshot::Sender<Value>>>,
@@ -23,7 +23,6 @@ pub struct TsProxy {
 }
 
 impl TsProxy {
-    /// typescript-language-server を起動してプロキシを初期化
     pub async fn start(root_uri: Option<&Url>) -> Option<Self> {
         let tsserver_path = find_tsserver()?;
 
@@ -42,7 +41,8 @@ impl TsProxy {
 
         let writer = Arc::new(Mutex::new(LspWriter::new(stdin)));
         let mut reader = LspReader::new(stdout);
-        let pending_requests: Arc<DashMap<i64, oneshot::Sender<Value>>> = Arc::new(DashMap::new());
+        let pending_requests: Arc<DashMap<i64, oneshot::Sender<Value>>> =
+            Arc::new(DashMap::new());
 
         let proxy = Self {
             writer: Arc::clone(&writer),
@@ -51,7 +51,7 @@ impl TsProxy {
             _child: child,
         };
 
-        // レスポンス受信タスクを起動
+        // Spawn response reader task
         let pending_clone = Arc::clone(&pending_requests);
         tokio::spawn(async move {
             loop {
@@ -62,7 +62,6 @@ impl TsProxy {
                                 let _ = sender.send(response);
                             }
                         }
-                        // 通知メッセージ（idなし）は無視
                     }
                     Err(e) => {
                         error!("Error reading from tsserver: {}", e);
@@ -72,7 +71,7 @@ impl TsProxy {
             }
         });
 
-        // initialize リクエストを送信
+        // Send initialize request
         let root_uri_str = root_uri.map(|u| u.to_string());
         let init_params = json!({
             "processId": std::process::id(),
@@ -99,14 +98,12 @@ impl TsProxy {
             return None;
         }
 
-        // initialized 通知を送信
         proxy.send_notification("initialized", json!({})).await;
 
         info!("typescript-language-server initialized successfully");
         Some(proxy)
     }
 
-    /// リクエストを送信してレスポンスを待機
     async fn send_request(&self, method: &str, params: Value) -> Option<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let request = json!({
@@ -127,7 +124,6 @@ impl TsProxy {
             }
         }
 
-        // タイムアウト付きで待機（大きなファイルでも対応できるよう30秒）
         match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
             Ok(Ok(response)) => Some(response),
             _ => {
@@ -137,7 +133,6 @@ impl TsProxy {
         }
     }
 
-    /// 通知を送信
     async fn send_notification(&self, method: &str, params: Value) {
         let notification = json!({
             "jsonrpc": "2.0",
@@ -149,7 +144,6 @@ impl TsProxy {
         let _ = writer.write_message(&notification).await;
     }
 
-    /// ドキュメントを開いたことを通知
     pub async fn did_open(&self, uri: &Url, text: &str) {
         let params = json!({
             "textDocument": {
@@ -162,7 +156,6 @@ impl TsProxy {
         self.send_notification("textDocument/didOpen", params).await;
     }
 
-    /// ドキュメントの変更を通知
     pub async fn did_change(&self, uri: &Url, text: &str, version: i32) {
         let params = json!({
             "textDocument": {
@@ -171,20 +164,20 @@ impl TsProxy {
             },
             "contentChanges": [{ "text": text }]
         });
-        self.send_notification("textDocument/didChange", params).await;
+        self.send_notification("textDocument/didChange", params)
+            .await;
     }
 
-    /// ドキュメントを閉じたことを通知
     pub async fn did_close(&self, uri: &Url) {
         let params = json!({
             "textDocument": {
                 "uri": uri.to_string()
             }
         });
-        self.send_notification("textDocument/didClose", params).await;
+        self.send_notification("textDocument/didClose", params)
+            .await;
     }
 
-    /// ホバー情報を取得
     pub async fn hover(&self, params: &HoverParams) -> Option<Hover> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = &params.text_document_position_params.position;
@@ -194,7 +187,9 @@ impl TsProxy {
             "position": { "line": pos.line, "character": pos.character }
         });
 
-        let response = self.send_request("textDocument/hover", request_params).await?;
+        let response = self
+            .send_request("textDocument/hover", request_params)
+            .await?;
         let result = response.get("result")?;
 
         if result.is_null() {
@@ -204,8 +199,10 @@ impl TsProxy {
         serde_json::from_value(result.clone()).ok()
     }
 
-    /// 定義へジャンプ
-    pub async fn goto_definition(&self, params: &GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
+    pub async fn goto_definition(
+        &self,
+        params: &GotoDefinitionParams,
+    ) -> Option<GotoDefinitionResponse> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = &params.text_document_position_params.position;
 
@@ -214,7 +211,9 @@ impl TsProxy {
             "position": { "line": pos.line, "character": pos.character }
         });
 
-        let response = self.send_request("textDocument/definition", request_params).await?;
+        let response = self
+            .send_request("textDocument/definition", request_params)
+            .await?;
         let result = response.get("result")?;
 
         if result.is_null() {
@@ -224,7 +223,6 @@ impl TsProxy {
         serde_json::from_value(result.clone()).ok()
     }
 
-    /// 参照を検索
     pub async fn references(&self, params: &ReferenceParams) -> Option<Vec<Location>> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = &params.text_document_position.position;
@@ -235,7 +233,9 @@ impl TsProxy {
             "context": { "includeDeclaration": params.context.include_declaration }
         });
 
-        let response = self.send_request("textDocument/references", request_params).await?;
+        let response = self
+            .send_request("textDocument/references", request_params)
+            .await?;
         let result = response.get("result")?;
 
         if result.is_null() {
@@ -245,7 +245,6 @@ impl TsProxy {
         serde_json::from_value(result.clone()).ok()
     }
 
-    /// 補完候補を取得
     pub async fn completion(&self, params: &CompletionParams) -> Option<CompletionResponse> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = &params.text_document_position.position;
@@ -255,7 +254,9 @@ impl TsProxy {
             "position": { "line": pos.line, "character": pos.character }
         });
 
-        let response = self.send_request("textDocument/completion", request_params).await?;
+        let response = self
+            .send_request("textDocument/completion", request_params)
+            .await?;
         let result = response.get("result")?;
 
         if result.is_null() {
@@ -265,7 +266,6 @@ impl TsProxy {
         serde_json::from_value(result.clone()).ok()
     }
 
-    /// リネーム
     pub async fn rename(&self, params: &RenameParams) -> Option<WorkspaceEdit> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = &params.text_document_position.position;
@@ -276,7 +276,9 @@ impl TsProxy {
             "newName": params.new_name
         });
 
-        let response = self.send_request("textDocument/rename", request_params).await?;
+        let response = self
+            .send_request("textDocument/rename", request_params)
+            .await?;
         let result = response.get("result")?;
 
         if result.is_null() {
@@ -286,7 +288,6 @@ impl TsProxy {
         serde_json::from_value(result.clone()).ok()
     }
 
-    /// シグネチャヘルプを取得
     pub async fn signature_help(&self, params: &SignatureHelpParams) -> Option<SignatureHelp> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = &params.text_document_position_params.position;
@@ -296,7 +297,9 @@ impl TsProxy {
             "position": { "line": pos.line, "character": pos.character }
         });
 
-        let response = self.send_request("textDocument/signatureHelp", request_params).await?;
+        let response = self
+            .send_request("textDocument/signatureHelp", request_params)
+            .await?;
         let result = response.get("result")?;
 
         if result.is_null() {
@@ -306,23 +309,23 @@ impl TsProxy {
         serde_json::from_value(result.clone()).ok()
     }
 
-    /// シャットダウン
     pub async fn shutdown(&self) {
         let _ = self.send_request("shutdown", json!(null)).await;
         self.send_notification("exit", json!(null)).await;
     }
 }
 
-/// PATH から typescript-language-server を検索
+/// Find typescript-language-server in PATH
 fn find_tsserver() -> Option<PathBuf> {
-    // which コマンドで検索
     let output = std::process::Command::new("which")
         .arg("typescript-language-server")
         .output()
         .ok()?;
 
     if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let path = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string();
         if !path.is_empty() {
             return Some(PathBuf::from(path));
         }

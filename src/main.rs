@@ -1,11 +1,15 @@
+#![allow(dead_code)]
+
 mod analyzer;
 mod cache;
 mod config;
-mod diagnostics;
-mod handlers;
+mod error;
+mod handler;
 mod index;
+mod model;
 mod server;
 mod ts_proxy;
+mod util;
 
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;

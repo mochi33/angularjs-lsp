@@ -1,6 +1,8 @@
-mod loader;
-mod metadata;
-mod writer;
+pub mod error;
+pub mod loader;
+pub mod metadata;
+pub mod schema;
+pub mod writer;
 
 pub use loader::CacheLoader;
 pub use metadata::FileMetadata;

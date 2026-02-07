@@ -4,7 +4,7 @@ use std::io;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 
-/// LSP書き込み用トランスポート
+/// LSP write transport
 pub struct LspWriter {
     stdin: ChildStdin,
 }
@@ -14,7 +14,6 @@ impl LspWriter {
         Self { stdin }
     }
 
-    /// LSPメッセージを送信する
     pub async fn write_message(&mut self, msg: &serde_json::Value) -> io::Result<()> {
         let content = serde_json::to_string(msg)?;
         let content_bytes = content.as_bytes();
@@ -28,7 +27,7 @@ impl LspWriter {
     }
 }
 
-/// LSP読み取り用トランスポート
+/// LSP read transport
 pub struct LspReader {
     stdout: BufReader<ChildStdout>,
 }
@@ -40,12 +39,10 @@ impl LspReader {
         }
     }
 
-    /// LSPメッセージを受信する
     pub async fn read_message(&mut self) -> io::Result<serde_json::Value> {
         let mut headers: HashMap<String, String> = HashMap::new();
         let mut line = String::new();
 
-        // ヘッダーを読み取る
         loop {
             line.clear();
             self.stdout.read_line(&mut line).await?;
@@ -59,14 +56,12 @@ impl LspReader {
             }
         }
 
-        // Content-Lengthを取得
         let content_length: usize = headers
             .get("content-length")
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing Content-Length"))?
             .parse()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid Content-Length"))?;
 
-        // ボディを読み取る
         let mut buffer = vec![0u8; content_length];
         self.stdout.read_exact(&mut buffer).await?;
 

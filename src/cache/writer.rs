@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
 use tracing::{debug, info};
 
-use crate::index::SymbolIndex;
+use crate::index::Index;
 
-use super::loader::{CachedGlobalData, CachedSymbolData};
 use super::metadata::{CacheMetadata, FileMetadata};
+use super::schema::{CachedGlobalData, CachedSymbolData};
 
-/// キャッシュライター
+/// Cache writer
 pub struct CacheWriter {
     cache_dir: PathBuf,
 }
@@ -20,7 +21,6 @@ impl CacheWriter {
         }
     }
 
-    /// キャッシュディレクトリを作成
     fn ensure_cache_dir(&self) -> std::io::Result<()> {
         if !self.cache_dir.exists() {
             fs::create_dir_all(&self.cache_dir)?;
@@ -28,7 +28,6 @@ impl CacheWriter {
         Ok(())
     }
 
-    /// 空のCachedSymbolDataを作成
     fn empty_cached_data(uri: String) -> CachedSymbolData {
         CachedSymbolData {
             uri,
@@ -44,95 +43,133 @@ impl CacheWriter {
         }
     }
 
-    /// インデックス全体をキャッシュに保存
+    /// Save the entire index to cache
     pub fn save_full(
         &self,
-        index: &SymbolIndex,
+        index: &Index,
         file_metadata: &HashMap<PathBuf, FileMetadata>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.ensure_cache_dir()?;
 
-        // メタデータを作成
+        // Save metadata
         let mut metadata = CacheMetadata::new();
         for (path, meta) in file_metadata {
-            metadata.files.insert(path.to_string_lossy().to_string(), meta.clone());
+            metadata
+                .files
+                .insert(path.to_string_lossy().to_string(), meta.clone());
         }
 
-        // メタデータを保存
         let metadata_path = self.cache_dir.join("metadata.json");
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
         fs::write(&metadata_path, metadata_json)?;
 
-        // シンボルデータを収集してファイル別にグループ化
+        // Collect symbol data grouped by file
         let mut file_data: HashMap<String, CachedSymbolData> = HashMap::new();
 
-        // 定義を収集
-        for symbol in index.get_all_definitions() {
+        for symbol in index.definitions.get_all_definitions() {
             let uri_str = symbol.uri.to_string();
-            file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).definitions.push(symbol);
+            file_data
+                .entry(uri_str.clone())
+                .or_insert_with(|| Self::empty_cached_data(uri_str))
+                .definitions
+                .push(symbol);
         }
 
-        // 参照を収集（定義があるシンボルの参照のみ）
-        for symbol in index.get_all_definitions() {
-            for reference in index.get_references(&symbol.name) {
+        for symbol in index.definitions.get_all_definitions() {
+            for reference in index.definitions.get_references(&symbol.name) {
                 let uri_str = reference.uri.to_string();
-                file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).references.push(reference);
+                file_data
+                    .entry(uri_str.clone())
+                    .or_insert_with(|| Self::empty_cached_data(uri_str))
+                    .references
+                    .push(reference);
             }
         }
 
-        // コントローラースコープを収集
-        for scope in index.get_all_controller_scopes() {
+        for scope in index.controllers.get_all_controller_scopes() {
             let uri_str = scope.uri.to_string();
-            file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).controller_scopes.push(scope);
+            file_data
+                .entry(uri_str.clone())
+                .or_insert_with(|| Self::empty_cached_data(uri_str))
+                .controller_scopes
+                .push(scope);
         }
 
-        // HTML関連データを収集
-        for scope in index.get_all_html_controller_scopes_for_cache() {
+        for scope in index.controllers.get_all_html_controller_scopes_for_cache() {
             let uri_str = scope.uri.to_string();
-            file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).html_controller_scopes.push(scope);
+            file_data
+                .entry(uri_str.clone())
+                .or_insert_with(|| Self::empty_cached_data(uri_str))
+                .html_controller_scopes
+                .push(scope);
         }
 
-        for reference in index.get_all_html_scope_references_for_cache() {
+        for reference in index.html.get_all_html_scope_references_for_cache() {
             let uri_str = reference.uri.to_string();
-            file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).html_scope_references.push(reference);
+            file_data
+                .entry(uri_str.clone())
+                .or_insert_with(|| Self::empty_cached_data(uri_str))
+                .html_scope_references
+                .push(reference);
         }
 
-        for variable in index.get_all_html_local_variables_for_cache() {
+        for variable in index.html.get_all_html_local_variables_for_cache() {
             let uri_str = variable.uri.to_string();
-            file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).html_local_variables.push(variable);
+            file_data
+                .entry(uri_str.clone())
+                .or_insert_with(|| Self::empty_cached_data(uri_str))
+                .html_local_variables
+                .push(variable);
         }
 
-        for reference in index.get_all_html_local_variable_references_for_cache() {
+        for reference in index.html.get_all_html_local_variable_references_for_cache() {
             let uri_str = reference.uri.to_string();
-            file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).html_local_variable_references.push(reference);
+            file_data
+                .entry(uri_str.clone())
+                .or_insert_with(|| Self::empty_cached_data(uri_str))
+                .html_local_variable_references
+                .push(reference);
         }
 
-        for binding in index.get_all_html_form_bindings_for_cache() {
+        for binding in index.html.get_all_html_form_bindings_for_cache() {
             let uri_str = binding.uri.to_string();
-            file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).html_form_bindings.push(binding);
+            file_data
+                .entry(uri_str.clone())
+                .or_insert_with(|| Self::empty_cached_data(uri_str))
+                .html_form_bindings
+                .push(binding);
         }
 
-        for reference in index.get_all_html_directive_references_for_cache() {
+        for reference in index.html.get_all_html_directive_references_for_cache() {
             let uri_str = reference.uri.to_string();
-            file_data.entry(uri_str.clone()).or_insert_with(|| Self::empty_cached_data(uri_str)).html_directive_references.push(reference);
+            file_data
+                .entry(uri_str.clone())
+                .or_insert_with(|| Self::empty_cached_data(uri_str))
+                .html_directive_references
+                .push(reference);
         }
 
-        // シンボルデータを保存
         let cached_data: Vec<CachedSymbolData> = file_data.into_values().collect();
         let data = bincode::serialize(&cached_data)?;
         let data_path = self.cache_dir.join("symbols.bin");
-        fs::write(&data_path, data)?;
+        fs::write(&data_path, &data)?;
 
-        // グローバルデータを保存
+        // Save global data
         self.save_global_data(index)?;
 
-        let html_scopes: usize = cached_data.iter().map(|e| e.html_controller_scopes.len()).sum();
-        let html_refs: usize = cached_data.iter().map(|e| e.html_scope_references.len()).sum();
+        let html_scopes: usize = cached_data
+            .iter()
+            .map(|e| e.html_controller_scopes.len())
+            .sum();
+        let html_refs: usize = cached_data
+            .iter()
+            .map(|e| e.html_scope_references.len())
+            .sum();
 
         info!(
             "Saved cache: {} files, {} bytes, {} html_scopes, {} html_refs",
             metadata.files.len(),
-            fs::metadata(&data_path).map(|m| m.len()).unwrap_or(0),
+            data.len(),
             html_scopes,
             html_refs
         );
@@ -140,11 +177,10 @@ impl CacheWriter {
         Ok(())
     }
 
-    /// グローバルデータを保存
-    fn save_global_data(&self, index: &SymbolIndex) -> Result<(), Box<dyn std::error::Error>> {
+    fn save_global_data(&self, index: &Index) -> Result<(), Box<dyn std::error::Error>> {
         let global_data = CachedGlobalData {
-            template_bindings: index.get_all_template_bindings(),
-            ng_include_bindings: index.get_all_ng_include_bindings(),
+            template_bindings: index.templates.get_all_template_bindings(),
+            ng_include_bindings: index.templates.get_all_ng_include_bindings(),
         };
 
         let data = bincode::serialize(&global_data)?;

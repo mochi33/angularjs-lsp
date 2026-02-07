@@ -1,87 +1,23 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
 use tower_lsp::lsp_types::Url;
 use tracing::{debug, info, warn};
 
-use crate::index::{
-    ControllerScope, HtmlControllerScope, HtmlDirectiveReference, HtmlFormBinding,
-    HtmlLocalVariable, HtmlLocalVariableReference, HtmlScopeReference, NgIncludeBinding,
-    Symbol, SymbolIndex, SymbolReference, TemplateBinding,
-};
+use crate::index::Index;
 
+use super::error::CacheError;
 use super::metadata::{CacheMetadata, CACHE_VERSION};
+use super::schema::{CachedGlobalData, CachedSymbolData};
 
-/// キャッシュ検証結果
+/// Cache validation result
 pub struct CacheValidation {
-    /// キャッシュが有効なファイル（再解析不要）
     pub valid_files: HashSet<PathBuf>,
-    /// キャッシュが無効なファイル（再解析必要）
     pub invalid_files: HashSet<PathBuf>,
 }
 
-/// キャッシュエラー
-#[derive(Debug)]
-pub enum CacheError {
-    Io(std::io::Error),
-    Deserialize(String),
-    VersionMismatch,
-    NotFound,
-}
-
-impl From<std::io::Error> for CacheError {
-    fn from(e: std::io::Error) -> Self {
-        CacheError::Io(e)
-    }
-}
-
-impl From<bincode::Error> for CacheError {
-    fn from(e: bincode::Error) -> Self {
-        CacheError::Deserialize(e.to_string())
-    }
-}
-
-/// キャッシュされたシンボルデータ
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct CachedSymbolData {
-    /// ファイルURIの文字列表現
-    pub uri: String,
-    /// シンボル定義
-    pub definitions: Vec<Symbol>,
-    /// シンボル参照
-    pub references: Vec<SymbolReference>,
-    /// コントローラースコープ
-    pub controller_scopes: Vec<ControllerScope>,
-    /// HTML内のng-controllerスコープ
-    #[serde(default)]
-    pub html_controller_scopes: Vec<HtmlControllerScope>,
-    /// HTML内のスコープ参照
-    #[serde(default)]
-    pub html_scope_references: Vec<HtmlScopeReference>,
-    /// HTML内のローカル変数定義
-    #[serde(default)]
-    pub html_local_variables: Vec<HtmlLocalVariable>,
-    /// HTML内のローカル変数参照
-    #[serde(default)]
-    pub html_local_variable_references: Vec<HtmlLocalVariableReference>,
-    /// HTML内のフォームバインディング
-    #[serde(default)]
-    pub html_form_bindings: Vec<HtmlFormBinding>,
-    /// HTML内のディレクティブ参照
-    #[serde(default)]
-    pub html_directive_references: Vec<HtmlDirectiveReference>,
-}
-
-/// キャッシュされたグローバルデータ（ファイルに依存しないデータ）
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct CachedGlobalData {
-    /// テンプレートバインディング（template_path -> binding）
-    pub template_bindings: Vec<TemplateBinding>,
-    /// ng-includeバインディング
-    pub ng_include_bindings: Vec<(String, NgIncludeBinding)>,
-}
-
-/// キャッシュローダー
+/// Cache loader
 pub struct CacheLoader {
     cache_dir: PathBuf,
 }
@@ -93,13 +29,11 @@ impl CacheLoader {
         }
     }
 
-    /// キャッシュディレクトリのパスを取得
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }
 
-    /// キャッシュの有効性を検証
-    /// files: (path, mtime, size) のリスト
+    /// Validate cache against current file metadata
     pub fn validate(
         &self,
         files: &[(PathBuf, u64, u64)],
@@ -113,7 +47,6 @@ impl CacheLoader {
         let metadata: CacheMetadata = serde_json::from_str(&metadata_content)
             .map_err(|e| CacheError::Deserialize(e.to_string()))?;
 
-        // バージョン互換性チェック
         if !metadata.is_compatible() {
             warn!(
                 "Cache version mismatch: {} (expected {})",
@@ -146,10 +79,10 @@ impl CacheLoader {
         })
     }
 
-    /// キャッシュからインデックスを復元
+    /// Load cached data into the index
     pub fn load(
         &self,
-        index: &SymbolIndex,
+        index: &Index,
         valid_files: &HashSet<PathBuf>,
     ) -> Result<(), CacheError> {
         let data_path = self.cache_dir.join("symbols.bin");
@@ -164,8 +97,10 @@ impl CacheLoader {
         let total_definitions: usize = cached_data.iter().map(|e| e.definitions.len()).sum();
         let total_references: usize = cached_data.iter().map(|e| e.references.len()).sum();
         let total_scopes: usize = cached_data.iter().map(|e| e.controller_scopes.len()).sum();
-        let total_html_scopes: usize = cached_data.iter().map(|e| e.html_controller_scopes.len()).sum();
-        let total_html_refs: usize = cached_data.iter().map(|e| e.html_scope_references.len()).sum();
+        let total_html_scopes: usize =
+            cached_data.iter().map(|e| e.html_controller_scopes.len()).sum();
+        let total_html_refs: usize =
+            cached_data.iter().map(|e| e.html_scope_references.len()).sum();
         info!(
             "Cache contains {} entries, {} definitions, {} references, {} scopes, {} html_scopes, {} html_refs",
             total_entries, total_definitions, total_references, total_scopes, total_html_scopes, total_html_refs
@@ -176,7 +111,6 @@ impl CacheLoader {
         let mut skipped_entries = 0;
 
         for entry in cached_data {
-            // URIをパスに変換して有効性チェック
             if let Ok(uri) = Url::parse(&entry.uri) {
                 if let Ok(path) = uri.to_file_path() {
                     if !valid_files.contains(&path) {
@@ -189,48 +123,44 @@ impl CacheLoader {
             loaded_definitions += entry.definitions.len();
             loaded_html_scopes += entry.html_controller_scopes.len();
 
-            // 定義を追加
             for symbol in entry.definitions {
-                index.add_definition(symbol);
+                index.definitions.add_definition(symbol);
             }
 
-            // 参照を追加
             for reference in entry.references {
-                index.add_reference(reference);
+                index.definitions.add_reference(reference);
             }
 
-            // コントローラースコープを追加
             for scope in entry.controller_scopes {
-                index.add_controller_scope(scope);
+                index.controllers.add_controller_scope(scope);
             }
 
-            // HTML関連データを追加
             for scope in entry.html_controller_scopes {
-                index.add_html_controller_scope(scope);
+                index.controllers.add_html_controller_scope(scope);
             }
 
             for reference in entry.html_scope_references {
-                index.add_html_scope_reference(reference);
+                index.html.add_html_scope_reference(reference);
             }
 
             for variable in entry.html_local_variables {
-                index.add_html_local_variable(variable);
+                index.html.add_html_local_variable(variable);
             }
 
             for reference in entry.html_local_variable_references {
-                index.add_html_local_variable_reference(reference);
+                index.html.add_html_local_variable_reference(reference);
             }
 
             for binding in entry.html_form_bindings {
-                index.add_html_form_binding(binding);
+                index.html.add_html_form_binding(binding);
             }
 
             for reference in entry.html_directive_references {
-                index.add_html_directive_reference(reference);
+                index.html.add_html_directive_reference(reference);
             }
         }
 
-        // グローバルデータを復元
+        // Restore global data
         self.load_global_data(index)?;
 
         info!(
@@ -240,8 +170,7 @@ impl CacheLoader {
         Ok(())
     }
 
-    /// グローバルデータをロード
-    fn load_global_data(&self, index: &SymbolIndex) -> Result<(), CacheError> {
+    fn load_global_data(&self, index: &Index) -> Result<(), CacheError> {
         let global_path = self.cache_dir.join("global.bin");
         if !global_path.exists() {
             debug!("No global cache file found");
@@ -251,19 +180,15 @@ impl CacheLoader {
         let data = fs::read(&global_path)?;
         let global_data: CachedGlobalData = bincode::deserialize(&data)?;
 
-        // テンプレートバインディングを復元
         for binding in global_data.template_bindings {
-            index.add_template_binding(binding);
+            index.templates.add_template_binding(binding);
         }
 
-        // ng-includeバインディングを復元
         for (key, binding) in global_data.ng_include_bindings {
-            index.add_ng_include_binding_with_key(key, binding);
+            index.templates.add_ng_include_binding_with_key(key, binding);
         }
 
-        info!(
-            "Loaded global data from cache"
-        );
+        info!("Loaded global data from cache");
         Ok(())
     }
 }
