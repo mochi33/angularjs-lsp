@@ -94,24 +94,24 @@ angular.module('app', []).service('ThatSvc', [function() {
 
 ---
 
-### 7. component controller内の `ctrl = this` プロパティが追跡されない
+### ~~7. component controller内の `ctrl = this` プロパティが追跡されない~~ (対応済み)
 
-コンポーネントの controller 関数内でのプロパティ定義やライフサイクルフックが未対応。
+~~コンポーネントの controller 関数内でのプロパティ定義やライフサイクルフックが未対応。~~
+
+**対応済み**: `register_component_symbol()` 内で config オブジェクトの `controller` プロパティを検出し、`extract_controller_methods()` を呼び出してコンポーネント名をプレフィックスとした Method として登録するようにした。DI配列記法・直接関数渡しの両方に対応。
 
 ```javascript
 angular.module('app', []).component('lcComp', {
     template: '<div></div>',
     controller: function() {
         var ctrl = this;
-        ctrl.data = [];                        // lcComp.data として認識されない
-        ctrl.$onInit = function() {};          // ライフサイクルフック認識されない
-        ctrl.$onDestroy = function() {};
-        ctrl.$onChanges = function(changes) {};
+        ctrl.data = [];                        // ✓ lcComp.data として認識される
+        ctrl.$onInit = function() {};          // ✓ lcComp.$onInit として認識される
+        ctrl.$onDestroy = function() {};       // ✓ lcComp.$onDestroy として認識される
+        ctrl.$onChanges = function(changes) {}; // ✓ lcComp.$onChanges として認識される
     }
 });
 ```
-
-**対応案**: component の controller 関数内での `this` / エイリアスへのプロパティ代入を、コンポーネント名をプレフィックスとした Method として登録する。
 
 ---
 

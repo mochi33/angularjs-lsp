@@ -662,6 +662,8 @@ impl AngularJsAnalyzer {
             // config オブジェクトから templateUrl, bindings を抽出
             if config.kind() == "object" {
                 self.extract_component_template_url(config, source, uri, Some(component_name));
+                // controller プロパティからthis/aliasメソッドを抽出
+                self.extract_component_controller_methods(config, source, uri, component_name);
             }
             (config.start_position(), config.end_position())
         } else {
@@ -692,6 +694,36 @@ impl AngularJsAnalyzer {
         }
 
         self.index.definitions.add_definition(builder.build());
+    }
+
+    /// コンポーネント設定オブジェクトの controller プロパティから this/alias メソッドを抽出する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// .component('lcComp', {
+    ///     controller: function() {
+    ///         var ctrl = this;
+    ///         ctrl.data = [];           // lcComp.data として登録
+    ///         ctrl.$onInit = function() {}; // lcComp.$onInit として登録
+    ///     }
+    /// })
+    /// ```
+    fn extract_component_controller_methods(&self, config_node: Node, source: &str, uri: &Url, component_name: &str) {
+        let mut cursor = config_node.walk();
+        for child in config_node.children(&mut cursor) {
+            if child.kind() == "pair" {
+                if let Some(key) = child.child_by_field_name("key") {
+                    let key_text = self.node_text(key, source);
+                    let key_name = key_text.trim_matches(|c| c == '"' || c == '\'');
+
+                    if key_name == "controller" {
+                        if let Some(value) = child.child_by_field_name("value") {
+                            self.extract_controller_methods(value, source, uri, component_name);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// コンポーネント設定オブジェクトから templateUrl, controller, controllerAs, bindings を抽出
