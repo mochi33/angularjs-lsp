@@ -582,6 +582,8 @@ angular.module('app', []).component('heroList', {
     let index = analyze_js(source);
     assert!(has_definition(&index, "heroList", SymbolKind::Component),
         "インラインコントローラー付きコンポーネントが認識されるべき");
+    assert!(has_definition(&index, "heroList.$onInit", SymbolKind::Method),
+        "DI配列記法のインラインコントローラー内の$onInitが認識されるべき");
 }
 
 #[test]
@@ -602,6 +604,16 @@ angular.module('app', []).component('lifecycleDemo', {
     let index = analyze_js(source);
     assert!(has_definition(&index, "lifecycleDemo", SymbolKind::Component),
         "ライフサイクルフック付きコンポーネントが認識されるべき");
+    assert!(has_definition(&index, "lifecycleDemo.status", SymbolKind::Method),
+        "コンポーネントコントローラー内のプロパティが認識されるべき");
+    assert!(has_definition(&index, "lifecycleDemo.$onInit", SymbolKind::Method),
+        "コンポーネントの$onInitライフサイクルフックが認識されるべき");
+    assert!(has_definition(&index, "lifecycleDemo.$onDestroy", SymbolKind::Method),
+        "コンポーネントの$onDestroyライフサイクルフックが認識されるべき");
+    assert!(has_definition(&index, "lifecycleDemo.$doCheck", SymbolKind::Method),
+        "コンポーネントの$doCheckライフサイクルフックが認識されるべき");
+    assert!(has_definition(&index, "lifecycleDemo.$postLink", SymbolKind::Method),
+        "コンポーネントの$postLinkライフサイクルフックが認識されるべき");
 }
 
 // ============================================================

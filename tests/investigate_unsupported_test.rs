@@ -248,7 +248,7 @@ angular.module('app', []).service('ThatSvc', [function() {
         assert!(result, "that = this パターンは対応済み");
     }
 
-    // --- 12. component $onInit 等のライフサイクルフック ---
+    // --- 12. component $onInit 等のライフサイクルフック --- (対応済み)
     println!("\n--- 12. component ライフサイクルフック認識 ---");
     {
         let source = r#"
@@ -266,10 +266,18 @@ angular.module('app', []).component('lcComp', {
 });
 "#;
         let index = analyze_js(source);
-        check("ctrl.data (コンポーネント内プロパティ)", has_def(&index, "lcComp.data", SymbolKind::Method));
-        check("ctrl.$onInit (ライフサイクルフック)", has_def(&index, "lcComp.$onInit", SymbolKind::Method));
-        check("ctrl.$onDestroy (ライフサイクルフック)", has_def(&index, "lcComp.$onDestroy", SymbolKind::Method));
-        check("ctrl.$onChanges (ライフサイクルフック)", has_def(&index, "lcComp.$onChanges", SymbolKind::Method));
+        let result_data = has_def(&index, "lcComp.data", SymbolKind::Method);
+        let result_init = has_def(&index, "lcComp.$onInit", SymbolKind::Method);
+        let result_destroy = has_def(&index, "lcComp.$onDestroy", SymbolKind::Method);
+        let result_changes = has_def(&index, "lcComp.$onChanges", SymbolKind::Method);
+        check("ctrl.data (コンポーネント内プロパティ)", result_data);
+        check("ctrl.$onInit (ライフサイクルフック)", result_init);
+        check("ctrl.$onDestroy (ライフサイクルフック)", result_destroy);
+        check("ctrl.$onChanges (ライフサイクルフック)", result_changes);
+        assert!(result_data, "component controller内の ctrl.data は対応済み");
+        assert!(result_init, "component controller内の ctrl.$onInit は対応済み");
+        assert!(result_destroy, "component controller内の ctrl.$onDestroy は対応済み");
+        assert!(result_changes, "component controller内の ctrl.$onChanges は対応済み");
     }
 
     // --- 13. provider の $get メソッド ---
