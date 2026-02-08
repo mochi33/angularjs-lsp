@@ -304,7 +304,10 @@ angular.module('app', []).factory('AuthService', ['$http', '$q', function($http,
     let index = analyze_js(source);
     assert!(has_definition(&index, "AuthService", SymbolKind::Factory),
         "基本的なファクトリーが認識されるべき");
-    // service.xxxはthis.xxxとは異なるパターン - returnオブジェクトのメソッドではないため認識されない可能性あり
+    assert!(has_definition(&index, "AuthService.login", SymbolKind::Method),
+        "var service = {{}}; service.login パターンのメソッドが認識されるべき");
+    assert!(has_definition(&index, "AuthService.logout", SymbolKind::Method),
+        "var service = {{}}; service.logout パターンのメソッドが認識されるべき");
 }
 
 #[test]
@@ -345,6 +348,66 @@ angular.module('app', []).factory('InlineFactory', [function() {
         "インライン関数メソッドが認識されるべき");
     assert!(has_definition(&index, "InlineFactory.method2", SymbolKind::Method),
         "インライン関数メソッドが認識されるべき");
+}
+
+#[test]
+fn test_factory_service_variable_pattern() {
+    // var service = {}; service.xxx = ...; return service; パターン
+    let source = r#"
+angular.module('app', []).factory('SvcA', [function() {
+    var service = {};
+    service.doWork = function() {};
+    service.name = 'test';
+    return service;
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_definition(&index, "SvcA", SymbolKind::Factory),
+        "ファクトリーが認識されるべき");
+    assert!(has_definition(&index, "SvcA.doWork", SymbolKind::Method),
+        "service.doWork がメソッドとして認識されるべき");
+    assert!(has_definition(&index, "SvcA.name", SymbolKind::Method),
+        "service.name がメソッドとして認識されるべき");
+}
+
+#[test]
+fn test_factory_service_variable_pattern_with_di() {
+    // DI依存ありの場合
+    let source = r#"
+angular.module('app', []).factory('DataService', ['$http', '$q', function($http, $q) {
+    var svc = {};
+    svc.fetchAll = function() { return $http.get('/api/data'); };
+    svc.fetchById = function(id) { return $http.get('/api/data/' + id); };
+    svc.apiUrl = '/api/data';
+    return svc;
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_definition(&index, "DataService", SymbolKind::Factory),
+        "DI付きファクトリーが認識されるべき");
+    assert!(has_definition(&index, "DataService.fetchAll", SymbolKind::Method),
+        "svc.fetchAll がメソッドとして認識されるべき");
+    assert!(has_definition(&index, "DataService.fetchById", SymbolKind::Method),
+        "svc.fetchById がメソッドとして認識されるべき");
+    assert!(has_definition(&index, "DataService.apiUrl", SymbolKind::Method),
+        "svc.apiUrl がメソッドとして認識されるべき");
+}
+
+#[test]
+fn test_factory_service_variable_pattern_without_di_array() {
+    // DI配列なし（直接関数渡し）パターン
+    let source = r#"
+angular.module('app', []).factory('SimpleService', function() {
+    var service = {};
+    service.greet = function(name) { return 'Hello ' + name; };
+    return service;
+});
+"#;
+    let index = analyze_js(source);
+    assert!(has_definition(&index, "SimpleService", SymbolKind::Factory),
+        "直接関数渡しファクトリーが認識されるべき");
+    assert!(has_definition(&index, "SimpleService.greet", SymbolKind::Method),
+        "service.greet がメソッドとして認識されるべき");
 }
 
 // ============================================================
