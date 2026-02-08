@@ -63,7 +63,7 @@ impl TemplateStore {
         );
         self.template_bindings.insert(binding_key, normalized_binding);
 
-        if source == BindingSource::RouteProvider {
+        if source == BindingSource::RouteProvider || source == BindingSource::StateProvider {
             let filename = normalized_path
                 .rsplit('/')
                 .next()

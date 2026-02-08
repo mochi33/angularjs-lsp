@@ -46,6 +46,7 @@ impl AngularJsAnalyzer {
                         "open" => self.extract_modal_binding(node, callee, source, uri),
                         "config" | "run" => self.extract_run_config_di(node, source, ctx),
                         "when" | "otherwise" => self.extract_route_when_di(node, source, uri, ctx),
+                        "state" => self.extract_state_provider_di(node, source, uri, ctx),
                         _ => {}
                     }
                 }
@@ -199,6 +200,94 @@ impl AngularJsAnalyzer {
 
                                         let di_scope = DiScope {
                                             component_name: "route".to_string(),
+                                            injected_services: di_info.injected_services,
+                                            body_start_line: body_start,
+                                            body_end_line: body_end,
+                                            has_scope: di_info.has_scope,
+                                            has_root_scope: di_info.has_root_scope,
+                                        };
+                                        ctx.push_scope(di_scope);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `$stateProvider.state()` (ui-router) のcontrollerプロパティからDIスコープを抽出する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// $stateProvider.state('home', {
+    ///     url: '/home',
+    ///     templateUrl: 'views/home.html',
+    ///     controller: 'HomeController'
+    /// })
+    /// ```
+    fn extract_state_provider_di(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
+        if let Some(args) = node.child_by_field_name("arguments") {
+            // state('name', {config}) の設定オブジェクトは第2引数
+            if let Some(config_obj) = args.named_child(1) {
+                if config_obj.kind() == "object" {
+                    self.extract_controller_di_from_state_config(config_obj, source, uri, ctx);
+                }
+            }
+        }
+    }
+
+    /// $stateProvider.state() の設定オブジェクトからcontrollerプロパティを探し、DIスコープを抽出する
+    /// また、controller と templateUrl の組み合わせでテンプレートバインディングも登録する
+    fn extract_controller_di_from_state_config(&self, obj_node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
+        // テンプレートバインディング用にcontrollerとtemplateUrlを収集（StateProviderソース）
+        self.extract_template_binding_from_object(obj_node, source, uri, BindingSource::StateProvider);
+
+        let mut cursor = obj_node.walk();
+        for child in obj_node.children(&mut cursor) {
+            if child.kind() == "pair" {
+                if let Some(key) = child.child_by_field_name("key") {
+                    let key_name = self.node_text(key, source);
+                    let key_name = key_name.trim_matches(|c| c == '"' || c == '\'');
+
+                    if key_name == "controller" {
+                        if let Some(value) = child.child_by_field_name("value") {
+                            // controller: 'ControllerName' パターンは参照登録のみ
+                            if value.kind() == "string" {
+                                let controller_name = self.extract_string_value(value, source);
+                                let start = value.start_position();
+                                let end = value.end_position();
+                                let reference = SymbolReference {
+                                    name: controller_name,
+                                    uri: uri.clone(),
+                                    span: Span::new(
+                                        self.offset_line(start.row as u32),
+                                        start.column as u32,
+                                        self.offset_line(end.row as u32),
+                                        end.column as u32,
+                                    ),
+                                };
+                                self.index.definitions.add_reference(reference);
+                            } else {
+                                // 配列・関数・class・識別子を統一的にDI解析
+                                self.extract_dependencies(value, source, uri);
+                                let di_info = self.extract_di_info(value, source);
+
+                                if di_info.has_any() {
+                                    if let Some((body_start, body_end)) = self.find_function_body_range(value, source) {
+                                        if di_info.has_scope {
+                                            self.index.controllers.add_controller_scope(ControllerScope {
+                                                name: "state".to_string(),
+                                                uri: uri.clone(),
+                                                start_line: body_start,
+                                                end_line: body_end,
+                                                injected_services: di_info.injected_services.clone(),
+                                            });
+                                        }
+
+                                        let di_scope = DiScope {
+                                            component_name: "state".to_string(),
                                             injected_services: di_info.injected_services,
                                             body_start_line: body_start,
                                             body_end_line: body_end,

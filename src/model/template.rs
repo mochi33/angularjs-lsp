@@ -6,6 +6,7 @@ use tower_lsp::lsp_types::Url;
 pub enum BindingSource {
     NgController,
     RouteProvider,
+    StateProvider,
     UibModal,
 }
 
