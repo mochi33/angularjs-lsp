@@ -4,7 +4,7 @@
 
 ---
 
-## JS側（11項目）
+## JS側（10項目）
 
 ### 1. `module.decorator()` がシンボルとして認識されない
 
@@ -39,21 +39,11 @@ angular.module('app', []).factory('UserResource', ['$resource', function($resour
 
 ---
 
-### 3. factory内 `var service = {}; service.xxx` パターンが認識されない
+### ~~3. factory内 `var service = {}; service.xxx` パターンが認識されない~~ (対応済み)
 
-`return { ... }` 形式は認識されるが、変数にオブジェクトを代入してプロパティを追加するパターンは未対応。
+~~`return { ... }` 形式は認識されるが、変数にオブジェクトを代入してプロパティを追加するパターンは未対応。~~
 
-```javascript
-angular.module('app', []).factory('SvcA', [function() {
-    var service = {};
-    service.doWork = function() {};
-    service.name = 'test';
-    return service;
-}]);
-// SvcA.doWork が Method として認識されない
-```
-
-**対応案**: factory 関数内で `return` される変数を追跡し、その変数へのプロパティ代入を Method として登録する。
+**対応済み**: `return` される変数名を `find_returned_variable_name()` で検出し、その変数へのプロパティ代入を `extract_returned_var_method()` で Method として登録するようにした。DI配列記法・直接関数渡しの両方に対応。
 
 ---
 
