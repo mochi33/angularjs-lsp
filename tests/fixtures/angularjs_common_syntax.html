@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html ng-app="commonApp">
+<head>
+    <title>AngularJS Common Syntax Test</title>
+</head>
+<body>
+
+<!-- 1. ng-controller 基本パターン -->
+<div ng-controller="ArrayDIController">
+    <h1>{{ title }}</h1>
+    <p>Users: {{ users.length }}</p>
+
+    <!-- 2. ng-repeat パターン -->
+    <ul>
+        <li ng-repeat="user in users">
+            {{ user.name }} - {{ user.email }}
+        </li>
+    </ul>
+
+    <!-- 3. ng-repeat with track by -->
+    <div ng-repeat="user in users track by user.id">
+        {{ user.name }}
+    </div>
+
+    <!-- 4. ng-repeat with filter -->
+    <div ng-repeat="user in users | filter:searchQuery">
+        {{ user.name }}
+    </div>
+
+    <!-- 5. ng-repeat with orderBy -->
+    <div ng-repeat="user in users | orderBy:'name'">
+        {{ user.name }}
+    </div>
+
+    <!-- 6. ng-repeat special variables ($index, $first, $last, $middle, $odd, $even) -->
+    <div ng-repeat="user in users">
+        <span ng-class="{ 'first': $first, 'last': $last }">
+            {{ $index }}: {{ user.name }}
+        </span>
+    </div>
+
+    <!-- 7. ng-repeat (key, value) -->
+    <div ng-repeat="(key, value) in users">
+        {{ key }}: {{ value }}
+    </div>
+
+    <!-- 8. ng-click -->
+    <button ng-click="loadUsers()">Load Users</button>
+    <button ng-click="deleteUser(user.id)">Delete</button>
+
+    <!-- 9. ng-show / ng-hide -->
+    <div ng-show="loading">Loading...</div>
+    <div ng-hide="loading">Content loaded</div>
+
+    <!-- 10. ng-if -->
+    <div ng-if="users.length > 0">
+        Users found: {{ users.length }}
+    </div>
+
+    <!-- 11. ng-switch -->
+    <div ng-switch="user.status">
+        <span ng-switch-when="active">Active</span>
+        <span ng-switch-when="inactive">Inactive</span>
+        <span ng-switch-default>Unknown</span>
+    </div>
+
+    <!-- 12. ng-model -->
+    <input type="text" ng-model="searchQuery" placeholder="Search...">
+    <textarea ng-model="description"></textarea>
+    <select ng-model="selectedUser">
+        <option ng-repeat="user in users" value="{{ user.id }}">{{ user.name }}</option>
+    </select>
+
+    <!-- 13. ng-submit -->
+    <form ng-submit="submitForm()">
+        <input type="text" ng-model="newUser.name">
+        <button type="submit">Submit</button>
+    </form>
+
+    <!-- 14. ng-class -->
+    <div ng-class="{ 'active': isActive, 'disabled': isDisabled }">Conditional Class</div>
+    <div ng-class="dynamicClass">Dynamic Class</div>
+
+    <!-- 15. ng-style -->
+    <div ng-style="{ 'color': textColor, 'font-size': fontSize + 'px' }">Styled</div>
+
+    <!-- 16. ng-disabled / ng-readonly -->
+    <input ng-disabled="isDisabled" ng-model="inputValue">
+    <input ng-readonly="isReadonly" ng-model="readonlyValue">
+
+    <!-- 17. ng-href / ng-src -->
+    <a ng-href="/users/{{ user.id }}">View User</a>
+    <img ng-src="{{ user.avatar }}" alt="{{ user.name }}">
+
+    <!-- 18. ng-bind / ng-bind-html -->
+    <span ng-bind="user.name"></span>
+    <div ng-bind-html="trustedHtml"></div>
+
+    <!-- 19. ng-cloak -->
+    <div ng-cloak>{{ message }}</div>
+
+    <!-- 20. ng-include -->
+    <ng-include src="'templates/header.html'"></ng-include>
+    <div ng-include="'templates/sidebar.html'"></div>
+</div>
+
+<!-- 21. controller as パターン -->
+<div ng-controller="ControllerAsCtrl as ctrl">
+    <h1>{{ ctrl.title }}</h1>
+    <ul>
+        <li ng-repeat="item in ctrl.items">{{ item.name }}</li>
+    </ul>
+    <button ng-click="ctrl.loadItems()">Load</button>
+</div>
+
+<!-- 22. ネストされたcontroller -->
+<div ng-controller="ParentController">
+    <p>{{ parentData }}</p>
+    <div ng-controller="ChildController">
+        <p>{{ childData }}</p>
+        <p>{{ parentData }}</p> <!-- 親から継承 -->
+    </div>
+</div>
+
+<!-- 23. ng-init -->
+<div ng-init="counter = 0; greeting = 'Hello'">
+    <p>{{ greeting }}: {{ counter }}</p>
+    <button ng-click="counter = counter + 1">Increment</button>
+</div>
+
+<!-- 24. カスタムディレクティブ（Element） -->
+<user-card user="selectedUser" on-select="handleSelect(user)"></user-card>
+
+<!-- 25. カスタムディレクティブ（Attribute） -->
+<div my-highlight="'red'">Highlighted text</div>
+
+<!-- 26. カスタムディレクティブ（ネスト/require） -->
+<tab-panel tabs="tabList">
+    <tab-item title="Tab 1">Content 1</tab-item>
+    <tab-item title="Tab 2">Content 2</tab-item>
+</tab-panel>
+
+<!-- 27. Component (AngularJS 1.5+) -->
+<hero-detail hero="selectedHero" on-delete="deleteHero(hero)" on-update="updateHero(hero)"></hero-detail>
+<hero-list filter="heroFilter"></hero-list>
+
+<!-- 28. フィルター使用 -->
+<p>{{ user.name | capitalize }}</p>
+<p>{{ user.bio | truncate:50:'...' }}</p>
+<p>{{ price | currency:'¥' }}</p>
+
+<!-- 29. 複数フィルターの連結 -->
+<p>{{ items | filter:searchQuery | orderBy:'name' | limitTo:10 }}</p>
+
+<!-- 30. ng-options (selectの選択肢) -->
+<select ng-model="selectedUser" ng-options="user.name for user in users track by user.id">
+    <option value="">-- Select User --</option>
+</select>
+
+<!-- 31. form validation -->
+<form name="userForm" ng-submit="submitUser()" novalidate>
+    <input type="text" name="userName" ng-model="user.name" required ng-minlength="3" ng-maxlength="50">
+    <span ng-show="userForm.userName.$error.required">Name is required</span>
+    <span ng-show="userForm.userName.$error.minlength">Too short</span>
+
+    <input type="email" name="userEmail" ng-model="user.email" required>
+    <span ng-show="userForm.userEmail.$error.email">Invalid email</span>
+
+    <button type="submit" ng-disabled="userForm.$invalid">Submit</button>
+</form>
+
+<!-- 32. ng-pattern -->
+<input type="text" ng-model="zipCode" ng-pattern="/^[0-9]{3}-[0-9]{4}$/">
+
+<!-- 33. ng-change -->
+<select ng-model="selectedOption" ng-change="onOptionChange()">
+    <option ng-repeat="opt in options" value="{{ opt.value }}">{{ opt.label }}</option>
+</select>
+
+<!-- 34. ng-blur / ng-focus -->
+<input ng-model="field" ng-blur="onBlur()" ng-focus="onFocus()">
+
+<!-- 35. ng-keydown / ng-keyup / ng-keypress -->
+<input ng-model="searchTerm" ng-keydown="onKeyDown($event)" ng-keyup="search()">
+
+<!-- 36. ng-transclude -->
+<div class="panel">
+    <div ng-transclude></div>
+</div>
+
+<!-- 37. one-time binding (::) -->
+<div>{{ ::user.name }}</div>
+<div ng-bind="::user.email"></div>
+
+<!-- 38. $event usage -->
+<button ng-click="handleClick($event)">Click</button>
+<div ng-mouseover="onHover($event)" ng-mouseleave="onLeave($event)">Hover me</div>
+
+<!-- 39. ng-pluralize -->
+<ng-pluralize count="messageCount"
+    when="{'0': 'No messages', 'one': '1 message', 'other': '{} messages'}">
+</ng-pluralize>
+
+<!-- 40. ng-messages (ngMessages module) -->
+<div ng-messages="userForm.userName.$error">
+    <div ng-message="required">Required field</div>
+    <div ng-message="minlength">Too short</div>
+</div>
+
+</body>
+</html>
