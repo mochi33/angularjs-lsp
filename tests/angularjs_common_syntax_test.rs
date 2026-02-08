@@ -287,6 +287,26 @@ angular.module('app', []).service('SimpleService', function($http) {
         "暗黙的DIサービスのメソッドが認識されるべき");
 }
 
+// --- thisエイリアスパターン (that = this) ---
+
+#[test]
+fn test_service_this_alias_that() {
+    let source = r#"
+angular.module('app', []).service('ThatSvc', [function() {
+    var that = this;
+    that.doWork = function() {};
+    that.name = 'test';
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_definition(&index, "ThatSvc", SymbolKind::Service),
+        "that=thisパターンのサービスが認識されるべき");
+    assert!(has_definition(&index, "ThatSvc.doWork", SymbolKind::Method),
+        "that.doWork が Method として認識されるべき");
+    assert!(has_definition(&index, "ThatSvc.name", SymbolKind::Method),
+        "that.name が Method として認識されるべき");
+}
+
 // ============================================================
 // 4. Factory定義パターン
 // ============================================================

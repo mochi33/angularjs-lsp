@@ -173,8 +173,11 @@ impl AngularJsAnalyzer {
             // returnされる変数名を検出
             let returned_var = self.find_returned_variable_name(body, source);
 
+            // thisエイリアスを収集 (that = this, vm = this 等)
+            let this_aliases = self.collect_this_aliases(body, source);
+
             // メソッド定義をスキャン
-            self.scan_for_methods(body, source, uri, service_name, &local_vars, returned_var.as_deref());
+            self.scan_for_methods(body, source, uri, service_name, &local_vars, returned_var.as_deref(), &this_aliases);
         }
     }
 
@@ -228,8 +231,11 @@ impl AngularJsAnalyzer {
             // returnされる変数名を検出
             let returned_var = self.find_returned_variable_name(body, source);
 
+            // thisエイリアスを収集 (that = this, vm = this 等)
+            let this_aliases = self.collect_this_aliases(body, source);
+
             // メソッド定義をスキャン
-            self.scan_for_methods(body, source, uri, service_name, &local_vars, returned_var.as_deref());
+            self.scan_for_methods(body, source, uri, service_name, &local_vars, returned_var.as_deref(), &this_aliases);
         }
     }
 
@@ -297,12 +303,13 @@ impl AngularJsAnalyzer {
         service_name: &str,
         local_vars: &HashMap<String, LocalVarLocation>,
         returned_var: Option<&str>,
+        this_aliases: &[String],
     ) {
         match node.kind() {
             "expression_statement" => {
                 if let Some(expr) = node.named_child(0) {
                     if expr.kind() == "assignment_expression" {
-                        self.extract_this_method(expr, source, uri, service_name);
+                        self.extract_this_method(expr, source, uri, service_name, this_aliases);
                         // returnされる変数へのプロパティ代入もメソッドとして抽出
                         if let Some(var_name) = returned_var {
                             self.extract_returned_var_method(expr, source, uri, service_name, var_name);
@@ -322,7 +329,7 @@ impl AngularJsAnalyzer {
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.scan_for_methods(child, source, uri, service_name, local_vars, returned_var);
+            self.scan_for_methods(child, source, uri, service_name, local_vars, returned_var, this_aliases);
         }
     }
 
@@ -421,11 +428,12 @@ impl AngularJsAnalyzer {
     /// ```
     ///
     /// `UserService.getAll`, `UserService.getById` として登録される
-    fn extract_this_method(&self, assign_node: Node, source: &str, uri: &Url, service_name: &str) {
+    fn extract_this_method(&self, assign_node: Node, source: &str, uri: &Url, service_name: &str, this_aliases: &[String]) {
         if let Some(left) = assign_node.child_by_field_name("left") {
             if left.kind() == "member_expression" {
                 if let Some(object) = left.child_by_field_name("object") {
-                    if self.node_text(object, source) == "this" {
+                    let obj_text = self.node_text(object, source);
+                    if obj_text == "this" || this_aliases.contains(&obj_text) {
                         if let Some(property) = left.child_by_field_name("property") {
                             let method_name = self.node_text(property, source);
                             let start = property.start_position();
