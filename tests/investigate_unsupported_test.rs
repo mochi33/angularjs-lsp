@@ -233,7 +233,7 @@ angular.module('app', []).controller('SelfCtrl', ['$http', function($http) {
         check("self = this; self.load パターン認識", has_def(&index, "SelfCtrl.load", SymbolKind::Method));
     }
 
-    // --- 11. that = this パターン ---
+    // --- 11. that = this パターン --- (対応済み)
     println!("\n--- 11. that = this パターン ---");
     {
         let source = r#"
@@ -243,7 +243,9 @@ angular.module('app', []).service('ThatSvc', [function() {
 }]);
 "#;
         let index = analyze_js(source);
-        check("that = this; that.doWork パターン認識", has_def(&index, "ThatSvc.doWork", SymbolKind::Method));
+        let result = has_def(&index, "ThatSvc.doWork", SymbolKind::Method);
+        check("that = this; that.doWork パターン認識", result);
+        assert!(result, "that = this パターンは対応済み");
     }
 
     // --- 12. component $onInit 等のライフサイクルフック ---

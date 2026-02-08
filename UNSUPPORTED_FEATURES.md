@@ -80,18 +80,17 @@ $scope.user.email = 'a@b.com';  // 同様
 
 ---
 
-### 6. `that = this` エイリアスが認識されない
+### 6. ~~`that = this` エイリアスが認識されない~~ (対応済み)
 
-`vm = this` と `self = this` は対応済みだが、`that = this` は未対応。
+`vm = this` と `self = this` は対応済みだったが、サービス/ファクトリーのコードパスで `collect_this_aliases()` が呼ばれていなかった。
+サービス/ファクトリーの `extract_methods_from_function` でもthisエイリアス収集を行うように修正し、`that = this` を含む全エイリアスに対応。
 
 ```javascript
 angular.module('app', []).service('ThatSvc', [function() {
     var that = this;
-    that.doWork = function() {};  // 認識されない
+    that.doWork = function() {};  // ✓ ThatSvc.doWork として認識される
 }]);
 ```
-
-**対応案**: `src/analyzer/js/scope.rs` 付近の this エイリアス検出ロジックに `"that"` を追加する。
 
 ---
 
