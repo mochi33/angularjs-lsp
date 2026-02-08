@@ -170,8 +170,11 @@ impl AngularJsAnalyzer {
                 local_vars.insert(k, v);
             }
 
+            // returnされる変数名を検出
+            let returned_var = self.find_returned_variable_name(body, source);
+
             // メソッド定義をスキャン
-            self.scan_for_methods(body, source, uri, service_name, &local_vars);
+            self.scan_for_methods(body, source, uri, service_name, &local_vars, returned_var.as_deref());
         }
     }
 
@@ -222,8 +225,11 @@ impl AngularJsAnalyzer {
                 local_vars.insert(k, v);
             }
 
+            // returnされる変数名を検出
+            let returned_var = self.find_returned_variable_name(body, source);
+
             // メソッド定義をスキャン
-            self.scan_for_methods(body, source, uri, service_name, &local_vars);
+            self.scan_for_methods(body, source, uri, service_name, &local_vars, returned_var.as_deref());
         }
     }
 
@@ -282,6 +288,7 @@ impl AngularJsAnalyzer {
     /// - `this.methodName = function() {}` - serviceパターン
     /// - `return { methodName: function() {} }` - factoryパターン
     /// - `return { methodName: varName }` - 変数参照パターン（実際の定義位置を使用）
+    /// - `returnedVar.methodName = function() {}` - 変数代入パターン（returnされる変数へのプロパティ代入）
     fn scan_for_methods(
         &self,
         node: Node,
@@ -289,12 +296,17 @@ impl AngularJsAnalyzer {
         uri: &Url,
         service_name: &str,
         local_vars: &HashMap<String, LocalVarLocation>,
+        returned_var: Option<&str>,
     ) {
         match node.kind() {
             "expression_statement" => {
                 if let Some(expr) = node.named_child(0) {
                     if expr.kind() == "assignment_expression" {
                         self.extract_this_method(expr, source, uri, service_name);
+                        // returnされる変数へのプロパティ代入もメソッドとして抽出
+                        if let Some(var_name) = returned_var {
+                            self.extract_returned_var_method(expr, source, uri, service_name, var_name);
+                        }
                     }
                 }
             }
@@ -310,7 +322,91 @@ impl AngularJsAnalyzer {
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.scan_for_methods(child, source, uri, service_name, local_vars);
+            self.scan_for_methods(child, source, uri, service_name, local_vars, returned_var);
+        }
+    }
+
+    /// `return <identifier>;` パターンからreturnされる変数名を検出する
+    ///
+    /// factory内で `var service = {}; ... return service;` のように
+    /// 変数にプロパティを代入してからreturnするパターンの変数名を取得する
+    fn find_returned_variable_name(&self, node: Node, source: &str) -> Option<String> {
+        if node.kind() == "return_statement" {
+            if let Some(arg) = node.named_child(0) {
+                if arg.kind() == "identifier" {
+                    return Some(self.node_text(arg, source));
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(name) = self.find_returned_variable_name(child, source) {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// `returnedVar.methodName = ...` パターンからメソッドを抽出する
+    ///
+    /// factory内で変数にプロパティを代入するパターン:
+    /// ```javascript
+    /// .factory('SvcA', [function() {
+    ///     var service = {};
+    ///     service.doWork = function() {};  // SvcA.doWork として登録
+    ///     service.name = 'test';           // SvcA.name として登録
+    ///     return service;
+    /// }])
+    /// ```
+    fn extract_returned_var_method(
+        &self,
+        assign_node: Node,
+        source: &str,
+        uri: &Url,
+        service_name: &str,
+        returned_var: &str,
+    ) {
+        if let Some(left) = assign_node.child_by_field_name("left") {
+            if left.kind() == "member_expression" {
+                if let Some(object) = left.child_by_field_name("object") {
+                    if self.node_text(object, source) == returned_var {
+                        if let Some(property) = left.child_by_field_name("property") {
+                            let method_name = self.node_text(property, source);
+                            let start = property.start_position();
+                            let end = property.end_position();
+
+                            let docs = self.extract_jsdoc_for_line(assign_node.start_position().row, source);
+
+                            // 右辺からパラメータを抽出
+                            let parameters = assign_node
+                                .child_by_field_name("right")
+                                .and_then(|right| self.extract_function_params(right, source));
+
+                            let full_name = format!("{}.{}", service_name, method_name);
+                            let span = Span::new(
+                                self.offset_line(start.row as u32),
+                                start.column as u32,
+                                self.offset_line(end.row as u32),
+                                end.column as u32,
+                            );
+
+                            let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
+                                .definition_span(span)
+                                .name_span(span);
+
+                            if let Some(docs_str) = docs {
+                                builder = builder.docs(docs_str);
+                            }
+                            if let Some(params) = parameters {
+                                builder = builder.parameters(params);
+                            }
+
+                            self.index.definitions.add_definition(builder.build());
+                        }
+                    }
+                }
+            }
         }
     }
 
