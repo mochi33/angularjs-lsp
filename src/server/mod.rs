@@ -178,6 +178,7 @@ impl Backend {
 
                     let scripts = bl_html_analyzer
                         .analyze_document_and_extract_scripts(&bl_uri, &latest_text);
+                    bl_index.templates.mark_html_analyzed(&bl_uri);
                     for script in scripts {
                         bl_analyzer.analyze_embedded_script(
                             &bl_uri,
@@ -286,6 +287,7 @@ impl Backend {
             tokio::task::spawn_blocking(move || {
                 let scripts =
                     bl_html_analyzer.analyze_document_and_extract_scripts(&bl_uri, &bl_text);
+                bl_index.templates.mark_html_analyzed(&bl_uri);
                 for script in scripts {
                     bl_analyzer
                         .analyze_embedded_script(&bl_uri, &script.source, script.line_offset);
@@ -456,6 +458,10 @@ impl Backend {
                         for (uri, content, tree) in &parsed_html_files {
                             self.html_analyzer
                                 .collect_controller_scopes_only_with_tree(uri, content, tree);
+                        }
+                        // 全HTMLファイルを解析済みとして登録
+                        for (uri, _content, _tree) in &parsed_html_files {
+                            self.index.templates.mark_html_analyzed(uri);
                         }
                     });
                 });
@@ -654,6 +660,10 @@ impl Backend {
                 for (uri, content, tree) in &parsed_html_files {
                     self.html_analyzer
                         .collect_controller_scopes_only_with_tree(uri, content, tree);
+                }
+                // 全HTMLファイルを解析済みとして登録
+                for (uri, _content, _tree) in &parsed_html_files {
+                    self.index.templates.mark_html_analyzed(uri);
                 }
             });
             s.spawn(|| {

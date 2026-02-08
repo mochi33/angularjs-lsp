@@ -510,17 +510,29 @@ impl TemplateStore {
                 let binding = entry.value();
                 let parent_uri = &binding.parent_uri;
                 let parent_path = parent_uri.path();
-                if let Some(last_slash) = parent_path.rfind('/') {
+
+                // normalized_pathの先頭ディレクトリがparent_path内に存在すれば、
+                // そこをルートとして解決する（プロジェクトルート相対パス対応）
+                let first_component = normalized_path.split('/').next().unwrap_or(&normalized_path);
+                let marker = format!("/{}/", first_component);
+
+                let resolved_path = if let Some(idx) = parent_path.find(&marker) {
+                    format!("{}/{}", &parent_path[..idx], normalized_path)
+                } else if let Some(last_slash) = parent_path.rfind('/') {
+                    // フォールバック: 親ディレクトリからの相対解決
                     let parent_dir = &parent_path[..last_slash];
-                    let resolved_path = format!("{}/{}", parent_dir, normalized_path);
-                    if let Ok(uri) = Url::parse(&format!(
-                        "{}://{}{}",
-                        parent_uri.scheme(),
-                        parent_uri.authority(),
-                        resolved_path
-                    )) {
-                        return Some(uri);
-                    }
+                    format!("{}/{}", parent_dir, normalized_path)
+                } else {
+                    continue;
+                };
+
+                if let Ok(uri) = Url::parse(&format!(
+                    "{}://{}{}",
+                    parent_uri.scheme(),
+                    parent_uri.authority(),
+                    resolved_path
+                )) {
+                    return Some(uri);
                 }
             }
         }
@@ -676,6 +688,11 @@ impl TemplateStore {
 
     pub fn mark_html_analyzed(&self, uri: &Url) {
         self.analyzed_html_files.insert(uri.clone());
+    }
+
+    /// 解析済みHTMLファイルのURIを全て取得
+    pub fn analyzed_html_uris(&self) -> Vec<Url> {
+        self.analyzed_html_files.iter().map(|r| r.clone()).collect()
     }
 
     pub fn clear_ng_include_bindings_for_parent(&self, parent_uri: &Url) {
