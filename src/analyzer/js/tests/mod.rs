@@ -520,6 +520,106 @@ angular.module('app', [])
 }
 
 // ==========================================================================
+// $scope ネストされたプロパティ代入
+// ==========================================================================
+
+#[test]
+fn test_nested_scope_property_assignment() {
+    let index = analyze(
+        r#"
+angular.module('app', []).controller('NestedCtrl', ['$scope', function($scope) {
+    $scope.user = {};
+    $scope.user.name = 'test';
+    $scope.user.email = 'test@example.com';
+    $scope.items = [];
+}]);
+"#,
+    );
+
+    // 第1レベルのプロパティは定義される
+    assert!(has_definition(
+        &index,
+        "NestedCtrl.$scope.user",
+        SymbolKind::ScopeProperty
+    ));
+    assert!(has_definition(
+        &index,
+        "NestedCtrl.$scope.items",
+        SymbolKind::ScopeProperty
+    ));
+
+    // ネストされたプロパティも定義される
+    assert!(has_definition(
+        &index,
+        "NestedCtrl.$scope.user.name",
+        SymbolKind::ScopeProperty
+    ));
+    assert!(has_definition(
+        &index,
+        "NestedCtrl.$scope.user.email",
+        SymbolKind::ScopeProperty
+    ));
+}
+
+#[test]
+fn test_nested_scope_method_assignment() {
+    let index = analyze(
+        r#"
+angular.module('app', []).controller('NestedMethodCtrl', ['$scope', function($scope) {
+    $scope.actions = {};
+    $scope.actions.save = function(data) {};
+    $scope.actions.load = function() {};
+}]);
+"#,
+    );
+
+    assert!(has_definition(
+        &index,
+        "NestedMethodCtrl.$scope.actions",
+        SymbolKind::ScopeProperty
+    ));
+    assert!(has_definition(
+        &index,
+        "NestedMethodCtrl.$scope.actions.save",
+        SymbolKind::ScopeMethod
+    ));
+    assert!(has_definition(
+        &index,
+        "NestedMethodCtrl.$scope.actions.load",
+        SymbolKind::ScopeMethod
+    ));
+}
+
+#[test]
+fn test_deeply_nested_scope_property() {
+    let index = analyze(
+        r#"
+angular.module('app', []).controller('DeepCtrl', ['$scope', function($scope) {
+    $scope.a = {};
+    $scope.a.b = {};
+    $scope.a.b.c = 'deep';
+}]);
+"#,
+    );
+
+    assert!(has_definition(
+        &index,
+        "DeepCtrl.$scope.a",
+        SymbolKind::ScopeProperty
+    ));
+    assert!(has_definition(
+        &index,
+        "DeepCtrl.$scope.a.b",
+        SymbolKind::ScopeProperty
+    ));
+    assert!(has_definition(
+        &index,
+        "DeepCtrl.$scope.a.b.c",
+        SymbolKind::ScopeProperty
+    ));
+}
+
+// ==========================================================================
 // DI参照（$以外のサービス名）が正しく参照登録されるか
 // ==========================================================================
 

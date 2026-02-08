@@ -66,17 +66,18 @@ angular.module('app', []).config(['$stateProvider', function($stateProvider) {
 
 ---
 
-### 5. `$scope` のネストされたプロパティ代入が追跡されない
+### ~~5. `$scope` のネストされたプロパティ代入が追跡されない~~ (対応済み)
 
-第1レベル（`$scope.user`）のみ追跡され、2階層以上（`$scope.user.name`）は未対応。
+~~第1レベル（`$scope.user`）のみ追跡され、2階層以上（`$scope.user.name`）は未対応。~~
+
+**対応済み**: `extract_scope_property_path()` ヘルパーメソッドを追加し、`$scope` から始まるメンバーアクセスチェーンのプロパティパスを再帰的に抽出するようにした。`analyze_scope_assignment()` と `analyze_scope_member_access()` の両方でネストされたプロパティの定義・参照を追跡する。任意の深さのネストに対応。
 
 ```javascript
 $scope.user = {};
-$scope.user.name = 'test';      // NestedCtrl.$scope.user.name として認識されない
-$scope.user.email = 'a@b.com';  // 同様
+$scope.user.name = 'test';      // ✓ NestedCtrl.$scope.user.name として認識される
+$scope.user.email = 'a@b.com';  // ✓ NestedCtrl.$scope.user.email として認識される
+$scope.a.b.c = 'deep';          // ✓ 3階層以上のネストにも対応
 ```
-
-**対応案**: `$scope.x.y = ...` 形式の代入文を解析し、ネストされたプロパティも ScopeProperty として登録する。
 
 ---
 
