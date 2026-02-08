@@ -343,6 +343,7 @@ impl CodeLensHandler {
 
         let source_label = match source {
             BindingSource::RouteProvider => "$routeProvider",
+            BindingSource::StateProvider => "$stateProvider",
             BindingSource::UibModal => "$uibModal",
             BindingSource::NgController => "ng-controller",
         };
@@ -437,6 +438,7 @@ impl CodeLensHandler {
 
         let source_label = match binding.source {
             BindingSource::RouteProvider => "$routeProvider",
+            BindingSource::StateProvider => "$stateProvider",
             BindingSource::UibModal => "$uibModal",
             BindingSource::NgController => "ng-controller",
         };

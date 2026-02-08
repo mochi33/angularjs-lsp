@@ -1448,3 +1448,108 @@ fn test_comprehensive_html_analysis() {
     assert!(scope_refs.len() >= 5, "少なくとも5つのスコープ参照が認識されるべき (found: {})", scope_refs.len());
     assert!(local_vars.len() >= 1, "少なくとも1つのローカル変数が認識されるべき (found: {})", local_vars.len());
 }
+
+// ============================================================
+// $stateProvider.state() (ui-router) パターン
+// ============================================================
+
+#[test]
+fn test_state_provider_controller_reference() {
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider
+        .state('home', {
+            url: '/home',
+            templateUrl: 'views/home.html',
+            controller: 'HomeController'
+        })
+        .state('about', {
+            url: '/about',
+            templateUrl: 'views/about.html',
+            controller: 'AboutController'
+        });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_reference(&index, "HomeController"),
+        "$stateProvider.state()のcontroller文字列参照(HomeController)が認識されるべき");
+    assert!(has_reference(&index, "AboutController"),
+        "$stateProvider.state()のcontroller文字列参照(AboutController)が認識されるべき");
+}
+
+#[test]
+fn test_state_provider_template_binding() {
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider
+        .state('dashboard', {
+            url: '/dashboard',
+            templateUrl: 'views/dashboard.html',
+            controller: 'DashboardController'
+        });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let has_dashboard_binding = bindings.iter().any(|b|
+        b.template_path.contains("dashboard.html") && b.controller_name == "DashboardController"
+    );
+    assert!(has_dashboard_binding,
+        "$stateProvider.state()のテンプレートバインディングが登録されるべき");
+}
+
+#[test]
+fn test_state_provider_inline_controller() {
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('profile', {
+        url: '/profile',
+        templateUrl: 'views/profile.html',
+        controller: ['$scope', 'UserService', function($scope, UserService) {
+            $scope.user = {};
+            $scope.loadUser = function() {};
+        }]
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_definition(&index, "state.$scope.user", SymbolKind::ScopeProperty),
+        "$stateProvider.state()のインラインcontroller内の$scopeプロパティが認識されるべき");
+    assert!(has_definition(&index, "state.$scope.loadUser", SymbolKind::ScopeMethod),
+        "$stateProvider.state()のインラインcontroller内の$scopeメソッドが認識されるべき");
+}
+
+#[test]
+fn test_state_provider_chained_states() {
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider
+        .state('users', {
+            url: '/users',
+            templateUrl: 'views/users.html',
+            controller: 'UsersController'
+        })
+        .state('users.detail', {
+            url: '/:id',
+            templateUrl: 'views/user-detail.html',
+            controller: 'UserDetailController'
+        })
+        .state('settings', {
+            url: '/settings',
+            templateUrl: 'views/settings.html',
+            controller: 'SettingsController'
+        });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_reference(&index, "UsersController"),
+        "チェーンされた$stateProvider.state()の1番目のcontroller参照が認識されるべき");
+    assert!(has_reference(&index, "UserDetailController"),
+        "チェーンされた$stateProvider.state()の2番目のcontroller参照が認識されるべき");
+    assert!(has_reference(&index, "SettingsController"),
+        "チェーンされた$stateProvider.state()の3番目のcontroller参照が認識されるべき");
+
+    let bindings = index.templates.get_all_template_bindings();
+    assert_eq!(bindings.len(), 3,
+        "3つのテンプレートバインディングが登録されるべき");
+}
