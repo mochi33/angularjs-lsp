@@ -1,7 +1,7 @@
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Node;
 
-use super::context::AnalyzerContext;
+use super::context::{AnalyzerContext, DiInfo};
 use super::AngularJsAnalyzer;
 use crate::model::{ControllerScope, Span, SymbolReference};
 
@@ -33,6 +33,64 @@ impl AngularJsAnalyzer {
             }
         }
         None
+    }
+
+    /// ノードからDI情報を汎用的に抽出する
+    ///
+    /// ノードの種類に応じて適切な方法でDI情報を解析する。
+    /// 識別子の場合は変数宣言・関数宣言・class宣言を探索して実体を解決し、
+    /// 解決先の中身に基づいて判断する。
+    ///
+    /// 認識パターン:
+    /// - 配列記法: `['$scope', 'Service', function($scope, Service) {}]`
+    /// - 関数式: `function($scope, Service) {}`
+    /// - アロー関数: `($scope, Service) => {}`
+    /// - class式/class宣言: `class { constructor($scope, Service) {} }`
+    /// - 関数宣言: `function MyCtrl($scope, Service) {}`
+    /// - 識別子: 一時変数・関数参照・class参照を解決して中身に基づき判断
+    pub(super) fn extract_di_info(&self, node: Node, source: &str) -> DiInfo {
+        match node.kind() {
+            "array" => DiInfo {
+                injected_services: self.collect_injected_services(node, source),
+                has_scope: self.has_scope_in_di_array(node, source),
+                has_root_scope: self.has_root_scope_in_di_array(node, source),
+            },
+            "function_expression" | "arrow_function" | "function_declaration"
+            | "class" | "class_declaration" => DiInfo {
+                injected_services: self.collect_services_from_function_params(node, source),
+                has_scope: self.has_scope_in_function_params(node, source),
+                has_root_scope: self.has_root_scope_in_function_params(node, source),
+            },
+            "identifier" => {
+                // 識別子の場合は実体を解決して中身を見る
+                let ref_name = self.node_text(node, source);
+                let root = {
+                    let mut current = node;
+                    while let Some(parent) = current.parent() {
+                        current = parent;
+                    }
+                    current
+                };
+
+                // 1. 変数宣言の値を探して、中身に基づいて判断
+                //    例: var deps = ['$scope', function($scope) {}];
+                if let Some(value_node) = self.find_variable_value_for_di(root, source, &ref_name) {
+                    return self.extract_di_info(value_node, source);
+                }
+                // 2. 関数宣言を探す
+                //    例: function MyController($scope) {}
+                if let Some(func_decl) = self.find_function_declaration(root, source, &ref_name) {
+                    return self.extract_di_info(func_decl, source);
+                }
+                // 3. class宣言を探す
+                //    例: class MyController { constructor($scope) {} }
+                if let Some(class_decl) = self.find_class_declaration(root, source, &ref_name) {
+                    return self.extract_di_info(class_decl, source);
+                }
+                DiInfo::empty()
+            }
+            _ => DiInfo::empty(),
+        }
     }
 
     /// `$inject` パターンを解析する
@@ -283,105 +341,6 @@ impl AngularJsAnalyzer {
         services
     }
 
-    /// 関数参照またはclass参照（identifier）から関数宣言/class宣言を探し、パラメータに $scope があるかチェック
-    ///
-    /// 関数参照パターン用:
-    /// ```javascript
-    /// .controller('Ctrl', MyController);
-    /// function MyController($scope, Service) {}
-    /// class MyController { constructor($scope, Service) {} }
-    /// ```
-    pub(super) fn has_scope_in_function_ref(&self, node: Node, source: &str) -> bool {
-        if node.kind() != "identifier" {
-            return false;
-        }
-
-        let ref_name = self.node_text(node, source);
-        let root = {
-            let mut current = node;
-            while let Some(parent) = current.parent() {
-                current = parent;
-            }
-            current
-        };
-
-        // まず関数宣言を探す
-        if let Some(func_decl) = self.find_function_declaration(root, source, &ref_name) {
-            return self.has_scope_in_function_params(func_decl, source);
-        }
-        // 次にclass宣言を探す
-        if let Some(class_decl) = self.find_class_declaration(root, source, &ref_name) {
-            return self.has_scope_in_function_params(class_decl, source);
-        }
-        false
-    }
-
-    /// 関数参照またはclass参照（identifier）から関数宣言/class宣言を探し、パラメータに $rootScope があるかチェック
-    ///
-    /// 関数参照パターン用:
-    /// ```javascript
-    /// .run(AppInit);
-    /// function AppInit($rootScope) {}
-    /// class AppInit { constructor($rootScope) {} }
-    /// ```
-    pub(super) fn has_root_scope_in_function_ref(&self, node: Node, source: &str) -> bool {
-        if node.kind() != "identifier" {
-            return false;
-        }
-
-        let ref_name = self.node_text(node, source);
-        let root = {
-            let mut current = node;
-            while let Some(parent) = current.parent() {
-                current = parent;
-            }
-            current
-        };
-
-        // まず関数宣言を探す
-        if let Some(func_decl) = self.find_function_declaration(root, source, &ref_name) {
-            return self.has_root_scope_in_function_params(func_decl, source);
-        }
-        // 次にclass宣言を探す
-        if let Some(class_decl) = self.find_class_declaration(root, source, &ref_name) {
-            return self.has_root_scope_in_function_params(class_decl, source);
-        }
-        false
-    }
-
-    /// 関数参照またはclass参照（identifier）から関数宣言/class宣言を探し、パラメータからサービスを収集
-    ///
-    /// 関数参照パターン用:
-    /// ```javascript
-    /// .controller('Ctrl', MyController);
-    /// function MyController($scope, Service) {}
-    /// class MyController { constructor($scope, Service) {} }
-    /// ```
-    pub(super) fn collect_services_from_function_ref(&self, node: Node, source: &str) -> Vec<String> {
-        if node.kind() != "identifier" {
-            return Vec::new();
-        }
-
-        let ref_name = self.node_text(node, source);
-        let root = {
-            let mut current = node;
-            while let Some(parent) = current.parent() {
-                current = parent;
-            }
-            current
-        };
-
-        // まず関数宣言を探す
-        if let Some(func_decl) = self.find_function_declaration(root, source, &ref_name) {
-            return self.collect_services_from_function_params(func_decl, source);
-        }
-        // 次にclass宣言を探す
-        if let Some(class_decl) = self.find_class_declaration(root, source, &ref_name) {
-            return self.collect_services_from_function_params(class_decl, source);
-        }
-        Vec::new()
-    }
-
     /// 関数本体の行範囲を取得する
     ///
     /// DI配列または関数式から関数本体の開始行と終了行を抽出
@@ -405,7 +364,7 @@ impl AngularJsAnalyzer {
             // ES6 class の場合はconstructorを取得
             "class_declaration" | "class" => self.get_constructor_from_class(node, source),
             "identifier" => {
-                // 変数参照の場合は関数宣言またはclass宣言を探す
+                // 識別子の場合は実体を解決して中身を見る
                 let func_name = self.node_text(node, source);
                 let root = {
                     let mut current = node;
@@ -414,11 +373,15 @@ impl AngularJsAnalyzer {
                     }
                     current
                 };
-                // まず関数宣言を探す
+                // 1. 変数宣言の値を探して再帰的に処理
+                if let Some(value_node) = self.find_variable_value_for_di(root, source, &func_name) {
+                    return self.find_function_body_range(value_node, source);
+                }
+                // 2. 関数宣言を探す
                 if let Some(func_decl) = self.find_function_declaration(root, source, &func_name) {
                     Some(func_decl)
                 } else {
-                    // 次にclass宣言を探してconstructorを返す
+                    // 3. class宣言を探してconstructorを返す
                     self.find_class_declaration(root, source, &func_name)
                         .and_then(|class_decl| self.get_constructor_from_class(class_decl, source))
                 }

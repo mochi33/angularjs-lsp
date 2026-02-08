@@ -251,18 +251,25 @@ impl Index {
     pub fn resolve_template_uri(&self, template_path: &str) -> Option<Url> {
         use crate::util::normalize_template_path;
         let normalized_path = normalize_template_path(template_path);
+        let suffix = format!("/{}", normalized_path);
 
         // controller scopeのURIから検索
         for uri in self.controllers.html_controller_scope_uris() {
             let path = uri.path();
-            if path.ends_with(&format!("/{}", normalized_path))
-                || path.ends_with(&normalized_path)
-            {
+            if path.ends_with(&suffix) || path.ends_with(&normalized_path) {
                 return Some(uri);
             }
         }
 
-        // テンプレートストアで検索
+        // 解析済みHTML URIから検索
+        for uri in self.templates.analyzed_html_uris() {
+            let path = uri.path();
+            if path.ends_with(&suffix) || path.ends_with(&normalized_path) {
+                return Some(uri);
+            }
+        }
+
+        // テンプレートストアで検索（フォールバック）
         self.templates.resolve_template_uri(template_path)
     }
 

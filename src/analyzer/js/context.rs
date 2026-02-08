@@ -25,6 +25,34 @@ pub(super) struct DiScope {
     pub(super) has_root_scope: bool,
 }
 
+/// ノードから抽出されたDI情報
+///
+/// 配列記法・関数パラメータ・識別子解決など、あらゆるパターンから
+/// 統一的にDI情報を取得した結果をまとめる構造体
+pub(super) struct DiInfo {
+    /// $以外のDIされた依存サービス名
+    pub(super) injected_services: Vec<String>,
+    /// $scope がDIされているか
+    pub(super) has_scope: bool,
+    /// $rootScope がDIされているか
+    pub(super) has_root_scope: bool,
+}
+
+impl DiInfo {
+    pub(super) fn empty() -> Self {
+        Self {
+            injected_services: Vec::new(),
+            has_scope: false,
+            has_root_scope: false,
+        }
+    }
+
+    /// DI情報があるかどうか（サービス、$scope、$rootScope のいずれか）
+    pub(super) fn has_any(&self) -> bool {
+        !self.injected_services.is_empty() || self.has_scope || self.has_root_scope
+    }
+}
+
 /// 解析コンテキスト
 pub(super) struct AnalyzerContext {
     /// 現在有効なDIスコープのスタック
