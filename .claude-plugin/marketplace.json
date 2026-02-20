@@ -1,0 +1,25 @@
+{
+  "name": "angularjs-lsp",
+  "owner": {
+    "name": "mochi33"
+  },
+  "metadata": {
+    "description": "AngularJS 1.x Language Server Plugin for Claude Code",
+    "version": "0.1.0",
+    "pluginRoot": "."
+  },
+  "plugins": [
+    {
+      "name": "angularjs-lsp-plugin",
+      "source": "./claude-plugin",
+      "description": "AngularJS 1.x Language Server - go-to-definition, find references, hover, completion, and diagnostics",
+      "version": "0.1.0",
+      "author": {
+        "name": "mochi33"
+      },
+      "repository": "https://github.com/mochi33/angularjs-lsp",
+      "license": "MIT",
+      "keywords": ["angularjs", "angular", "javascript", "lsp", "intellisense"]
+    }
+  ]
+}

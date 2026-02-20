@@ -1,0 +1,8 @@
+{
+  "name": "angularjs-lsp-plugin",
+  "description": "AngularJS 1.x Language Server for Claude Code - provides go-to-definition, find references, hover, completion, and diagnostics for AngularJS projects",
+  "version": "0.1.0",
+  "author": {
+    "name": "mochi33"
+  }
+}

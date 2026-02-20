@@ -1,0 +1,10 @@
+{
+  "angularjs": {
+    "command": "angularjs-lsp",
+    "args": [],
+    "extensionToLanguage": {
+      ".js": "javascript",
+      ".html": "html"
+    }
+  }
+}
