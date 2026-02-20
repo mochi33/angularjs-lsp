@@ -9,6 +9,7 @@ mod rename;
 pub mod resolve;
 mod semantic_tokens;
 mod signature_help;
+mod workspace_symbol;
 
 pub use codelens::CodeLensHandler;
 pub use completion::CompletionHandler;
@@ -20,3 +21,4 @@ pub use references::ReferencesHandler;
 pub use rename::RenameHandler;
 pub use semantic_tokens::SemanticTokensHandler;
 pub use signature_help::SignatureHelpHandler;
+pub use workspace_symbol::WorkspaceSymbolHandler;

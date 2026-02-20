@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::*;
 
 use crate::index::Index;
-use crate::model::SymbolKind as AngularSymbolKind;
 
 pub struct DocumentSymbolHandler {
     index: Arc<Index>,
@@ -55,7 +54,7 @@ impl DocumentSymbolHandler {
                 DocumentSymbol {
                     name: s.name.clone(),
                     detail: Some(s.kind.as_str().to_string()),
-                    kind: self.convert_symbol_kind(s.kind),
+                    kind: s.kind.to_lsp_symbol_kind(),
                     tags: None,
                     deprecated: None,
                     range: Range {
@@ -77,26 +76,4 @@ impl DocumentSymbolHandler {
         Some(DocumentSymbolResponse::Nested(document_symbols))
     }
 
-    fn convert_symbol_kind(&self, kind: AngularSymbolKind) -> SymbolKind {
-        match kind {
-            AngularSymbolKind::Module => SymbolKind::MODULE,
-            AngularSymbolKind::Controller => SymbolKind::CLASS,
-            AngularSymbolKind::Service => SymbolKind::CLASS,
-            AngularSymbolKind::Factory => SymbolKind::CLASS,
-            AngularSymbolKind::Directive => SymbolKind::CLASS,
-            AngularSymbolKind::Component => SymbolKind::CLASS,
-            AngularSymbolKind::Provider => SymbolKind::CLASS,
-            AngularSymbolKind::Filter => SymbolKind::FUNCTION,
-            AngularSymbolKind::Constant => SymbolKind::CONSTANT,
-            AngularSymbolKind::Value => SymbolKind::VARIABLE,
-            AngularSymbolKind::Method => SymbolKind::METHOD,
-            AngularSymbolKind::ScopeProperty => SymbolKind::PROPERTY,
-            AngularSymbolKind::ScopeMethod => SymbolKind::METHOD,
-            AngularSymbolKind::RootScopeProperty => SymbolKind::PROPERTY,
-            AngularSymbolKind::RootScopeMethod => SymbolKind::METHOD,
-            AngularSymbolKind::FormBinding => SymbolKind::VARIABLE,
-            AngularSymbolKind::ExportedComponent => SymbolKind::CLASS,
-            AngularSymbolKind::ComponentBinding => SymbolKind::PROPERTY,
-        }
-    }
 }

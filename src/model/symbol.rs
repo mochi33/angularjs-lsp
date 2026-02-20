@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{self, Url};
 
 use super::span::Span;
 
@@ -54,6 +54,29 @@ impl SymbolKind {
             SymbolKind::FormBinding => "form binding",
             SymbolKind::ExportedComponent => "exported component",
             SymbolKind::ComponentBinding => "component binding",
+        }
+    }
+
+    pub fn to_lsp_symbol_kind(&self) -> lsp_types::SymbolKind {
+        match self {
+            SymbolKind::Module => lsp_types::SymbolKind::MODULE,
+            SymbolKind::Controller => lsp_types::SymbolKind::CLASS,
+            SymbolKind::Service => lsp_types::SymbolKind::CLASS,
+            SymbolKind::Factory => lsp_types::SymbolKind::CLASS,
+            SymbolKind::Directive => lsp_types::SymbolKind::CLASS,
+            SymbolKind::Component => lsp_types::SymbolKind::CLASS,
+            SymbolKind::Provider => lsp_types::SymbolKind::CLASS,
+            SymbolKind::Filter => lsp_types::SymbolKind::FUNCTION,
+            SymbolKind::Constant => lsp_types::SymbolKind::CONSTANT,
+            SymbolKind::Value => lsp_types::SymbolKind::VARIABLE,
+            SymbolKind::Method => lsp_types::SymbolKind::METHOD,
+            SymbolKind::ScopeProperty => lsp_types::SymbolKind::PROPERTY,
+            SymbolKind::ScopeMethod => lsp_types::SymbolKind::METHOD,
+            SymbolKind::RootScopeProperty => lsp_types::SymbolKind::PROPERTY,
+            SymbolKind::RootScopeMethod => lsp_types::SymbolKind::METHOD,
+            SymbolKind::FormBinding => lsp_types::SymbolKind::VARIABLE,
+            SymbolKind::ExportedComponent => lsp_types::SymbolKind::CLASS,
+            SymbolKind::ComponentBinding => lsp_types::SymbolKind::PROPERTY,
         }
     }
 }

@@ -22,7 +22,7 @@ use crate::config::{AjsConfig, DiagnosticsConfig, PathMatcher};
 use crate::handler::{
     CodeLensHandler, CompletionHandler, DefinitionHandler, DiagnosticsHandler,
     DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler,
-    SemanticTokensHandler, SignatureHelpHandler,
+    SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
 };
 use crate::index::Index;
 use crate::ts_proxy::TsProxy;
@@ -728,6 +728,7 @@ impl LanguageServer for Backend {
                     work_done_progress_options: Default::default(),
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
@@ -1583,5 +1584,17 @@ impl LanguageServer for Backend {
             return Ok(Some(SemanticTokensResult::Tokens(tokens)));
         }
         Ok(None)
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let handler = WorkspaceSymbolHandler::new(Arc::clone(&self.index));
+        let symbols = handler.handle(&params.query);
+        if symbols.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(symbols))
     }
 }

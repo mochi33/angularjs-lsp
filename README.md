@@ -13,6 +13,7 @@ Language Server Protocol (LSP) implementation for AngularJS 1.x applications.
 - **Hover Information** - Display type and documentation information on hover
 - **Signature Help** - Display function parameter hints while typing
 - **CodeLens** - Show controller/template relationships with navigation support
+- **Workspace Symbol** - Search AngularJS symbols across the workspace (`Ctrl+T` / `Cmd+T`)
 - **Diagnostics** - Show warnings for undefined scope properties and local variables in HTML templates
 - **TypeScript Fallback** - Automatically falls back to `typescript-language-server` for non-AngularJS symbols
 
@@ -214,8 +215,9 @@ src/
 │   ├── references.rs     # References & definition provider
 │   ├── signature_help.rs # Signature help provider
 │   ├── codelens.rs       # CodeLens provider
-│   ├── document_symbol.rs # Document symbol provider
-│   └── rename.rs         # Rename provider
+│   ├── document_symbol.rs  # Document symbol provider
+│   ├── workspace_symbol.rs # Workspace symbol provider
+│   └── rename.rs           # Rename provider
 ├── index/            # Symbol indexing
 │   ├── store.rs      # In-memory symbol store
 │   └── symbol.rs     # Symbol data structures

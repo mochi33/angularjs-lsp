@@ -8,6 +8,7 @@ use tower_lsp::lsp_types::Url;
 
 use angularjs_lsp::analyzer::js::AngularJsAnalyzer;
 use angularjs_lsp::analyzer::html::HtmlAngularJsAnalyzer;
+use angularjs_lsp::handler::WorkspaceSymbolHandler;
 use angularjs_lsp::index::Index;
 use angularjs_lsp::model::SymbolKind;
 
@@ -1584,4 +1585,90 @@ angular.module('app', []).config(['$stateProvider', function($stateProvider) {
     let bindings = index.templates.get_all_template_bindings();
     assert_eq!(bindings.len(), 3,
         "3つのテンプレートバインディングが登録されるべき");
+}
+
+// ============================================================
+// workspace/symbol テスト
+// ============================================================
+
+#[test]
+fn test_workspace_symbol_empty_query_returns_all_top_level() {
+    let source = r#"
+angular.module('myApp', [])
+    .controller('MainCtrl', function($scope) {
+        $scope.name = 'test';
+    })
+    .service('UserService', function() {
+        this.getUser = function() {};
+    })
+    .filter('capitalize', function() {
+        return function(input) { return input; };
+    });
+"#;
+    let index = analyze_js(source);
+    let handler = WorkspaceSymbolHandler::new(index);
+    let symbols = handler.handle("");
+
+    let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"myApp"), "モジュールが含まれるべき");
+    assert!(names.contains(&"MainCtrl"), "コントローラーが含まれるべき");
+    assert!(names.contains(&"UserService"), "サービスが含まれるべき");
+    assert!(names.contains(&"capitalize"), "フィルターが含まれるべき");
+
+    // $scopeプロパティは除外されるべき
+    assert!(!names.contains(&"name"), "$scopeプロパティは除外されるべき");
+}
+
+#[test]
+fn test_workspace_symbol_query_filters() {
+    let source = r#"
+angular.module('myApp', [])
+    .controller('UserController', function() {})
+    .controller('AdminController', function() {})
+    .service('UserService', function() {});
+"#;
+    let index = analyze_js(source);
+    let handler = WorkspaceSymbolHandler::new(index);
+    let symbols = handler.handle("User");
+
+    let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"UserController"), "Userにマッチするコントローラーが含まれるべき");
+    assert!(names.contains(&"UserService"), "Userにマッチするサービスが含まれるべき");
+    assert!(!names.contains(&"AdminController"), "Userにマッチしないコントローラーは除外されるべき");
+}
+
+#[test]
+fn test_workspace_symbol_case_insensitive() {
+    let source = r#"
+angular.module('myApp', [])
+    .controller('UserController', function() {});
+"#;
+    let index = analyze_js(source);
+    let handler = WorkspaceSymbolHandler::new(index);
+    let symbols = handler.handle("user");
+
+    let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"UserController"), "大文字小文字を区別せずにマッチすべき");
+}
+
+#[test]
+fn test_workspace_symbol_excludes_scope_properties() {
+    let source = r#"
+angular.module('myApp', [])
+    .controller('TestCtrl', function($scope) {
+        $scope.myProp = 'value';
+        $scope.myMethod = function() {};
+    });
+"#;
+    let index = analyze_js(source);
+    let handler = WorkspaceSymbolHandler::new(index);
+    let symbols = handler.handle("");
+
+    let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"TestCtrl"), "コントローラーは含まれるべき");
+    // ScopeProperty/ScopeMethod は除外
+    for sym in &symbols {
+        assert_ne!(sym.name, "TestCtrl.$scope.myProp", "スコーププロパティは除外されるべき");
+        assert_ne!(sym.name, "TestCtrl.$scope.myMethod", "スコープメソッドは除外されるべき");
+    }
 }
