@@ -42,6 +42,37 @@ The binary will be located at `target/release/angularjs-lsp`.
 - Rust 1.70+
 - (Optional) `typescript-language-server` for fallback support
 
+## AI Coding Agent Setup
+
+### Claude Code
+
+1. マーケットプレイスを追加:
+   ```bash
+   claude plugin marketplace add mochi33/angularjs-lsp
+   ```
+
+2. プラグインをインストール:
+   ```bash
+   claude plugin install angularjs-lsp-plugin
+   ```
+
+`angularjs-lsp` バイナリがPATHに必要です。ビルド済みバイナリは [Releases](https://github.com/mochi33/angularjs-lsp/releases) からダウンロードするか、ソースからビルドしてください。
+
+### GitHub Copilot (CLI / VS Code)
+
+`language-servers` 設定でLSPサーバーを登録できます。`~/.config/github-copilot/config.json` に以下を追加:
+
+```json
+{
+  "language-servers": {
+    "angularjs": {
+      "command": "angularjs-lsp",
+      "languages": ["javascript", "html"]
+    }
+  }
+}
+```
+
 ## Editor Setup
 
 ### Neovim (nvim-lspconfig)
