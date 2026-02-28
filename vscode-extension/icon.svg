@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#DD1B16;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#A80000;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="innerGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#F44336;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#C62828;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Shield background -->
+  <path d="M128 16 L232 48 L232 128 C232 180 190 224 128 240 C66 224 24 180 24 128 L24 48 Z"
+        fill="url(#shieldGrad)" />
+
+  <!-- Inner shield -->
+  <path d="M128 32 L216 58 L216 128 C216 172 180 208 128 222 C76 208 40 172 40 128 L40 58 Z"
+        fill="url(#innerGrad)" />
+
+  <!-- Angular "A" shape -->
+  <polygon points="128,50 168,160 152,160 144,140 112,140 104,160 88,160"
+           fill="#FFFFFF" />
+  <polygon points="128,80 138,120 118,120"
+           fill="url(#innerGrad)" />
+
+  <!-- LSP badge -->
+  <circle cx="200" cy="200" r="48" fill="#1976D2" stroke="#FFFFFF" stroke-width="4"/>
+  <text x="200" y="210"
+        font-family="Arial, sans-serif"
+        font-size="28"
+        font-weight="bold"
+        fill="#FFFFFF"
+        text-anchor="middle">LSP</text>
+</svg>
