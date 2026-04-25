@@ -1672,3 +1672,251 @@ angular.module('myApp', [])
         assert_ne!(sym.name, "TestCtrl.$scope.myMethod", "スコープメソッドは除外されるべき");
     }
 }
+
+// ============================================================
+// Component template内の $ctrl エイリアス解決（hover/definition/completion 基盤）
+// ============================================================
+
+/// component template と JS をセットで解析するヘルパー
+/// HTML側のURIは、JS側のtemplateUrlにマッチするように合わせる
+fn analyze_component_with_template(
+    js_source: &str,
+    html_source: &str,
+    template_uri_str: &str,
+) -> Arc<Index> {
+    let index = Arc::new(Index::new());
+    let js_analyzer = Arc::new(AngularJsAnalyzer::new(index.clone()));
+    let html_analyzer = HtmlAngularJsAnalyzer::new(index.clone(), js_analyzer.clone());
+
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    js_analyzer.analyze_document(&js_uri, js_source);
+
+    let html_uri = Url::parse(template_uri_str).unwrap();
+    html_analyzer.analyze_document(&html_uri, html_source);
+
+    index
+}
+
+#[test]
+fn test_component_template_resolves_ctrl_alias_to_component_name() {
+    // インラインコントローラーを持つcomponentで $ctrl が componentName に解決されること
+    let js = r#"
+angular.module('app', []).component('lcComp', {
+    templateUrl: 'templates/lc-comp.html',
+    controller: function() {
+        var ctrl = this;
+        ctrl.data = [];
+    }
+});
+"#;
+    let html = r#"<div>{{ $ctrl.data }}</div>"#;
+    let index = analyze_component_with_template(js, html, "file:///templates/lc-comp.html");
+    let html_uri = Url::parse("file:///templates/lc-comp.html").unwrap();
+
+    // resolve_controller_by_alias が $ctrl → lcComp を解決できること
+    let resolved = index.resolve_controller_by_alias(&html_uri, 0, "$ctrl");
+    assert_eq!(
+        resolved,
+        Some("lcComp".to_string()),
+        "component template内の $ctrl は component名 lcComp に解決されるべき"
+    );
+
+    // インラインコントローラーの this.data が lcComp.data として登録されていること
+    assert!(
+        has_definition(&index, "lcComp.data", SymbolKind::Method),
+        "コンポーネントの this.data が lcComp.data (Method) として登録されているべき"
+    );
+}
+
+#[test]
+fn test_component_template_resolves_custom_alias() {
+    // controllerAs に明示エイリアスがある場合
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    templateUrl: 'templates/user-card.html',
+    controllerAs: 'uc',
+    controller: function() {
+        this.name = '';
+    }
+});
+"#;
+    let html = r#"<div>{{ uc.name }}</div>"#;
+    let index = analyze_component_with_template(js, html, "file:///templates/user-card.html");
+    let html_uri = Url::parse("file:///templates/user-card.html").unwrap();
+
+    let resolved = index.resolve_controller_by_alias(&html_uri, 0, "uc");
+    assert_eq!(
+        resolved,
+        Some("userCard".to_string()),
+        "明示controllerAs 'uc' は userCard に解決されるべき"
+    );
+
+    // デフォルトの $ctrl はマッチしないこと
+    let no_default = index.resolve_controller_by_alias(&html_uri, 0, "$ctrl");
+    assert_eq!(
+        no_default,
+        None,
+        "controllerAs 'uc' を指定したら $ctrl では解決されないべき"
+    );
+}
+
+#[test]
+fn test_component_template_completion_for_alias_prefix_returns_methods() {
+    // complete_with_context(Some("lcComp"), ...) が this.X Method を返すことを確認
+    // これがOKなら、HTML側の補完で controller名でこの API を呼べばよい
+    use angularjs_lsp::handler::CompletionHandler;
+    use tower_lsp::lsp_types::CompletionResponse;
+
+    let js = r#"
+angular.module('app', []).component('lcComp', {
+    templateUrl: 'templates/lc-comp.html',
+    controller: function() {
+        var ctrl = this;
+        ctrl.data = [];
+        ctrl.refresh = function() {};
+    }
+});
+"#;
+    let index = analyze_component_with_template(
+        js,
+        "<div></div>",
+        "file:///templates/lc-comp.html",
+    );
+    let handler = CompletionHandler::new(index);
+
+    let resp = handler
+        .complete_with_context(Some("lcComp"), None, &[])
+        .expect("lcComp prefix で補完応答が返るべき");
+    let labels: Vec<String> = match resp {
+        CompletionResponse::Array(items) => items.into_iter().map(|i| i.label).collect(),
+        _ => panic!("Array response 期待"),
+    };
+
+    assert!(
+        labels.iter().any(|l| l == "data"),
+        "lcComp prefix の補完に 'data' が含まれるべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        labels.iter().any(|l| l == "refresh"),
+        "lcComp prefix の補完に 'refresh' が含まれるべき (labels: {:?})",
+        labels
+    );
+}
+
+#[test]
+fn test_html_completion_in_component_template_includes_ctrl_alias_and_methods() {
+    // component templateで補完を呼ぶと:
+    // - $ctrl エイリアスが候補に出る
+    // - $ctrl 越しに見える this.X メソッド/プロパティが候補に出る
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let js = r#"
+angular.module('app', []).component('lcComp', {
+    templateUrl: 'templates/lc-comp.html',
+    controller: function() {
+        var ctrl = this;
+        ctrl.data = [];
+        ctrl.refresh = function() {};
+    }
+});
+"#;
+    let html = r#"<div>{{ }}</div>"#;
+    let index = analyze_component_with_template(js, html, "file:///templates/lc-comp.html");
+    let handler = CompletionHandler::new(index);
+    let html_uri = Url::parse("file:///templates/lc-comp.html").unwrap();
+
+    let items = handler.complete_in_html_angular_context(&html_uri, 0);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.contains(&"$ctrl"),
+        "component templateの補完に '$ctrl' エイリアスが含まれるべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        labels.contains(&"data"),
+        "component templateの補完に controllerプロパティ 'data' が含まれるべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        labels.contains(&"refresh"),
+        "component templateの補完に controllerメソッド 'refresh' が含まれるべき (labels: {:?})",
+        labels
+    );
+}
+
+#[test]
+fn test_html_completion_in_component_template_includes_custom_alias() {
+    // controllerAs で明示エイリアスが指定された場合、その名前が補完候補に出る
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    templateUrl: 'templates/user-card.html',
+    controllerAs: 'uc',
+    controller: function() {
+        this.name = '';
+    }
+});
+"#;
+    let html = r#"<div>{{ }}</div>"#;
+    let index =
+        analyze_component_with_template(js, html, "file:///templates/user-card.html");
+    let handler = CompletionHandler::new(index);
+    let html_uri = Url::parse("file:///templates/user-card.html").unwrap();
+
+    let items = handler.complete_in_html_angular_context(&html_uri, 0);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.contains(&"uc"),
+        "明示controllerAs 'uc' が補完候補に含まれるべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        !labels.contains(&"$ctrl"),
+        "controllerAs 'uc' を指定したらデフォルトの '$ctrl' は出ないべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        labels.contains(&"name"),
+        "userCardの 'name' プロパティが補完候補に含まれるべき (labels: {:?})",
+        labels
+    );
+}
+
+#[test]
+fn test_html_completion_in_ng_controller_template_still_works() {
+    // 既存のng-controller経由の補完が壊れていないことを確認
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let js = r#"
+angular.module('app', []).controller('FooCtrl', ['$scope', function($scope) {
+    $scope.userName = '';
+}]);
+"#;
+    let html = r#"
+<div ng-controller="FooCtrl as fc">
+    {{ }}
+</div>
+"#;
+    let index = analyze_component_with_template(js, html, "file:///test.html");
+    let handler = CompletionHandler::new(index);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // ng-controller のスコープ内（行2 = `<div ng-controller="...">` 行の中）で補完
+    let items = handler.complete_in_html_angular_context(&html_uri, 2);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.contains(&"fc"),
+        "ng-controller の 'as' エイリアス 'fc' が候補に残ること (labels: {:?})",
+        labels
+    );
+    assert!(
+        labels.contains(&"userName"),
+        "$scope.userName が候補に残ること (labels: {:?})",
+        labels
+    );
+}

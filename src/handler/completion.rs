@@ -7,6 +7,13 @@ use crate::index::Index;
 use crate::model::SymbolKind;
 use crate::util::camel_to_kebab;
 
+/// HTML補完候補のラベル重複を避けつつ追加するヘルパー
+fn push_unique(items: &mut Vec<CompletionItem>, seen: &mut HashSet<String>, item: CompletionItem) {
+    if seen.insert(item.label.clone()) {
+        items.push(item);
+    }
+}
+
 pub struct CompletionHandler {
     index: Arc<Index>,
 }
@@ -258,6 +265,153 @@ impl CompletionHandler {
         };
 
         Some(CompletionResponse::Array(items))
+    }
+
+    /// HTMLテンプレート内のAngular式コンテキスト（{{ ... }} や ng-* 属性値内）の補完候補を返す
+    ///
+    /// 含まれる候補:
+    /// - スコープ内のコントローラーの $scope プロパティ/メソッド
+    /// - コントローラー本体の this.X メソッド/プロパティ（component の `$ctrl.x` 等）
+    /// - HTMLローカル変数（ng-repeat / ng-init 等）と継承された変数
+    /// - フォームバインディングと継承されたフォームバインディング
+    /// - ng-controller の "as" エイリアス
+    /// - component template の controllerAs エイリアス（デフォルト $ctrl）
+    pub fn complete_in_html_angular_context(
+        &self,
+        uri: &Url,
+        line: u32,
+    ) -> Vec<CompletionItem> {
+        let controllers = self.index.resolve_controllers_for_html(uri, line);
+        let mut items: Vec<CompletionItem> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        // $scope プロパティ + コントローラー本体の this.X
+        if controllers.is_empty() {
+            if let Some(CompletionResponse::Array(scope_items)) =
+                self.complete_with_context(Some("$scope"), None, &[])
+            {
+                for item in scope_items {
+                    push_unique(&mut items, &mut seen, item);
+                }
+            }
+        } else {
+            for controller_name in &controllers {
+                if let Some(CompletionResponse::Array(scope_items)) =
+                    self.complete_with_context(Some("$scope"), Some(controller_name), &[])
+                {
+                    for item in scope_items {
+                        push_unique(&mut items, &mut seen, item);
+                    }
+                }
+                // controller の this.X メソッド/プロパティ
+                // (component の `$ctrl.x` や ng-controller の "as" エイリアス越しのアクセス)
+                if let Some(CompletionResponse::Array(method_items)) =
+                    self.complete_with_context(Some(controller_name), None, &[])
+                {
+                    for item in method_items {
+                        push_unique(&mut items, &mut seen, item);
+                    }
+                }
+            }
+        }
+
+        // ローカル変数
+        for var in self.index.html.get_local_variables_at(uri, line) {
+            push_unique(
+                &mut items,
+                &mut seen,
+                CompletionItem {
+                    label: var.name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some(format!("local variable ({})", var.source.as_str())),
+                    ..Default::default()
+                },
+            );
+        }
+
+        // 継承されたローカル変数
+        for var in self
+            .index
+            .templates
+            .get_inherited_local_variables_for_template(uri)
+        {
+            push_unique(
+                &mut items,
+                &mut seen,
+                CompletionItem {
+                    label: var.name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some(format!("inherited variable ({})", var.source.as_str())),
+                    ..Default::default()
+                },
+            );
+        }
+
+        // フォームバインディング
+        for binding in self.index.html.get_form_bindings_at(uri, line) {
+            push_unique(
+                &mut items,
+                &mut seen,
+                CompletionItem {
+                    label: binding.name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some("form binding ($scope)".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        // 継承されたフォームバインディング
+        for binding in self
+            .index
+            .templates
+            .get_inherited_form_bindings_for_template(uri)
+        {
+            push_unique(
+                &mut items,
+                &mut seen,
+                CompletionItem {
+                    label: binding.name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some("inherited form binding ($scope)".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        // ng-controller の "as" エイリアス
+        for (alias, controller_name) in self.index.controllers.get_html_alias_mappings(uri, line) {
+            push_unique(
+                &mut items,
+                &mut seen,
+                CompletionItem {
+                    label: alias,
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some(format!("controller alias ({})", controller_name)),
+                    ..Default::default()
+                },
+            );
+        }
+
+        // component template の controllerAs エイリアス（デフォルト $ctrl）
+        if let Some(binding) = self.index.components.get_component_binding_for_template(uri) {
+            let controller_label = binding
+                .controller_name
+                .clone()
+                .unwrap_or_else(|| "component".to_string());
+            push_unique(
+                &mut items,
+                &mut seen,
+                CompletionItem {
+                    label: binding.controller_as,
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some(format!("component alias ({})", controller_label)),
+                    ..Default::default()
+                },
+            );
+        }
+
+        items
     }
 
     /// HTMLでのディレクティブ補完を返す
