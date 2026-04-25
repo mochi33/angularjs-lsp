@@ -102,7 +102,14 @@ impl DefinitionStore {
     pub fn get_reference_only_names(&self) -> Vec<String> {
         self.references
             .iter()
-            .filter(|entry| !self.definitions.contains_key(entry.key()))
+            .filter(|entry| {
+                !entry.value().is_empty()
+                    && self
+                        .definitions
+                        .get(entry.key())
+                        .map(|d| d.is_empty())
+                        .unwrap_or(true)
+            })
             .map(|entry| entry.key().clone())
             .collect()
     }
@@ -186,11 +193,24 @@ impl DefinitionStore {
     pub fn clear_document(&self, uri: &Url) {
         if let Some((_, symbols)) = self.document_symbols.remove(uri) {
             for symbol_name in symbols {
-                if let Some(mut defs) = self.definitions.get_mut(&symbol_name) {
+                let defs_empty = if let Some(mut defs) = self.definitions.get_mut(&symbol_name) {
                     defs.retain(|s| &s.uri != uri);
+                    defs.is_empty()
+                } else {
+                    false
+                };
+                if defs_empty {
+                    self.definitions.remove_if(&symbol_name, |_, v| v.is_empty());
                 }
-                if let Some(mut refs) = self.references.get_mut(&symbol_name) {
+
+                let refs_empty = if let Some(mut refs) = self.references.get_mut(&symbol_name) {
                     refs.retain(|r| &r.uri != uri);
+                    refs.is_empty()
+                } else {
+                    false
+                };
+                if refs_empty {
+                    self.references.remove_if(&symbol_name, |_, v| v.is_empty());
                 }
             }
         }
@@ -206,5 +226,101 @@ impl DefinitionStore {
 impl Default for DefinitionStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Span, SymbolBuilder, SymbolKind};
+
+    fn make_uri() -> Url {
+        Url::parse("file:///test.js").unwrap()
+    }
+
+    fn make_reference(name: &str, uri: &Url) -> SymbolReference {
+        SymbolReference {
+            name: name.to_string(),
+            uri: uri.clone(),
+            span: Span::new(0, 0, 0, name.len() as u32),
+        }
+    }
+
+    fn make_definition(name: &str, uri: &Url) -> Symbol {
+        let span = Span::new(0, 0, 0, name.len() as u32);
+        SymbolBuilder::new(name.to_string(), SymbolKind::ScopeProperty, uri.clone())
+            .definition_span(span)
+            .name_span(span)
+            .build()
+    }
+
+    #[test]
+    fn clear_document_removes_empty_reference_keys() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        // 入力途中のプレフィックス参照（mo, moc, moch, mochi）を登録
+        for name in ["Ctrl.$scope.mo", "Ctrl.$scope.moc", "Ctrl.$scope.moch", "Ctrl.$scope.mochi"] {
+            store.add_reference(make_reference(name, &uri));
+        }
+
+        store.clear_document(&uri);
+
+        // 補完候補ソースとなる get_reference_only_names が空であることを確認
+        let names = store.get_reference_only_names();
+        assert!(
+            names.is_empty(),
+            "expected no reference-only names after clear, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn deleted_reference_does_not_resurface_in_completion() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        // ユーザが $scope.mochi を参照として書いた状態
+        store.add_reference(make_reference("Ctrl.$scope.mochi", &uri));
+        assert_eq!(store.get_reference_only_names(), vec!["Ctrl.$scope.mochi"]);
+
+        // ユーザが該当行を削除 → 再解析で clear_document が呼ばれる
+        store.clear_document(&uri);
+
+        // 再解析後、$scope.mochi はソースに無いので何も add されない
+        assert!(store.get_reference_only_names().is_empty());
+    }
+
+    #[test]
+    fn clear_document_preserves_other_uris() {
+        let store = DefinitionStore::new();
+        let uri_a = Url::parse("file:///a.js").unwrap();
+        let uri_b = Url::parse("file:///b.js").unwrap();
+
+        store.add_reference(make_reference("Ctrl.$scope.shared", &uri_a));
+        store.add_reference(make_reference("Ctrl.$scope.shared", &uri_b));
+
+        store.clear_document(&uri_a);
+
+        // uri_b の参照は残っているので、reference-only として現れる
+        let names = store.get_reference_only_names();
+        assert_eq!(names, vec!["Ctrl.$scope.shared"]);
+        assert_eq!(store.get_references("Ctrl.$scope.shared").len(), 1);
+    }
+
+    #[test]
+    fn clear_document_removes_empty_definition_keys() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        store.add_definition(make_definition("Ctrl.$scope.mochi", &uri));
+        store.add_reference(make_reference("Ctrl.$scope.other", &uri));
+
+        store.clear_document(&uri);
+
+        // 定義が空になったキーは contains_key で false を返す必要がある
+        // （これがなければ get_reference_only_names で他の reference-only も誤判定する）
+        assert!(!store.has_definition("Ctrl.$scope.mochi"));
+        assert!(store.get_reference_only_names().is_empty());
     }
 }
