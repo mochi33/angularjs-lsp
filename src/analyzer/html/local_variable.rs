@@ -8,7 +8,13 @@ use tree_sitter::Node;
 use super::directives::is_ng_directive;
 use super::variable_parser::{parse_ng_init_expression, parse_ng_repeat_expression};
 use super::HtmlAngularJsAnalyzer;
-use crate::model::{HtmlLocalVariable, HtmlLocalVariableReference};
+use crate::model::{HtmlLocalVariable, HtmlLocalVariableReference, HtmlLocalVariableSource};
+
+/// ng-repeat スコープで暗黙に利用可能な特殊変数
+/// https://docs.angularjs.org/api/ng/directive/ngRepeat
+const NG_REPEAT_SPECIAL_VARS: &[&str] = &[
+    "$index", "$first", "$last", "$middle", "$even", "$odd",
+];
 
 impl HtmlAngularJsAnalyzer {
     /// ローカル変数定義を収集（Pass 4a）
@@ -79,6 +85,36 @@ impl HtmlAngularJsAnalyzer {
                             let value_start_line = value_node.start_position().row as usize;
                             let value_byte_col = value_node.start_position().column + 1;
                             let value_start_col = self.byte_col_to_utf16_col(source, value_start_line, value_byte_col);
+
+                            // 特殊変数（$index, $first, ...）をng-repeat属性名の位置で登録
+                            // 「定義位置」がソース上に無いので、ng-repeat属性名スパンを定義位置として使う
+                            let attr_name_start_line = name_node.start_position().row as u32;
+                            let attr_name_start_byte_col = name_node.start_position().column;
+                            let attr_name_end_byte_col = name_node.end_position().column;
+                            let attr_name_start_col = self.byte_col_to_utf16_col(
+                                source,
+                                attr_name_start_line as usize,
+                                attr_name_start_byte_col,
+                            );
+                            let attr_name_end_col = self.byte_col_to_utf16_col(
+                                source,
+                                attr_name_start_line as usize,
+                                attr_name_end_byte_col,
+                            );
+                            for special in NG_REPEAT_SPECIAL_VARS {
+                                let variable = HtmlLocalVariable {
+                                    name: (*special).to_string(),
+                                    source: HtmlLocalVariableSource::NgRepeatSpecial,
+                                    uri: uri.clone(),
+                                    scope_start_line,
+                                    scope_end_line,
+                                    name_start_line: attr_name_start_line,
+                                    name_start_col: attr_name_start_col,
+                                    name_end_line: attr_name_start_line,
+                                    name_end_col: attr_name_end_col,
+                                };
+                                self.index.html.add_html_local_variable(variable);
+                            }
 
                             // 共通パーサーを使用
                             let parsed_vars = parse_ng_repeat_expression(value);

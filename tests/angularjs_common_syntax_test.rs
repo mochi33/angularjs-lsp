@@ -1920,3 +1920,129 @@ angular.module('app', []).controller('FooCtrl', ['$scope', function($scope) {
         labels
     );
 }
+
+// ============================================================
+// ng-repeat 特殊変数 ($index, $first, $last, $middle, $odd, $even)
+// ============================================================
+
+#[test]
+fn test_ng_repeat_special_variables_registered() {
+    let html = r#"
+<div ng-repeat="item in items">
+    <span>{{ $index }}: {{ item.name }}</span>
+</div>
+"#;
+    let index = analyze_html("", html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let local_vars = index.html.get_all_local_variables(&html_uri);
+    let names: Vec<&str> = local_vars.iter().map(|v| v.name.as_str()).collect();
+
+    for special in &["$index", "$first", "$last", "$middle", "$odd", "$even"] {
+        assert!(
+            names.contains(special),
+            "ng-repeat スコープで {} がローカル変数として登録されるべき (names: {:?})",
+            special,
+            names
+        );
+    }
+    // 通常のループ変数も健在
+    assert!(
+        names.contains(&"item"),
+        "ループ変数 'item' も登録されているべき (names: {:?})",
+        names
+    );
+}
+
+#[test]
+fn test_ng_repeat_special_variables_resolved_as_references() {
+    use angularjs_lsp::model::HtmlLocalVariableSource;
+
+    // $index などが参照として解決されること（スコープ参照ではなくローカル変数参照になる）
+    let html = r#"
+<div ng-repeat="item in items">
+    <span ng-show="$first">First!</span>
+    <span ng-class="{ 'odd': $odd }">{{ $index }}</span>
+</div>
+"#;
+    let index = analyze_html("", html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // ローカル変数 source が NgRepeatSpecial であることを確認
+    let local_vars = index.html.get_all_local_variables(&html_uri);
+    let index_var = local_vars
+        .iter()
+        .find(|v| v.name == "$index")
+        .expect("$index が登録されているべき");
+    assert_eq!(
+        index_var.source,
+        HtmlLocalVariableSource::NgRepeatSpecial,
+        "$index は NgRepeatSpecial として記録されるべき"
+    );
+
+    // 参照（HtmlLocalVariableReference）として登録されていること
+    let refs = index.html.get_all_local_variable_references_for_uri(&html_uri);
+    let ref_names: Vec<&str> = refs.iter().map(|r| r.variable_name.as_str()).collect();
+    assert!(
+        ref_names.contains(&"$index"),
+        "$index への参照が登録されるべき (ref_names: {:?})",
+        ref_names
+    );
+    assert!(
+        ref_names.contains(&"$first"),
+        "$first への参照が登録されるべき (ref_names: {:?})",
+        ref_names
+    );
+}
+
+#[test]
+fn test_ng_repeat_special_variables_in_completion() {
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let html = r#"
+<div ng-repeat="item in items">
+    {{ }}
+</div>
+"#;
+    let index = analyze_html("", html);
+    let handler = CompletionHandler::new(index);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // ng-repeat スコープ内（行2 = `<div ng-repeat=...>` の中）で補完
+    let items = handler.complete_in_html_angular_context(&html_uri, 2);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    for special in &["$index", "$first", "$last", "$middle", "$odd", "$even"] {
+        assert!(
+            labels.contains(special),
+            "ng-repeat スコープ内の補完候補に {} が含まれるべき (labels: {:?})",
+            special,
+            labels
+        );
+    }
+}
+
+#[test]
+fn test_ng_repeat_special_variables_only_in_scope() {
+    // ng-repeat の外側では $index 等は出ないこと
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let html = r#"
+<div>
+    {{ }}
+    <div ng-repeat="item in items">{{ item }}</div>
+</div>
+"#;
+    let index = analyze_html("", html);
+    let handler = CompletionHandler::new(index);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // 行2 = 外側の {{ }} の位置（ng-repeatの前）
+    let items_outer = handler.complete_in_html_angular_context(&html_uri, 2);
+    let outer_labels: Vec<&str> =
+        items_outer.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        !outer_labels.contains(&"$index"),
+        "ng-repeat の外側では $index は補完候補に出ないべき (labels: {:?})",
+        outer_labels
+    );
+}

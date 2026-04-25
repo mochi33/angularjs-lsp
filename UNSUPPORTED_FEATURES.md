@@ -167,20 +167,18 @@ angular.extend($scope, {
 
 ## HTML側（4項目）
 
-### 11. ng-repeat 特殊変数（$index, $first, $last, $odd, $even）が認識されない
+### ~~11. ng-repeat 特殊変数（$index, $first, $last, $odd, $even）が認識されない~~ (対応済み)
 
-ng-repeat 内で暗黙的に利用可能な特殊変数がローカル変数/スコープ参照として登録されない。
+**対応済み**: `extract_ng_repeat_variable_definitions` で ng-repeat スコープに `$index`, `$first`, `$last`, `$middle`, `$odd`, `$even` の6変数を `HtmlLocalVariableSource::NgRepeatSpecial` として自動登録するようにした。補完候補にも出るようになり、ng-repeat スコープの内側でのみ参照解決される。
 
 ```html
 <div ng-repeat="item in items">
-    {{ $index }}: {{ item.name }}         <!-- $index 未認識 -->
-    <span ng-show="$first">First!</span>  <!-- $first 未認識 -->
-    <span ng-show="$last">Last!</span>    <!-- $last 未認識 -->
-    <span ng-class="{ 'odd': $odd }">row</span>  <!-- $odd 未認識 -->
+    {{ $index }}: {{ item.name }}         <!-- ✓ $index 認識 -->
+    <span ng-show="$first">First!</span>  <!-- ✓ $first 認識 -->
+    <span ng-show="$last">Last!</span>    <!-- ✓ $last 認識 -->
+    <span ng-class="{ 'odd': $odd }">row</span>  <!-- ✓ $odd 認識 -->
 </div>
 ```
-
-**対応案**: ng-repeat 解析時に `$index`, `$first`, `$last`, `$middle`, `$odd`, `$even` をローカル変数として自動登録する。
 
 ---
 

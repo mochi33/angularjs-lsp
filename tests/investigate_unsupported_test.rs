@@ -571,6 +571,11 @@ angular.module('app', []).controller('SpecialVarCtrl', ['$scope', function($scop
         check("ng-repeat $first 特殊変数", has_first);
         check("ng-repeat $last 特殊変数", has_last);
         check("ng-repeat $odd 特殊変数", has_odd);
+        // 対応済みであることを assert（回帰防止）
+        assert!(
+            has_index && has_first && has_last && has_odd,
+            "ng-repeat 特殊変数 ($index, $first, $last, $odd) は全てローカル変数として登録されているべき"
+        );
     }
 
     // --- 4. ng-repeat as (aliasAs) ---

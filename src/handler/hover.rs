@@ -212,6 +212,7 @@ impl HoverHandler {
             HtmlLocalVariableSource::NgInit => "ng-init",
             HtmlLocalVariableSource::NgRepeatIterator => "ng-repeat iterator",
             HtmlLocalVariableSource::NgRepeatKeyValue => "ng-repeat key/value",
+            HtmlLocalVariableSource::NgRepeatSpecial => "ng-repeat special",
         };
 
         let reference_count = self
