@@ -2287,6 +2287,101 @@ angular.module('app', []).controller('PageCtrl', ['$scope', function($scope) {
 }
 
 #[test]
+fn test_md_bottom_sheet_template_binding() {
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$mdBottomSheet', function($mdBottomSheet) {
+    $mdBottomSheet.show({
+        controller: 'OptionsSheetCtrl',
+        templateUrl: 'templates/options-sheet.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("options-sheet.html"))
+        .expect("$mdBottomSheet.show のテンプレートバインディングが登録されるべき");
+
+    assert_eq!(binding.controller_name, "OptionsSheetCtrl");
+    assert_eq!(
+        binding.source,
+        BindingSource::MdBottomSheet,
+        "BindingSource は MdBottomSheet であるべき"
+    );
+}
+
+#[test]
+fn test_md_bottom_sheet_controller_reference_registered() {
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$mdBottomSheet', function($mdBottomSheet) {
+    $mdBottomSheet.show({
+        controller: 'ShareSheetCtrl',
+        templateUrl: 'templates/share-sheet.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(
+        has_reference(&index, "ShareSheetCtrl"),
+        "$mdBottomSheet.show の controller 参照が登録されるべき"
+    );
+}
+
+#[test]
+fn test_md_bottom_sheet_aliased_via_di() {
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', function() {
+    var mdBottomSheet = angular.injector(['ng', 'material.components.bottomSheet']).get('$mdBottomSheet');
+    mdBottomSheet.show({
+        controller: 'AliasedSheetCtrl',
+        templateUrl: 'templates/aliased-sheet.html'
+    });
+});
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("aliased-sheet.html"))
+        .expect("mdBottomSheet (エイリアス) からも binding を抽出すべき");
+    assert_eq!(binding.controller_name, "AliasedSheetCtrl");
+    assert_eq!(binding.source, BindingSource::MdBottomSheet);
+}
+
+#[test]
+fn test_md_dialog_and_md_bottom_sheet_distinguished() {
+    // 同一ファイル内に両方が存在しても BindingSource で区別されること
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('MixCtrl', ['$mdDialog', '$mdBottomSheet',
+    function($mdDialog, $mdBottomSheet) {
+        $mdDialog.show({ controller: 'DialogA', templateUrl: 'a.html' });
+        $mdBottomSheet.show({ controller: 'SheetB', templateUrl: 'b.html' });
+    }]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+
+    let a = bindings
+        .iter()
+        .find(|b| b.template_path.ends_with("a.html"))
+        .expect("a.html のバインディングがあるべき");
+    let b = bindings
+        .iter()
+        .find(|b| b.template_path.ends_with("b.html"))
+        .expect("b.html のバインディングがあるべき");
+
+    assert_eq!(a.source, BindingSource::MdDialog);
+    assert_eq!(b.source, BindingSource::MdBottomSheet);
+}
+
+#[test]
 fn test_md_dialog_aliased_via_di() {
     // DI で受けた $mdDialog の別名（mdDialog 等）も認識する
     use angularjs_lsp::model::BindingSource;

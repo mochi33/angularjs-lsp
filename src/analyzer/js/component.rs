@@ -23,6 +23,7 @@ impl AngularJsAnalyzer {
     /// - `.value('Name', ...)` - 値定義
     /// - `$uibModal.open({...})` - UI Bootstrap モーダルバインディング
     /// - `$mdDialog.show({...})` - Angular Material ダイアログバインディング
+    /// - `$mdBottomSheet.show({...})` - Angular Material ボトムシートバインディング
     pub(super) fn analyze_call_expression(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if let Some(callee) = node.child_by_field_name("function") {
             let callee_text = self.node_text(callee, source);
@@ -45,7 +46,7 @@ impl AngularJsAnalyzer {
                         "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant, ctx),
                         "value" => self.extract_component_definition(node, source, uri, SymbolKind::Value, ctx),
                         "open" => self.extract_modal_binding(node, callee, source, uri),
-                        "show" => self.extract_md_dialog_binding(node, callee, source, uri),
+                        "show" => self.extract_material_show_binding(node, callee, source, uri),
                         "config" | "run" => self.extract_run_config_di(node, source, ctx),
                         "when" | "otherwise" => self.extract_route_when_di(node, source, uri, ctx),
                         "state" => self.extract_state_provider_di(node, source, uri, ctx),
@@ -78,7 +79,7 @@ impl AngularJsAnalyzer {
         }
     }
 
-    /// $mdDialog.show({controller, templateUrl}) からテンプレートバインディングを抽出
+    /// Angular Material の .show({controller, templateUrl}) からテンプレートバインディングを抽出
     ///
     /// 認識パターン:
     /// ```javascript
@@ -86,26 +87,36 @@ impl AngularJsAnalyzer {
     ///     controller: 'EditDialogCtrl',
     ///     templateUrl: 'templates/edit-dialog.html'
     /// });
+    /// $mdBottomSheet.show({
+    ///     controller: 'OptionsSheetCtrl',
+    ///     templateUrl: 'templates/options-sheet.html'
+    /// });
     /// ```
     ///
-    /// $mdDialog.confirm() / $mdDialog.alert() などのプリセットビルダーは
+    /// オブジェクトが `$mdDialog` / `$mdBottomSheet` (および DI で受けた
+    /// `mdDialog` / `mdBottomSheet` エイリアス) の場合のみマッチ。
+    ///
+    /// `$mdDialog.confirm()` / `$mdDialog.alert()` のプリセットビルダーは
     /// オブジェクト引数を取らないため自動的にスキップされる。
-    fn extract_md_dialog_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
-        // オブジェクトが $mdDialog かチェック
-        if let Some(object) = callee.child_by_field_name("object") {
+    fn extract_material_show_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
+        let binding_source = if let Some(object) = callee.child_by_field_name("object") {
             let obj_text = self.node_text(object, source);
-            if !obj_text.ends_with("$mdDialog") && !obj_text.ends_with("mdDialog") {
+            if obj_text.ends_with("$mdDialog") || obj_text.ends_with("mdDialog") {
+                BindingSource::MdDialog
+            } else if obj_text.ends_with("$mdBottomSheet") || obj_text.ends_with("mdBottomSheet") {
+                BindingSource::MdBottomSheet
+            } else {
                 return;
             }
         } else {
             return;
-        }
+        };
 
         // 引数からオブジェクトを取得
         if let Some(args) = node.child_by_field_name("arguments") {
             if let Some(first_arg) = args.named_child(0) {
                 if first_arg.kind() == "object" {
-                    self.extract_template_binding_from_object(first_arg, source, uri, BindingSource::MdDialog);
+                    self.extract_template_binding_from_object(first_arg, source, uri, binding_source);
                 }
             }
         }

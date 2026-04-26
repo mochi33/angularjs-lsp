@@ -346,6 +346,7 @@ impl CodeLensHandler {
             BindingSource::StateProvider => "$stateProvider",
             BindingSource::UibModal => "$uibModal",
             BindingSource::MdDialog => "$mdDialog",
+            BindingSource::MdBottomSheet => "$mdBottomSheet",
             BindingSource::NgController => "ng-controller",
         };
 
@@ -442,6 +443,7 @@ impl CodeLensHandler {
             BindingSource::StateProvider => "$stateProvider",
             BindingSource::UibModal => "$uibModal",
             BindingSource::MdDialog => "$mdDialog",
+            BindingSource::MdBottomSheet => "$mdBottomSheet",
             BindingSource::NgController => "ng-controller",
         };
 
