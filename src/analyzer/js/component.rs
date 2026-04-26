@@ -24,6 +24,9 @@ impl AngularJsAnalyzer {
     /// - `$uibModal.open({...})` - UI Bootstrap モーダルバインディング
     /// - `$mdDialog.show({...})` - Angular Material ダイアログバインディング
     /// - `$mdBottomSheet.show({...})` - Angular Material ボトムシートバインディング
+    /// - `$mdToast.show({...})` - Angular Material トーストバインディング
+    /// - `$mdPanel.open({...})` - Angular Material パネルバインディング
+    /// - `ngDialog.open({...})` - ngDialog (3rd party) バインディング
     pub(super) fn analyze_call_expression(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if let Some(callee) = node.child_by_field_name("function") {
             let callee_text = self.node_text(callee, source);
@@ -45,7 +48,7 @@ impl AngularJsAnalyzer {
                         "filter" => self.extract_component_definition(node, source, uri, SymbolKind::Filter, ctx),
                         "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant, ctx),
                         "value" => self.extract_component_definition(node, source, uri, SymbolKind::Value, ctx),
-                        "open" => self.extract_modal_binding(node, callee, source, uri),
+                        "open" => self.extract_open_binding(node, callee, source, uri),
                         "show" => self.extract_material_show_binding(node, callee, source, uri),
                         "config" | "run" => self.extract_run_config_di(node, source, ctx),
                         "when" | "otherwise" => self.extract_route_when_di(node, source, uri, ctx),
@@ -57,23 +60,45 @@ impl AngularJsAnalyzer {
         }
     }
 
-    /// $uibModal.open() / $modal.open() からテンプレートバインディングを抽出
-    fn extract_modal_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
-        // オブジェクトが$uibModalや$modalかチェック
-        if let Some(object) = callee.child_by_field_name("object") {
+    /// .open({controller, templateUrl}) 系のテンプレートバインディングを抽出
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// $uibModal.open({ controller: 'X', templateUrl: '...' });   // UI Bootstrap Modal
+    /// $modal.open({ controller: 'X', templateUrl: '...' });      // 同 (旧名)
+    /// $mdPanel.open({ controller: 'X', templateUrl: '...' });    // Angular Material Panel
+    /// ngDialog.open({ controller: 'X', templateUrl: '...' });    // ngDialog (3rd party)
+    /// ```
+    ///
+    /// オブジェクト名で BindingSource を区別する。それ以外の `.open()` 呼び出し
+    /// (file.open() 等) は自動的にスキップされる。
+    fn extract_open_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
+        let binding_source = if let Some(object) = callee.child_by_field_name("object") {
             let obj_text = self.node_text(object, source);
-            if !obj_text.ends_with("Modal") && !obj_text.ends_with("$uibModal") && !obj_text.ends_with("$modal") {
+            // 順序重要: より具体的な接尾辞から先に判定する
+            if obj_text.ends_with("$mdPanel") || obj_text.ends_with("mdPanel") {
+                BindingSource::MdPanel
+            } else if obj_text.ends_with("$ngDialog")
+                || obj_text.ends_with("ngDialog")
+            {
+                BindingSource::NgDialog
+            } else if obj_text.ends_with("$uibModal") || obj_text.ends_with("$modal") {
+                BindingSource::UibModal
+            } else if obj_text.ends_with("Modal") {
+                // 後方互換: ローカル変数名が ...Modal で終わる場合は UibModal 扱い
+                BindingSource::UibModal
+            } else {
                 return;
             }
         } else {
             return;
-        }
+        };
 
         // 引数からオブジェクトを取得
         if let Some(args) = node.child_by_field_name("arguments") {
             if let Some(first_arg) = args.named_child(0) {
                 if first_arg.kind() == "object" {
-                    self.extract_template_binding_from_object(first_arg, source, uri, BindingSource::UibModal);
+                    self.extract_template_binding_from_object(first_arg, source, uri, binding_source);
                 }
             }
         }
@@ -91,13 +116,18 @@ impl AngularJsAnalyzer {
     ///     controller: 'OptionsSheetCtrl',
     ///     templateUrl: 'templates/options-sheet.html'
     /// });
+    /// $mdToast.show({
+    ///     controller: 'CustomToastCtrl',
+    ///     templateUrl: 'templates/custom-toast.html'
+    /// });
     /// ```
     ///
-    /// オブジェクトが `$mdDialog` / `$mdBottomSheet` (および DI で受けた
-    /// `mdDialog` / `mdBottomSheet` エイリアス) の場合のみマッチ。
+    /// オブジェクトが `$mdDialog` / `$mdBottomSheet` / `$mdToast` (および DI
+    /// で受けた `mdDialog` / `mdBottomSheet` / `mdToast` エイリアス) の場合
+    /// のみマッチ。
     ///
-    /// `$mdDialog.confirm()` / `$mdDialog.alert()` のプリセットビルダーは
-    /// オブジェクト引数を取らないため自動的にスキップされる。
+    /// `$mdDialog.confirm()` / `$mdDialog.alert()` / `$mdToast.simple()` の
+    /// プリセットビルダーはオブジェクト引数を取らないため自動的にスキップされる。
     fn extract_material_show_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
         let binding_source = if let Some(object) = callee.child_by_field_name("object") {
             let obj_text = self.node_text(object, source);
@@ -105,6 +135,8 @@ impl AngularJsAnalyzer {
                 BindingSource::MdDialog
             } else if obj_text.ends_with("$mdBottomSheet") || obj_text.ends_with("mdBottomSheet") {
                 BindingSource::MdBottomSheet
+            } else if obj_text.ends_with("$mdToast") || obj_text.ends_with("mdToast") {
+                BindingSource::MdToast
             } else {
                 return;
             }
