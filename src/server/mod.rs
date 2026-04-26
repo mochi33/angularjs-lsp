@@ -366,8 +366,12 @@ impl Backend {
             });
         }
 
-        if let Some(ref proxy) = *self.ts_proxy.read().await {
-            proxy.did_change(&uri, &text, version).await;
+        // tsserver は HTML を解釈できないので JS ファイルのみ通知する
+        // (HTML を languageId=javascript で渡すと tsserver が無駄に parse する)
+        if is_js_file(&uri) {
+            if let Some(ref proxy) = *self.ts_proxy.read().await {
+                proxy.did_change(&uri, &text, version).await;
+            }
         }
     }
 
@@ -423,9 +427,12 @@ impl Backend {
             self.publish_diagnostics_for_js(&uri).await;
         }
 
-        if let Some(ref proxy) = *self.ts_proxy.read().await {
-            proxy.did_open(&uri, &text).await;
-            self.ts_opened_files.insert(uri.clone(), true);
+        // tsserver は JS ファイルだけ知っていれば良い (HTML は内部ハンドラで処理)
+        if is_js_file(&uri) {
+            if let Some(ref proxy) = *self.ts_proxy.read().await {
+                proxy.did_open(&uri, &text).await;
+                self.ts_opened_files.insert(uri.clone(), true);
+            }
         }
     }
 
@@ -1327,8 +1334,13 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        if let Some(ref proxy) = *self.ts_proxy.read().await {
-            proxy.did_close(&params.text_document.uri).await;
+        let uri = &params.text_document.uri;
+        // 実際に tsserver に開いたファイルだけを close する
+        // (HTML 等、tsserver に渡していないファイルに did_close を送る必要はない)
+        if self.ts_opened_files.remove(uri).is_some() {
+            if let Some(ref proxy) = *self.ts_proxy.read().await {
+                proxy.did_close(uri).await;
+            }
         }
     }
 
