@@ -1,6 +1,6 @@
 //! Angular式のパースとコンテキスト判定
 
-use super::directives::is_ng_directive;
+use super::directives::is_directive_attribute;
 use super::HtmlAngularJsAnalyzer;
 
 use tree_sitter::{Parser, Tree};
@@ -222,9 +222,11 @@ impl HtmlAngularJsAnalyzer {
             let after_eq = &before_cursor[eq_idx + 2..];
             // 属性値の閉じクォートがない場合、属性値内にいる
             if !after_eq.contains('"') {
-                // 属性名を抽出（`="` の前の部分）
-                if let Some(attr_name) = Self::extract_attr_name(&before_cursor[..eq_idx]) {
-                    if is_ng_directive(attr_name) {
+                // 属性名と要素名を抽出（`="` の前の部分から）
+                let before_eq = &before_cursor[..eq_idx];
+                if let Some(attr_name) = Self::extract_attr_name(before_eq) {
+                    let elem = Self::extract_element_name_before(before_eq);
+                    if is_directive_attribute(attr_name, elem, &self.index) {
                         return true;
                     }
                 }
@@ -236,9 +238,11 @@ impl HtmlAngularJsAnalyzer {
             let after_eq = &before_cursor[eq_idx + 2..];
             // 属性値の閉じクォートがない場合、属性値内にいる
             if !after_eq.contains('\'') {
-                // 属性名を抽出（`='` の前の部分）
-                if let Some(attr_name) = Self::extract_attr_name(&before_cursor[..eq_idx]) {
-                    if is_ng_directive(attr_name) {
+                // 属性名と要素名を抽出（`='` の前の部分から）
+                let before_eq = &before_cursor[..eq_idx];
+                if let Some(attr_name) = Self::extract_attr_name(before_eq) {
+                    let elem = Self::extract_element_name_before(before_eq);
+                    if is_directive_attribute(attr_name, elem, &self.index) {
                         return true;
                     }
                 }
@@ -246,6 +250,25 @@ impl HtmlAngularJsAnalyzer {
         }
 
         false
+    }
+
+    /// 文字列の末尾位置から見て、現在開いている `<tag` の `tag` 名を抽出する
+    /// (component bindings 判定に使う element_tag_name)
+    fn extract_element_name_before(s: &str) -> Option<&str> {
+        let lt_idx = s.rfind('<')?;
+        let after_lt = &s[lt_idx + 1..];
+        // 閉じタグ (`</`) は除外
+        if after_lt.starts_with('/') {
+            return None;
+        }
+        let end = after_lt
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .unwrap_or(after_lt.len());
+        if end == 0 {
+            None
+        } else {
+            Some(&after_lt[..end])
+        }
     }
 
     /// 文字列の末尾から属性名を抽出
