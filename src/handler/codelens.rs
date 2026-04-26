@@ -345,6 +345,7 @@ impl CodeLensHandler {
             BindingSource::RouteProvider => "$routeProvider",
             BindingSource::StateProvider => "$stateProvider",
             BindingSource::UibModal => "$uibModal",
+            BindingSource::MdDialog => "$mdDialog",
             BindingSource::NgController => "ng-controller",
         };
 
@@ -440,6 +441,7 @@ impl CodeLensHandler {
             BindingSource::RouteProvider => "$routeProvider",
             BindingSource::StateProvider => "$stateProvider",
             BindingSource::UibModal => "$uibModal",
+            BindingSource::MdDialog => "$mdDialog",
             BindingSource::NgController => "ng-controller",
         };
 

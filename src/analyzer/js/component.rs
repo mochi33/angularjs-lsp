@@ -21,7 +21,8 @@ impl AngularJsAnalyzer {
     /// - `.filter('Name', ...)` - フィルター定義
     /// - `.constant('Name', ...)` - 定数定義
     /// - `.value('Name', ...)` - 値定義
-    /// - `$uibModal.open({...})` - モーダルバインディング
+    /// - `$uibModal.open({...})` - UI Bootstrap モーダルバインディング
+    /// - `$mdDialog.show({...})` - Angular Material ダイアログバインディング
     pub(super) fn analyze_call_expression(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if let Some(callee) = node.child_by_field_name("function") {
             let callee_text = self.node_text(callee, source);
@@ -44,6 +45,7 @@ impl AngularJsAnalyzer {
                         "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant, ctx),
                         "value" => self.extract_component_definition(node, source, uri, SymbolKind::Value, ctx),
                         "open" => self.extract_modal_binding(node, callee, source, uri),
+                        "show" => self.extract_md_dialog_binding(node, callee, source, uri),
                         "config" | "run" => self.extract_run_config_di(node, source, ctx),
                         "when" | "otherwise" => self.extract_route_when_di(node, source, uri, ctx),
                         "state" => self.extract_state_provider_di(node, source, uri, ctx),
@@ -76,9 +78,47 @@ impl AngularJsAnalyzer {
         }
     }
 
+    /// $mdDialog.show({controller, templateUrl}) からテンプレートバインディングを抽出
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// $mdDialog.show({
+    ///     controller: 'EditDialogCtrl',
+    ///     templateUrl: 'templates/edit-dialog.html'
+    /// });
+    /// ```
+    ///
+    /// $mdDialog.confirm() / $mdDialog.alert() などのプリセットビルダーは
+    /// オブジェクト引数を取らないため自動的にスキップされる。
+    fn extract_md_dialog_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
+        // オブジェクトが $mdDialog かチェック
+        if let Some(object) = callee.child_by_field_name("object") {
+            let obj_text = self.node_text(object, source);
+            if !obj_text.ends_with("$mdDialog") && !obj_text.ends_with("mdDialog") {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        // 引数からオブジェクトを取得
+        if let Some(args) = node.child_by_field_name("arguments") {
+            if let Some(first_arg) = args.named_child(0) {
+                if first_arg.kind() == "object" {
+                    self.extract_template_binding_from_object(first_arg, source, uri, BindingSource::MdDialog);
+                }
+            }
+        }
+    }
+
     /// JSオブジェクトからcontrollerとtemplateUrlを抽出してバインディングを登録
+    ///
+    /// controller が文字列の場合は controller シンボルへの参照も登録する
+    /// （$routeProvider/$stateProvider 系は別経路でも参照登録するが、重複は
+    /// definition_store 側で URI+位置でデデュープされる）
     fn extract_template_binding_from_object(&self, obj_node: Node, source: &str, uri: &Url, binding_source: BindingSource) {
         let mut controller_name: Option<String> = None;
+        let mut controller_value_node: Option<Node> = None;
         let mut template_url: Option<String> = None;
         let mut template_url_line: Option<u32> = None;
 
@@ -95,6 +135,7 @@ impl AngularJsAnalyzer {
                             "controller" => {
                                 if value.kind() == "string" {
                                     controller_name = Some(self.extract_string_value(value, source));
+                                    controller_value_node = Some(value);
                                 }
                             }
                             "templateUrl" => {
@@ -108,6 +149,23 @@ impl AngularJsAnalyzer {
                     }
                 }
             }
+        }
+
+        // controller が文字列で指定されているなら参照を登録
+        if let (Some(name), Some(value_node)) = (controller_name.as_ref(), controller_value_node) {
+            let start = value_node.start_position();
+            let end = value_node.end_position();
+            let reference = SymbolReference {
+                name: name.clone(),
+                uri: uri.clone(),
+                span: Span::new(
+                    self.offset_line(start.row as u32),
+                    start.column as u32,
+                    self.offset_line(end.row as u32),
+                    end.column as u32,
+                ),
+            };
+            self.index.definitions.add_reference(reference);
         }
 
         // 両方揃っていればバインディングを登録

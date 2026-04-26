@@ -2199,3 +2199,113 @@ fn test_directive_completion_context_returns_element_tag_name() {
     assert!(ctx_tag.1, "タグ名位置なので is_tag_name = true");
     assert_eq!(ctx_tag.2, None, "タグ名位置では element_tag_name は None");
 }
+
+// ============================================================
+// $mdDialog.show のテンプレート/コントローラーバインディング
+// ============================================================
+
+#[test]
+fn test_md_dialog_template_binding() {
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('DialogCtrl', ['$mdDialog', function($mdDialog) {
+    $mdDialog.show({
+        controller: 'EditDialogCtrl',
+        templateUrl: 'templates/edit-dialog.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let dialog_binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("edit-dialog.html"))
+        .expect("$mdDialog.show のテンプレートバインディングが登録されるべき");
+
+    assert_eq!(dialog_binding.controller_name, "EditDialogCtrl");
+    assert_eq!(
+        dialog_binding.source,
+        BindingSource::MdDialog,
+        "BindingSource は MdDialog であるべき"
+    );
+}
+
+#[test]
+fn test_md_dialog_controller_reference_registered() {
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$mdDialog', function($mdDialog) {
+    $mdDialog.show({
+        controller: 'ConfirmDialogCtrl',
+        templateUrl: 'templates/confirm.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(
+        has_reference(&index, "ConfirmDialogCtrl"),
+        "$mdDialog.show の controller 参照が登録されるべき"
+    );
+}
+
+#[test]
+fn test_md_dialog_show_without_template_does_not_register() {
+    // $mdDialog.confirm() / $mdDialog.alert() などプリセットビルダーは
+    // show() ではないため対象外。show() でもオブジェクト引数を取らないものは無視。
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$mdDialog', function($mdDialog) {
+    $mdDialog.show($mdDialog.confirm().title('確認'));
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    assert!(
+        bindings.is_empty(),
+        "オブジェクト引数を取らない $mdDialog.show は無視されるべき (got: {:?})",
+        bindings.iter().map(|b| &b.template_path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_other_show_calls_do_not_register_md_dialog_binding() {
+    // $mdDialog 以外の .show() 呼び出しは無視されるべき
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$scope', function($scope) {
+    someOtherService.show({
+        controller: 'NotADialogCtrl',
+        templateUrl: 'templates/not-a-dialog.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    assert!(
+        bindings.is_empty(),
+        "$mdDialog 以外の .show() は無視されるべき (got: {:?})",
+        bindings.iter().map(|b| &b.template_path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_md_dialog_aliased_via_di() {
+    // DI で受けた $mdDialog の別名（mdDialog 等）も認識する
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', function() {
+    var mdDialog = angular.injector(['ng', 'material.components.dialog']).get('$mdDialog');
+    mdDialog.show({
+        controller: 'AliasedDialogCtrl',
+        templateUrl: 'templates/aliased.html'
+    });
+});
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("aliased.html"))
+        .expect("mdDialog (エイリアス) からも binding を抽出すべき");
+    assert_eq!(binding.controller_name, "AliasedDialogCtrl");
+    assert_eq!(binding.source, BindingSource::MdDialog);
+}
