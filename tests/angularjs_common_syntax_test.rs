@@ -2728,3 +2728,89 @@ angular.module('app', []).controller('PageCtrl', function() {
     assert_eq!(binding.controller_name, "AliasedDialogCtrl");
     assert_eq!(binding.source, BindingSource::MdDialog);
 }
+
+// ============================================================
+// 子HTML変更時の親HTML再解析 (ng-include 子→親 波及)
+// ============================================================
+
+#[test]
+fn test_get_parent_templates_for_child_finds_ng_include_parent() {
+    // parent.html が <div ng-include="'child.html'"> を含む場合、
+    // child.html から get_parent_templates_for_child で parent.html が引ける
+    let index = Arc::new(Index::new());
+    let js_analyzer = Arc::new(AngularJsAnalyzer::new(index.clone()));
+    let html_analyzer = HtmlAngularJsAnalyzer::new(index.clone(), js_analyzer);
+
+    let parent_uri = Url::parse("file:///app/parent.html").unwrap();
+    let parent_html = r#"
+<div ng-controller="ParentCtrl">
+    <div ng-include="'child.html'"></div>
+</div>
+"#;
+    html_analyzer.analyze_document(&parent_uri, parent_html);
+
+    let child_uri = Url::parse("file:///app/child.html").unwrap();
+    let parents = index.templates.get_parent_templates_for_child(&child_uri);
+
+    assert!(
+        parents.iter().any(|(uri, _)| uri == &parent_uri),
+        "child.html の parent として parent.html が引けるべき (got: {:?})",
+        parents.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_get_parent_templates_for_child_returns_empty_for_unincluded() {
+    // ng-include されていないファイルは parent を持たない
+    let index = Arc::new(Index::new());
+    let js_analyzer = Arc::new(AngularJsAnalyzer::new(index.clone()));
+    let html_analyzer = HtmlAngularJsAnalyzer::new(index.clone(), js_analyzer);
+
+    let parent_uri = Url::parse("file:///app/parent.html").unwrap();
+    let parent_html = r#"
+<div ng-controller="ParentCtrl">
+    <div ng-include="'used.html'"></div>
+</div>
+"#;
+    html_analyzer.analyze_document(&parent_uri, parent_html);
+
+    let unrelated_uri = Url::parse("file:///app/unrelated.html").unwrap();
+    let parents = index.templates.get_parent_templates_for_child(&unrelated_uri);
+    assert!(
+        parents.is_empty(),
+        "ng-include されていないファイルは parent を持たないべき"
+    );
+}
+
+#[test]
+fn test_child_re_analysis_keeps_parent_in_dependency_graph() {
+    // 子 HTML を再解析しても、親 HTML との ng-include 依存関係は維持される。
+    // (親の analyze で登録された binding を、子側の clear/再解析が壊さないこと。
+    //  これが壊れていたら on_change 後の get_parent_templates_for_child が空を
+    //  返し、親への診断再発行が走らなくなる)
+    let index = Arc::new(Index::new());
+    let js_analyzer = Arc::new(AngularJsAnalyzer::new(index.clone()));
+    let html_analyzer = HtmlAngularJsAnalyzer::new(index.clone(), js_analyzer);
+
+    let parent_uri = Url::parse("file:///app/parent.html").unwrap();
+    let child_uri = Url::parse("file:///app/child.html").unwrap();
+
+    let parent_html = r#"
+<div ng-controller="ParentCtrl">
+    <div ng-include="'child.html'"></div>
+</div>
+"#;
+    html_analyzer.analyze_document(&parent_uri, parent_html);
+    html_analyzer.analyze_document(&child_uri, r#"<div>v1</div>"#);
+
+    // 子を編集して再解析
+    html_analyzer.analyze_document(&child_uri, r#"<div ng-controller="ChildCtrl">v2</div>"#);
+
+    // 子→親の依存関係が壊れていないこと (server 側の波及処理が動く前提)
+    let parents = index.templates.get_parent_templates_for_child(&child_uri);
+    assert!(
+        parents.iter().any(|(uri, _)| uri == &parent_uri),
+        "子の再解析後も parent.html が parent として引けるべき (got: {:?})",
+        parents.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>()
+    );
+}

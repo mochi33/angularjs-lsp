@@ -215,12 +215,12 @@ impl Backend {
 
                 // Run CPU-intensive analysis on the blocking thread pool
                 //
-                // 戻り値: Some((had_embedded_scripts_before, has_embedded_scripts_after))
+                // 戻り値: Some((had_embedded_scripts_before, has_embedded_scripts_after, affected_parents))
                 //   - 解析が走らなかった場合は None
-                //   - 両方 false なら HTML 更新が JS 側のシンボル空間に影響しないので
-                //     「全 JS 診断の再発行」をスキップできる
-                //   - どちらかが true なら、JS ファイル側の参照解決結果が変わり得るので
-                //     依存ファイルの診断を更新する必要がある
+                //   - 埋め込みscript の前後フラグは「全JS診断再発行をスキップできるか」
+                //     の判定に使う (PR #19)
+                //   - affected_parents は、この HTML を ng-include で参照している親
+                //     HTML のうち、再解析した URI の一覧 (子→親の波及対応)
                 let analysis_result = tokio::task::spawn_blocking(move || {
                     let latest_text = match bl_documents.get(&bl_uri) {
                         Some(doc) => doc.value().clone(),
@@ -261,13 +261,38 @@ impl Backend {
                             bl_html_analyzer.analyze_document(&child_uri, doc.value());
                         }
                     }
-                    Some((had_embedded_before, has_embedded_after))
+
+                    // 子→親の波及: この HTML を ng-include で取り込んでいる親 URI
+                    // のうち、エディタで開いているものを集める。
+                    //
+                    // 親の HTML 自身は再解析しない (parent の HTML 構造や ng-include
+                    // 定義は親自身の analyze で更新される情報で、子の変更では変わらない)。
+                    // 影響を受けるのは「親の診断 (例: <div ng-controller="ChildCtrl">
+                    // で参照する ChildCtrl が child の <script> 変更で消えた等)」のみ
+                    // で、診断は index の現状を都度参照するので、再発行するだけで済む。
+                    let mut affected_parents: Vec<Url> = Vec::new();
+                    let mut seen: HashSet<Url> = HashSet::new();
+                    seen.insert(bl_uri.clone());
+                    for (parent_uri, _) in
+                        bl_index.templates.get_parent_templates_for_child(&bl_uri)
+                    {
+                        if !seen.insert(parent_uri.clone()) {
+                            continue;
+                        }
+                        if bl_documents.contains_key(&parent_uri) {
+                            affected_parents.push(parent_uri);
+                        }
+                    }
+
+                    Some((had_embedded_before, has_embedded_after, affected_parents))
                 })
                 .await
                 .ok()
                 .flatten();
 
-                if let Some((had_embedded_before, has_embedded_after)) = analysis_result {
+                if let Some((had_embedded_before, has_embedded_after, affected_parents)) =
+                    analysis_result
+                {
                     publish_html_diagnostics(&client, &index, &diagnostics_config, &uri).await;
 
                     // JS シンボルに変化があり得る場合のみ、開いている JS ファイルの
@@ -279,6 +304,17 @@ impl Backend {
                             &index,
                             &diagnostics_config,
                             &documents,
+                        )
+                        .await;
+                    }
+
+                    // 子→親の波及で再解析した親 HTML の診断も更新する
+                    for parent_uri in affected_parents {
+                        publish_html_diagnostics(
+                            &client,
+                            &index,
+                            &diagnostics_config,
+                            &parent_uri,
                         )
                         .await;
                     }
