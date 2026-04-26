@@ -263,18 +263,57 @@ impl SemanticTokensHandler {
     }
 
     /// Encode raw tokens as delta-encoded SemanticTokens
+    ///
+    /// LSP semantic tokens spec の制約:
+    /// - tokens は (line, start_col) 昇順でソート済みであること
+    /// - tokens は重複/オーバーラップしてはならない
+    /// - length > 0 でなければならない
+    ///
+    /// この LSP は複数のソース (scope refs / local vars / form bindings /
+    /// directive refs) からトークンを集めるため、同一スパンの重複や
+    /// 隣接トークンのオーバーラップが発生し得る。クライアント (VS Code 等) は
+    /// オーバーラップ等の不正データを検出すると **ファイル全体の semantic
+    /// tokens を破棄して何も表示しない** ため、ここで防御的に弾く。
     fn encode_tokens(mut raw_tokens: Vec<RawSemanticToken>) -> Vec<SemanticToken> {
-        // Sort by line, then by column
-        raw_tokens.sort_by(|a, b| a.line.cmp(&b.line).then(a.start_col.cmp(&b.start_col)));
+        // 1. length=0 の不正トークンを除外
+        raw_tokens.retain(|t| t.length > 0);
+
+        // 2. (line, start_col, -length) でソート
+        //    同一 (line, col) の場合は length が大きいものを先に置く
+        //    (後段の overlap dedup で長い方を残せるように)
+        raw_tokens.sort_by(|a, b| {
+            a.line
+                .cmp(&b.line)
+                .then(a.start_col.cmp(&b.start_col))
+                .then(b.length.cmp(&a.length))
+        });
 
         let mut encoded = Vec::new();
         let mut prev_line = 0u32;
         let mut prev_col = 0u32;
+        let mut prev_end_col = 0u32; // 直前トークンの右端 (overlap 検出用)
+        let mut first = true;
 
         for token in raw_tokens {
-            let delta_line = token.line - prev_line;
+            // 3. 直前トークンと完全に同じスパンならスキップ (重複)
+            if !first
+                && token.line == prev_line
+                && token.start_col == prev_col
+                && token.start_col + token.length == prev_end_col
+            {
+                continue;
+            }
+
+            // 4. 直前トークンと overlap (同一行で前トークンの右端より前で開始)
+            //    する場合はスキップ。これがあると VS Code が全 tokens を
+            //    破棄してハイライトが消える。
+            if !first && token.line == prev_line && token.start_col < prev_end_col {
+                continue;
+            }
+
+            let delta_line = token.line.saturating_sub(prev_line);
             let delta_start = if delta_line == 0 {
-                token.start_col - prev_col
+                token.start_col.saturating_sub(prev_col)
             } else {
                 token.start_col
             };
@@ -289,8 +328,98 @@ impl SemanticTokensHandler {
 
             prev_line = token.line;
             prev_col = token.start_col;
+            prev_end_col = token.start_col + token.length;
+            first = false;
         }
 
         encoded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw(line: u32, start_col: u32, length: u32, token_type: u32) -> RawSemanticToken {
+        RawSemanticToken {
+            line,
+            start_col,
+            length,
+            token_type,
+            token_modifiers: 0,
+        }
+    }
+
+    #[test]
+    fn encode_tokens_skips_zero_length() {
+        let tokens = vec![raw(0, 0, 0, 0), raw(0, 5, 3, 0)];
+        let encoded = SemanticTokensHandler::encode_tokens(tokens);
+        assert_eq!(encoded.len(), 1, "length=0 のトークンは除外されるべき");
+        assert_eq!(encoded[0].delta_start, 5);
+        assert_eq!(encoded[0].length, 3);
+    }
+
+    #[test]
+    fn encode_tokens_skips_exact_duplicate_span() {
+        // 同一スパンが2回現れた場合、片方だけが残る
+        let tokens = vec![raw(2, 5, 4, 0), raw(2, 5, 4, 1)];
+        let encoded = SemanticTokensHandler::encode_tokens(tokens);
+        assert_eq!(encoded.len(), 1, "完全に同じスパンの重複は1つに集約されるべき");
+    }
+
+    #[test]
+    fn encode_tokens_skips_overlapping_tokens() {
+        // [5,10) と [7,12) が overlap → 後者をスキップ
+        // (overlap があるとクライアントが全トークン破棄するので必ず除外)
+        let tokens = vec![raw(2, 5, 5, 0), raw(2, 7, 5, 1)];
+        let encoded = SemanticTokensHandler::encode_tokens(tokens);
+        assert_eq!(
+            encoded.len(),
+            1,
+            "オーバーラップトークンの後者はスキップされるべき"
+        );
+        assert_eq!(encoded[0].delta_start, 5);
+        assert_eq!(encoded[0].length, 5);
+    }
+
+    #[test]
+    fn encode_tokens_keeps_adjacent_non_overlapping() {
+        // [5,8) と [8,12) は隣接だが overlap しない → 両方残す
+        let tokens = vec![raw(2, 5, 3, 0), raw(2, 8, 4, 1)];
+        let encoded = SemanticTokensHandler::encode_tokens(tokens);
+        assert_eq!(encoded.len(), 2, "隣接トークンは両方残るべき");
+        assert_eq!(encoded[0].delta_start, 5);
+        assert_eq!(encoded[1].delta_line, 0);
+        assert_eq!(encoded[1].delta_start, 3);
+    }
+
+    #[test]
+    fn encode_tokens_correct_delta_encoding() {
+        // 複数行にまたがる正常ケース
+        let tokens = vec![raw(1, 2, 3, 0), raw(1, 10, 4, 1), raw(3, 5, 2, 2)];
+        let encoded = SemanticTokensHandler::encode_tokens(tokens);
+        assert_eq!(encoded.len(), 3);
+        // 1行目, col=2, len=3
+        assert_eq!(encoded[0].delta_line, 1);
+        assert_eq!(encoded[0].delta_start, 2);
+        assert_eq!(encoded[0].length, 3);
+        // 同じ行 (delta_line=0), col=10 なので delta_start=8
+        assert_eq!(encoded[1].delta_line, 0);
+        assert_eq!(encoded[1].delta_start, 8);
+        // 行が変わったので delta_start は絶対値
+        assert_eq!(encoded[2].delta_line, 2);
+        assert_eq!(encoded[2].delta_start, 5);
+    }
+
+    #[test]
+    fn encode_tokens_unsorted_input_is_normalized() {
+        // 入力が順不同でも正しくソート→エンコードされる
+        let tokens = vec![raw(3, 5, 2, 0), raw(1, 10, 4, 1), raw(1, 2, 3, 2)];
+        let encoded = SemanticTokensHandler::encode_tokens(tokens);
+        assert_eq!(encoded.len(), 3);
+        // 最初が (1,2,3) であること
+        assert_eq!(encoded[0].delta_line, 1);
+        assert_eq!(encoded[0].delta_start, 2);
+        assert_eq!(encoded[0].length, 3);
     }
 }

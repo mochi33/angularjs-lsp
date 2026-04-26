@@ -412,6 +412,12 @@ impl Backend {
 
             self.publish_diagnostics_for_html(&uri).await;
             self.republish_diagnostics_for_open_js_files().await;
+
+            // クライアントが on_open 完了前に semantic_tokens_full を要求した場合、
+            // 空トークンが返ってハイライトが永続的に消えるレースを防ぐ。
+            // 解析完了をクライアントに通知して再要求させる。
+            let _ = self.client.semantic_tokens_refresh().await;
+            let _ = self.client.code_lens_refresh().await;
         } else if is_js_file(&uri) {
             self.debounce_versions.insert(uri.clone(), 0);
 
@@ -425,6 +431,10 @@ impl Backend {
             .unwrap_or(());
 
             self.publish_diagnostics_for_js(&uri).await;
+
+            // (HTML側と同じ理由) JS ファイルでも解析後に refresh を送る
+            let _ = self.client.semantic_tokens_refresh().await;
+            let _ = self.client.code_lens_refresh().await;
         }
 
         // tsserver は JS ファイルだけ知っていれば良い (HTML は内部ハンドラで処理)
