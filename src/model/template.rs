@@ -9,6 +9,7 @@ pub enum BindingSource {
     StateProvider,
     UibModal,
     MdDialog,
+    MdBottomSheet,
 }
 
 /// HTMLテンプレートとコントローラーのバインディング
