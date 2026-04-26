@@ -1361,15 +1361,37 @@ impl LanguageServer for Backend {
                 let source = doc.value();
 
                 // Directive completion context
-                if let Some((prefix, is_tag_name)) =
-                    self.html_analyzer
-                        .get_directive_completion_context(source, line, col)
+                if let Some((prefix, is_tag_name, element_tag_name)) = self
+                    .html_analyzer
+                    .get_directive_completion_context_with_tag(source, line, col)
                 {
                     let handler = CompletionHandler::new(Arc::clone(&self.index));
-                    if let Some(completions) =
+                    let mut items: Vec<CompletionItem> = Vec::new();
+
+                    // 属性名位置 + 既知 component 要素 → bindings を提案
+                    if !is_tag_name {
+                        if let Some(ref tag_name) = element_tag_name {
+                            items.extend(
+                                handler.complete_component_bindings(tag_name, &prefix),
+                            );
+                        }
+                    }
+
+                    // 既存のディレクティブ補完（ng-* など）も併せて返す
+                    if let Some(CompletionResponse::Array(directive_items)) =
                         handler.complete_directives(&prefix, is_tag_name)
                     {
-                        return Ok(Some(completions));
+                        let mut seen: std::collections::HashSet<String> =
+                            items.iter().map(|i| i.label.clone()).collect();
+                        for item in directive_items {
+                            if seen.insert(item.label.clone()) {
+                                items.push(item);
+                            }
+                        }
+                    }
+
+                    if !items.is_empty() {
+                        return Ok(Some(CompletionResponse::Array(items)));
                     }
                 }
 

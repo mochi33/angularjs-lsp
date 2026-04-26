@@ -266,6 +266,24 @@ impl HtmlAngularJsAnalyzer {
     /// 属性値の中ではfalseを返す
     /// 戻り値: Some((prefix, is_tag_name)) - prefix: 入力中の文字列, is_tag_name: タグ名位置かどうか
     pub fn get_directive_completion_context(&self, source: &str, line: u32, col: u32) -> Option<(String, bool)> {
+        self.get_directive_completion_context_with_tag(source, line, col)
+            .map(|(prefix, is_tag_name, _)| (prefix, is_tag_name))
+    }
+
+    /// `get_directive_completion_context` の拡張版。属性名位置の場合、その属性が
+    /// 属する要素のタグ名（kebab-case のまま）も返す。component bindings 補完で
+    /// 「どの component の属性を編集中か」を知るために使う。
+    ///
+    /// 戻り値: Some((prefix, is_tag_name, element_tag_name))
+    /// - prefix: 入力中の文字列
+    /// - is_tag_name: タグ名位置か（true なら element_tag_name は None）
+    /// - element_tag_name: 属性名位置の場合、要素のタグ名（kebab-case のまま、空ならNone）
+    pub fn get_directive_completion_context_with_tag(
+        &self,
+        source: &str,
+        line: u32,
+        col: u32,
+    ) -> Option<(String, bool, Option<String>)> {
         let lines: Vec<&str> = source.lines().collect();
         if (line as usize) >= lines.len() {
             return None;
@@ -315,7 +333,7 @@ impl HtmlAngularJsAnalyzer {
         // スペースがなければタグ名、あれば属性名
         if !tag_content.contains(char::is_whitespace) {
             // タグ名位置
-            Some((tag_content.to_string(), true))
+            Some((tag_content.to_string(), true, None))
         } else {
             // 属性名位置 - 最後のスペース後の文字列を取得
             // ただし `=` の後にいる場合（属性値を開始しようとしている場合）は除外
@@ -332,7 +350,14 @@ impl HtmlAngularJsAnalyzer {
                 return None;
             }
 
-            Some((attr_part.to_string(), false))
+            // 要素のタグ名を抽出 (`<` の直後から最初の空白まで)
+            let element_tag_name = tag_content
+                .split_ascii_whitespace()
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            Some((attr_part.to_string(), false, element_tag_name))
         }
     }
 }

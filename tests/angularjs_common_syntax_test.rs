@@ -2046,3 +2046,156 @@ fn test_ng_repeat_special_variables_only_in_scope() {
         outer_labels
     );
 }
+
+// ============================================================
+// component要素のbindings属性名補完
+// ============================================================
+
+#[test]
+fn test_component_bindings_completion_lists_bindings_for_known_element() {
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let js = r#"
+angular.module('app', []).component('fooComp', {
+    template: '<div></div>',
+    bindings: {
+        valueIn: '<',
+        onChange: '&'
+    }
+});
+"#;
+    let index = analyze_js(js);
+    let handler = CompletionHandler::new(index);
+
+    let items = handler.complete_component_bindings("foo-comp", "");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.contains(&"value-in"),
+        "kebab-case化された 'value-in' が候補に含まれるべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        labels.contains(&"on-change"),
+        "kebab-case化された 'on-change' が候補に含まれるべき (labels: {:?})",
+        labels
+    );
+}
+
+#[test]
+fn test_component_bindings_completion_filters_by_prefix() {
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let js = r#"
+angular.module('app', []).component('fooComp', {
+    template: '<div></div>',
+    bindings: {
+        valueIn: '<',
+        valueOut: '<',
+        onChange: '&'
+    }
+});
+"#;
+    let index = analyze_js(js);
+    let handler = CompletionHandler::new(index);
+
+    let items = handler.complete_component_bindings("foo-comp", "val");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.contains(&"value-in"),
+        "プレフィックス 'val' で 'value-in' が残るべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        labels.contains(&"value-out"),
+        "プレフィックス 'val' で 'value-out' が残るべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        !labels.contains(&"on-change"),
+        "プレフィックス 'val' で 'on-change' は除外されるべき (labels: {:?})",
+        labels
+    );
+}
+
+#[test]
+fn test_component_bindings_completion_returns_empty_for_unknown_element() {
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let js = r#"
+angular.module('app', []).component('fooComp', {
+    bindings: { valueIn: '<' }
+});
+"#;
+    let index = analyze_js(js);
+    let handler = CompletionHandler::new(index);
+
+    let items = handler.complete_component_bindings("bar-comp", "");
+    assert!(
+        items.is_empty(),
+        "未知の要素名では何も返さないべき (items: {:?})",
+        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_component_bindings_completion_does_not_leak_other_components() {
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let js = r#"
+angular.module('app', [])
+    .component('fooComp', { bindings: { fooName: '<' } })
+    .component('barComp', { bindings: { barName: '<' } });
+"#;
+    let index = analyze_js(js);
+    let handler = CompletionHandler::new(index);
+
+    let items = handler.complete_component_bindings("foo-comp", "");
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.contains(&"foo-name"),
+        "fooComp 自身の binding 'foo-name' が含まれるべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        !labels.contains(&"bar-name"),
+        "他コンポーネントの binding 'bar-name' は混入しないべき (labels: {:?})",
+        labels
+    );
+}
+
+#[test]
+fn test_directive_completion_context_returns_element_tag_name() {
+    use std::sync::Arc;
+    use angularjs_lsp::analyzer::html::HtmlAngularJsAnalyzer;
+    use angularjs_lsp::analyzer::js::AngularJsAnalyzer;
+    use angularjs_lsp::index::Index;
+
+    let index = Arc::new(Index::new());
+    let js_analyzer = Arc::new(AngularJsAnalyzer::new(index.clone()));
+    let html_analyzer = HtmlAngularJsAnalyzer::new(index.clone(), js_analyzer);
+
+    let html = r#"<foo-comp val></foo-comp>"#;
+    // col index: 0:'<' 1-3:foo 4:'-' 5-7:com 8:p 9:' ' 10-12:val 13:'>'
+
+    // col=13 = "val" の直後（`>` の手前）
+    let ctx = html_analyzer
+        .get_directive_completion_context_with_tag(html, 0, 13)
+        .expect("属性名位置で context が返るべき");
+    assert_eq!(ctx.0, "val", "プレフィックスは 'val'");
+    assert!(!ctx.1, "属性名位置なので is_tag_name = false");
+    assert_eq!(
+        ctx.2.as_deref(),
+        Some("foo-comp"),
+        "要素名は 'foo-comp' であるべき"
+    );
+
+    // col=4 = "foo" の直後（`-` の手前）→ タグ名位置
+    let ctx_tag = html_analyzer
+        .get_directive_completion_context_with_tag(html, 0, 4)
+        .expect("タグ名位置で context が返るべき");
+    assert!(ctx_tag.1, "タグ名位置なので is_tag_name = true");
+    assert_eq!(ctx_tag.2, None, "タグ名位置では element_tag_name は None");
+}

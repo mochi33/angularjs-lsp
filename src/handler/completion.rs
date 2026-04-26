@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::index::Index;
 use crate::model::SymbolKind;
-use crate::util::camel_to_kebab;
+use crate::util::{camel_to_kebab, kebab_to_camel};
 
 /// HTML補完候補のラベル重複を避けつつ追加するヘルパー
 fn push_unique(items: &mut Vec<CompletionItem>, seen: &mut HashSet<String>, item: CompletionItem) {
@@ -412,6 +412,64 @@ impl CompletionHandler {
         }
 
         items
+    }
+
+    /// 指定したcomponent要素の bindings を kebab-case 属性名として補完候補で返す
+    ///
+    /// 例: `.component('fooComp', { bindings: { onChange: '&', valueIn: '<' } })`
+    ///     に対し、element_tag_name="foo-comp" で呼ぶと "on-change", "value-in" が返る。
+    ///
+    /// element_tag_name: kebab-case 形式の要素名 (e.g., "foo-comp")
+    /// prefix: 入力中の属性名プレフィックス (kebab-case、空ならフィルタなし)
+    pub fn complete_component_bindings(
+        &self,
+        element_tag_name: &str,
+        prefix: &str,
+    ) -> Vec<CompletionItem> {
+        let camel_name = kebab_to_camel(element_tag_name);
+        let prefix_str = format!("{}.", camel_name);
+
+        // 当該componentが存在しない場合は空（誤った要素名で binding を提案しない）
+        let component_exists = self
+            .index
+            .definitions
+            .get_definitions(&camel_name)
+            .iter()
+            .any(|d| d.kind == SymbolKind::Component);
+        if !component_exists {
+            return Vec::new();
+        }
+
+        self.index
+            .definitions
+            .get_all_definitions()
+            .into_iter()
+            .filter(|s| s.kind == SymbolKind::ComponentBinding && s.name.starts_with(&prefix_str))
+            .filter_map(|s| {
+                let binding_name = s.name.strip_prefix(&prefix_str)?.to_string();
+                let kebab_binding = camel_to_kebab(&binding_name);
+                if !prefix.is_empty() && !kebab_binding.starts_with(prefix) {
+                    return None;
+                }
+                let detail = s
+                    .docs
+                    .clone()
+                    .map(|d| format!("{} ({})", camel_name, d))
+                    .unwrap_or_else(|| format!("{} binding", camel_name));
+                Some(CompletionItem {
+                    label: kebab_binding,
+                    kind: Some(CompletionItemKind::PROPERTY),
+                    detail: Some(detail),
+                    documentation: s.docs.clone().map(|docs| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: docs,
+                        })
+                    }),
+                    ..Default::default()
+                })
+            })
+            .collect()
     }
 
     /// HTMLでのディレクティブ補完を返す
