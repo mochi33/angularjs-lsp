@@ -170,14 +170,29 @@ impl Backend {
                 let bl_documents = Arc::clone(&documents);
 
                 // Run CPU-intensive analysis on the blocking thread pool
-                let analysis_done = tokio::task::spawn_blocking(move || {
+                //
+                // 戻り値: Some((had_embedded_scripts_before, has_embedded_scripts_after))
+                //   - 解析が走らなかった場合は None
+                //   - 両方 false なら HTML 更新が JS 側のシンボル空間に影響しないので
+                //     「全 JS 診断の再発行」をスキップできる
+                //   - どちらかが true なら、JS ファイル側の参照解決結果が変わり得るので
+                //     依存ファイルの診断を更新する必要がある
+                let analysis_result = tokio::task::spawn_blocking(move || {
                     let latest_text = match bl_documents.get(&bl_uri) {
                         Some(doc) => doc.value().clone(),
-                        None => return false,
+                        None => return None,
                     };
+
+                    // 解析前: この HTML に紐付く JS 由来シンボルがあるか
+                    // (前回 embedded script 由来で登録されたものが clear_document で消える)
+                    let had_embedded_before = !bl_index
+                        .definitions
+                        .get_definitions_for_uri(&bl_uri)
+                        .is_empty();
 
                     let scripts = bl_html_analyzer
                         .analyze_document_and_extract_scripts(&bl_uri, &latest_text);
+                    let has_embedded_after = !scripts.is_empty();
                     bl_index.templates.mark_html_analyzed(&bl_uri);
                     for script in scripts {
                         bl_analyzer.analyze_embedded_script(
@@ -202,20 +217,28 @@ impl Backend {
                             bl_html_analyzer.analyze_document(&child_uri, doc.value());
                         }
                     }
-                    true
+                    Some((had_embedded_before, has_embedded_after))
                 })
                 .await
-                .unwrap_or(false);
+                .ok()
+                .flatten();
 
-                if analysis_done {
+                if let Some((had_embedded_before, has_embedded_after)) = analysis_result {
                     publish_html_diagnostics(&client, &index, &diagnostics_config, &uri).await;
-                    republish_all_js_diagnostics(
-                        &client,
-                        &index,
-                        &diagnostics_config,
-                        &documents,
-                    )
-                    .await;
+
+                    // JS シンボルに変化があり得る場合のみ、開いている JS ファイルの
+                    // 診断を再発行する。embedded script が前後どちらも無ければ
+                    // この HTML 更新は JS 側のシンボル解決に影響しないのでスキップ。
+                    if had_embedded_before || has_embedded_after {
+                        republish_all_js_diagnostics(
+                            &client,
+                            &index,
+                            &diagnostics_config,
+                            &documents,
+                        )
+                        .await;
+                    }
+
                     let _ = client.semantic_tokens_refresh().await;
                     let _ = client.code_lens_refresh().await;
                 }
