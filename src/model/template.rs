@@ -8,6 +8,7 @@ pub enum BindingSource {
     RouteProvider,
     StateProvider,
     UibModal,
+    MdDialog,
 }
 
 /// HTMLテンプレートとコントローラーのバインディング
