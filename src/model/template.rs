@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Url;
 
 /// テンプレートバインディングのソース
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BindingSource {
     NgController,
     RouteProvider,
@@ -13,6 +13,24 @@ pub enum BindingSource {
     MdToast,
     MdPanel,
     NgDialog,
+}
+
+impl BindingSource {
+    /// バインディング元を表す表示用ラベル
+    /// (Code Lens のタイトルなど、ユーザーに見せる文字列で使う)
+    pub fn label(&self) -> &'static str {
+        match self {
+            BindingSource::NgController => "ng-controller",
+            BindingSource::RouteProvider => "$routeProvider",
+            BindingSource::StateProvider => "$stateProvider",
+            BindingSource::UibModal => "$uibModal",
+            BindingSource::MdDialog => "$mdDialog",
+            BindingSource::MdBottomSheet => "$mdBottomSheet",
+            BindingSource::MdToast => "$mdToast",
+            BindingSource::MdPanel => "$mdPanel",
+            BindingSource::NgDialog => "ngDialog",
+        }
+    }
 }
 
 /// HTMLテンプレートとコントローラーのバインディング
