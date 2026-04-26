@@ -154,37 +154,66 @@ impl AngularJsAnalyzer {
         }
     }
 
-    /// JSオブジェクトからcontrollerとtemplateUrlを抽出してバインディングを登録
+    /// JSオブジェクトから controller / templateUrl / controllerAs を抽出して
+    /// バインディングを登録する
     ///
-    /// controller が文字列の場合は controller シンボルへの参照も登録する
-    /// （$routeProvider/$stateProvider 系は別経路でも参照登録するが、重複は
-    /// definition_store 側で URI+位置でデデュープされる）
-    fn extract_template_binding_from_object(&self, obj_node: Node, source: &str, uri: &Url, binding_source: BindingSource) {
+    /// 対応する controller の形:
+    /// - `controller: 'MyCtrl'`                       (文字列参照)
+    /// - `controller: MyCtrl`                         (識別子参照)
+    /// - `controller: ['$dep', MyCtrl]`               (DI配列 + 識別子)
+    /// - `controller: ['$dep', function() {...}]`    (DI配列 + 無名関数, 名前は派生)
+    /// - `controller: function() {...}` / `class {...}` (直接関数/class, 名前は派生)
+    ///
+    /// 登録するもの:
+    /// - controller シンボル参照（文字列・識別子の場合）
+    /// - controller 関数本体の `this.X` を `<controllerName>.X` Method として登録
+    ///   （文字列以外の場合）
+    /// - TemplateBinding（双方向ジャンプ・Code Lens 用）
+    /// - ComponentTemplateUrl（テンプレート側 $ctrl/カスタムエイリアス解決用）
+    fn extract_template_binding_from_object(
+        &self,
+        obj_node: Node,
+        source: &str,
+        uri: &Url,
+        binding_source: BindingSource,
+    ) {
         let mut controller_name: Option<String> = None;
-        let mut controller_value_node: Option<Node> = None;
+        let mut controller_string_value_node: Option<Node> = None;
+        let mut controller_function_node: Option<Node> = None;
         let mut template_url: Option<String> = None;
         let mut template_url_line: Option<u32> = None;
+        let mut template_url_col: Option<u32> = None;
+        let mut controller_as: Option<String> = None;
 
         let mut cursor = obj_node.walk();
         for child in obj_node.children(&mut cursor) {
             if child.kind() == "pair" {
                 if let Some(key) = child.child_by_field_name("key") {
                     let key_name = self.node_text(key, source);
-                    // 識別子の場合はそのまま、文字列の場合はクォートを除去
                     let key_name = key_name.trim_matches(|c| c == '"' || c == '\'');
 
                     if let Some(value) = child.child_by_field_name("value") {
                         match key_name {
                             "controller" => {
-                                if value.kind() == "string" {
-                                    controller_name = Some(self.extract_string_value(value, source));
-                                    controller_value_node = Some(value);
-                                }
+                                self.classify_controller_value(
+                                    value,
+                                    source,
+                                    &mut controller_name,
+                                    &mut controller_string_value_node,
+                                    &mut controller_function_node,
+                                );
                             }
                             "templateUrl" => {
                                 if value.kind() == "string" {
                                     template_url = Some(self.extract_string_value(value, source));
-                                    template_url_line = Some(self.offset_line(value.start_position().row as u32));
+                                    template_url_line =
+                                        Some(self.offset_line(value.start_position().row as u32));
+                                    template_url_col = Some(value.start_position().column as u32);
+                                }
+                            }
+                            "controllerAs" => {
+                                if value.kind() == "string" {
+                                    controller_as = Some(self.extract_string_value(value, source));
                                 }
                             }
                             _ => {}
@@ -195,7 +224,9 @@ impl AngularJsAnalyzer {
         }
 
         // controller が文字列で指定されているなら参照を登録
-        if let (Some(name), Some(value_node)) = (controller_name.as_ref(), controller_value_node) {
+        if let (Some(name), Some(value_node)) =
+            (controller_name.as_ref(), controller_string_value_node)
+        {
             let start = value_node.start_position();
             let end = value_node.end_position();
             let reference = SymbolReference {
@@ -211,16 +242,116 @@ impl AngularJsAnalyzer {
             self.index.definitions.add_reference(reference);
         }
 
-        // 両方揃っていればバインディングを登録
-        if let (Some(controller), Some(template)) = (controller_name, template_url) {
+        // controller が関数/class の場合は this.X を Method として登録
+        if let (Some(name), Some(func_node)) =
+            (controller_name.as_ref(), controller_function_node)
+        {
+            self.extract_controller_methods(func_node, source, uri, name);
+        }
+
+        // TemplateBinding（双方向ジャンプ用）
+        if let (Some(controller), Some(template)) = (controller_name.as_ref(), template_url.as_ref()) {
             let binding = TemplateBinding {
-                template_path: template,
-                controller_name: controller,
-                source: binding_source,
+                template_path: template.clone(),
+                controller_name: controller.clone(),
+                source: binding_source.clone(),
                 binding_uri: uri.clone(),
-                binding_line: template_url_line.unwrap_or(self.offset_line(obj_node.start_position().row as u32)),
+                binding_line: template_url_line
+                    .unwrap_or(self.offset_line(obj_node.start_position().row as u32)),
             };
             self.index.templates.add_template_binding(binding);
+        }
+
+        // ComponentTemplateUrl（テンプレート側 $ctrl alias 解決用）
+        // ng-controller 由来以外の binding はここで登録しておくと、
+        // テンプレート内の `$ctrl.x` / `<customAlias>.x` が hover/definition で解決される
+        if binding_source != BindingSource::NgController {
+            if let Some(template) = template_url {
+                let component_template = ComponentTemplateUrl {
+                    uri: uri.clone(),
+                    template_path: template,
+                    line: template_url_line
+                        .unwrap_or(self.offset_line(obj_node.start_position().row as u32)),
+                    col: template_url_col.unwrap_or(0),
+                    controller_name,
+                    controller_as: controller_as.unwrap_or_else(|| "$ctrl".to_string()),
+                };
+                self.index.components.add_component_template_url(component_template);
+            }
+        }
+    }
+
+    /// controller 値の形を判別して、controller_name と「this 抽出に使うノード」を分離する
+    ///
+    /// - 文字列なら `controller_name` のみ設定（参照登録対象）
+    /// - 識別子/関数/class/DI配列なら `controller_function_node` も設定
+    ///   (extract_controller_methods に渡せる形)
+    /// - DI配列の場合、配列ノード自体を渡す（extract_controller_methods 側で
+    ///   配列内の function/class を取り出す）
+    /// - DI配列の最後の要素が識別子の場合は名前を抽出して controller_name に入れ、
+    ///   func ノードとして識別子そのものを渡す
+    ///   （extract_controller_methods の identifier ブランチに乗る）
+    fn classify_controller_value<'a>(
+        &self,
+        value: Node<'a>,
+        source: &str,
+        controller_name: &mut Option<String>,
+        controller_string_value_node: &mut Option<Node<'a>>,
+        controller_function_node: &mut Option<Node<'a>>,
+    ) {
+        match value.kind() {
+            "string" => {
+                *controller_name = Some(self.extract_string_value(value, source));
+                *controller_string_value_node = Some(value);
+            }
+            "identifier" => {
+                *controller_name = Some(self.node_text(value, source).to_string());
+                *controller_function_node = Some(value);
+            }
+            "function_expression" | "arrow_function" | "class" => {
+                // 名前付き関数なら名前を採用、無名なら名前不明（None）
+                let name = value
+                    .child_by_field_name("name")
+                    .map(|n| self.node_text(n, source).to_string());
+                *controller_name = name;
+                *controller_function_node = Some(value);
+            }
+            "array" => {
+                // DI配列: 最後の named child が controller 本体
+                let mut last_named: Option<Node> = None;
+                let mut cursor = value.walk();
+                for child in value.children(&mut cursor) {
+                    if child.is_named() {
+                        last_named = Some(child);
+                    }
+                }
+                if let Some(last) = last_named {
+                    match last.kind() {
+                        "identifier" => {
+                            *controller_name =
+                                Some(self.node_text(last, source).to_string());
+                            // 配列ではなく識別子そのものを渡す
+                            // (extract_controller_methods の identifier ブランチが
+                            //  関数宣言/class宣言を解決する)
+                            *controller_function_node = Some(last);
+                        }
+                        "function_expression" | "arrow_function" => {
+                            *controller_name = last
+                                .child_by_field_name("name")
+                                .map(|n| self.node_text(n, source).to_string());
+                            *controller_function_node = Some(value); // 配列を渡す
+                        }
+                        "class" => {
+                            *controller_name = last
+                                .child_by_field_name("name")
+                                .map(|n| self.node_text(n, source).to_string());
+                            *controller_function_node = Some(value);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

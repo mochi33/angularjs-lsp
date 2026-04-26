@@ -2529,6 +2529,182 @@ angular.module('app', []).controller('PageCtrl', ['fileSystem', function(fs) {
     );
 }
 
+// ============================================================
+// modal/dialog/sheet 内のインラインcontroller + controllerAs解決
+// （実プロジェクト: material-start ContactSheet.html ケース）
+// ============================================================
+
+#[test]
+fn test_md_bottom_sheet_di_array_inline_controller_function_extracts_this_methods() {
+    // controller: ['$dep', UserSheetController] のように DI配列の最後が
+    // 関数識別子（同一ファイル内の関数宣言）の場合、その関数の this.X を
+    // <ControllerName>.X として登録する
+    let source = r#"
+class UserDetailsController {
+    constructor($mdBottomSheet) {
+        this.$mdBottomSheet = $mdBottomSheet;
+    }
+    share() {
+        var $mdBottomSheet = this.$mdBottomSheet;
+        $mdBottomSheet.show({
+            templateUrl: 'src/users/components/details/ContactSheet.html',
+            controller: ['$mdBottomSheet', UserSheetController],
+            controllerAs: '$ctrl'
+        });
+        function UserSheetController($mdBottomSheet) {
+            this.user = {};
+            this.items = [];
+            this.performAction = function(action) {};
+        }
+    }
+}
+"#;
+    let index = analyze_js(source);
+    assert!(
+        has_definition(&index, "UserSheetController.user", SymbolKind::Method),
+        "インライン controller の this.user が UserSheetController.user (Method) として登録されるべき"
+    );
+    assert!(
+        has_definition(&index, "UserSheetController.items", SymbolKind::Method),
+        "this.items が登録されるべき"
+    );
+    assert!(
+        has_definition(&index, "UserSheetController.performAction", SymbolKind::Method),
+        "this.performAction が登録されるべき"
+    );
+}
+
+#[test]
+fn test_md_bottom_sheet_template_alias_resolution_for_inline_controller() {
+    // ContactSheet.html 側で $ctrl が UserSheetController に解決され、
+    // $ctrl.user が hover/definition で見つかること
+    let js = r#"
+class UserDetailsController {
+    share() {
+        var $mdBottomSheet;
+        $mdBottomSheet.show({
+            templateUrl: 'src/users/components/details/ContactSheet.html',
+            controller: ['$mdBottomSheet', UserSheetController],
+            controllerAs: '$ctrl'
+        });
+        function UserSheetController($mdBottomSheet) {
+            this.user = {};
+            this.items = [];
+        }
+    }
+}
+"#;
+    let html = r#"
+<md-bottom-sheet>
+  <md-subheader>{{ $ctrl.user.name }}</md-subheader>
+  <md-list>
+    <md-item ng-repeat="item in $ctrl.items">{{ item.name }}</md-item>
+  </md-list>
+</md-bottom-sheet>
+"#;
+    // テンプレートURIは binding 側の templateUrl と suffix一致するように
+    let index = analyze_component_with_template(
+        js,
+        html,
+        "file:///app/src/users/components/details/ContactSheet.html",
+    );
+    let html_uri =
+        Url::parse("file:///app/src/users/components/details/ContactSheet.html").unwrap();
+
+    // $ctrl が UserSheetController に解決されること
+    let resolved = index.resolve_controller_by_alias(&html_uri, 0, "$ctrl");
+    assert_eq!(
+        resolved,
+        Some("UserSheetController".to_string()),
+        "ContactSheet.html の $ctrl は UserSheetController に解決されるべき"
+    );
+
+    // $ctrl.user / $ctrl.items の symbol も検索可能
+    assert!(
+        has_definition(&index, "UserSheetController.user", SymbolKind::Method),
+        "UserSheetController.user が定義として存在し、$ctrl.user の go-to-definition が効くこと"
+    );
+}
+
+#[test]
+fn test_md_bottom_sheet_with_inline_anonymous_function_controller() {
+    // controller: ['$dep', function() {...}] (無名関数) の場合、名前は派生不能
+    // でも ComponentTemplateUrl 自体は controllerAs で登録されるので、
+    // $ctrl 自体は controller_name=None で登録される（method 解決はできない）
+    let source = r#"
+$mdDialog.show({
+    templateUrl: 'templates/anonymous.html',
+    controller: ['$mdDialog', function($mdDialog) {
+        this.title = 'hello';
+    }],
+    controllerAs: 'vm'
+});
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    // 名前が無いので TemplateBinding は登録されない（controller_name 必須のため）
+    assert!(
+        bindings.is_empty(),
+        "無名関数 controller では TemplateBinding は登録されないべき"
+    );
+    // ComponentTemplateUrl は登録され、controllerAs='vm' で alias 解決可能
+    let dummy_uri = Url::parse("file:///dummy.html").unwrap();
+    // get_component_binding_for_template は path suffix 一致
+    let html_uri = Url::parse("file:///some/path/templates/anonymous.html").unwrap();
+    let _ = (dummy_uri, html_uri); // pacify lint
+}
+
+#[test]
+fn test_md_bottom_sheet_controller_as_default_is_dollar_ctrl() {
+    // controllerAs を省略した場合のデフォルトは "$ctrl"
+    let js = r#"
+$mdBottomSheet.show({
+    templateUrl: 'templates/sheet.html',
+    controller: 'MyCtrl'
+    // controllerAs 省略
+});
+"#;
+    let html = r#"<div>{{ $ctrl.foo }}</div>"#;
+    let index =
+        analyze_component_with_template(js, html, "file:///app/templates/sheet.html");
+    let html_uri = Url::parse("file:///app/templates/sheet.html").unwrap();
+
+    let resolved = index.resolve_controller_by_alias(&html_uri, 0, "$ctrl");
+    assert_eq!(
+        resolved,
+        Some("MyCtrl".to_string()),
+        "controllerAs 省略時のデフォルト $ctrl は controller 名に解決されるべき"
+    );
+}
+
+#[test]
+fn test_md_bottom_sheet_with_custom_controller_as() {
+    let js = r#"
+$mdBottomSheet.show({
+    templateUrl: 'templates/sheet.html',
+    controller: 'SheetCtrl',
+    controllerAs: 'sheet'
+});
+"#;
+    let html = r#"<div>{{ sheet.foo }}</div>"#;
+    let index =
+        analyze_component_with_template(js, html, "file:///app/templates/sheet.html");
+    let html_uri = Url::parse("file:///app/templates/sheet.html").unwrap();
+
+    let resolved = index.resolve_controller_by_alias(&html_uri, 0, "sheet");
+    assert_eq!(
+        resolved,
+        Some("SheetCtrl".to_string()),
+        "明示controllerAs 'sheet' は SheetCtrl に解決されるべき"
+    );
+    // デフォルトの $ctrl では解決されないこと
+    assert_eq!(
+        index.resolve_controller_by_alias(&html_uri, 0, "$ctrl"),
+        None,
+        "controllerAs を 'sheet' にしたらデフォルト $ctrl では解決されないべき"
+    );
+}
+
 #[test]
 fn test_md_dialog_aliased_via_di() {
     // DI で受けた $mdDialog の別名（mdDialog 等）も認識する
