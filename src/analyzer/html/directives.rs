@@ -2,6 +2,10 @@
 
 use phf::phf_set;
 
+use crate::index::Index;
+use crate::model::SymbolKind;
+use crate::util::kebab_to_camel;
+
 /// AngularJS directive set (O(1) lookup)
 static NG_DIRECTIVE_SET: phf::Set<&'static str> = phf_set! {
     // Data binding
@@ -88,4 +92,59 @@ static NG_DIRECTIVE_SET: phf::Set<&'static str> = phf_set! {
 /// Check if attribute name is a supported AngularJS directive
 pub fn is_ng_directive(attr_name: &str) -> bool {
     NG_DIRECTIVE_SET.contains(attr_name)
+}
+
+/// 属性値を Angular 式として解析すべきか判定する。
+///
+/// 以下のいずれかに当てはまる場合 `true` を返す:
+/// 1. ビルトイン or 既知ライブラリの ng-* / uib-* / ngf-* ディレクティブ
+///    (`is_ng_directive` の判定。`data-` 接頭辞は揺らぎを吸収)
+/// 2. JS 側で `.directive('name', ...)` 登録された custom directive
+///    (kebab-case → camelCase で `SymbolKind::Directive` を index に検索)
+/// 3. `element_name` が `.component('name', ...)` 登録された component で、
+///    かつ属性名がその component の `bindings` の名前と一致
+///    (`SymbolKind::ComponentBinding` で `componentName.bindingName` を検索)
+///
+/// `element_name` は属性が属する要素のタグ名 (kebab-case)。
+/// `None` の場合は判定 (1) と (2) のみ行う (component bindings は判定不能)。
+pub fn is_directive_attribute(
+    attr_name: &str,
+    element_name: Option<&str>,
+    index: &Index,
+) -> bool {
+    // 1. ビルトイン/既知ライブラリ
+    if is_ng_directive(attr_name) {
+        return true;
+    }
+
+    // data- 接頭辞を剥がしてから index 検索
+    let stripped = attr_name.strip_prefix("data-").unwrap_or(attr_name);
+    let camel = kebab_to_camel(stripped);
+
+    // 2. custom directive
+    if index
+        .definitions
+        .has_definition_of_kind(&camel, SymbolKind::Directive)
+    {
+        return true;
+    }
+
+    // 3. component binding (要素名が必要)
+    if let Some(elem) = element_name {
+        let elem_camel = kebab_to_camel(elem);
+        if index
+            .definitions
+            .has_definition_of_kind(&elem_camel, SymbolKind::Component)
+        {
+            let binding_name = format!("{}.{}", elem_camel, camel);
+            if index
+                .definitions
+                .has_definition_of_kind(&binding_name, SymbolKind::ComponentBinding)
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }

@@ -3,7 +3,7 @@
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Node;
 
-use super::directives::is_ng_directive;
+use super::directives::is_directive_attribute;
 use crate::model::HtmlScopeReference;
 
 use super::HtmlAngularJsAnalyzer;
@@ -38,6 +38,11 @@ impl HtmlAngularJsAnalyzer {
 
     /// タグの属性からスコープ参照を抽出
     fn extract_scope_references_from_tag(&self, start_tag: Node, source: &str, uri: &Url) {
+        // 要素のタグ名を取得 (component bindings 判定で必要)
+        let element_tag_name = self
+            .find_child_by_kind(start_tag, "tag_name")
+            .map(|n| self.node_text(n, source));
+
         let mut cursor = start_tag.walk();
         for child in start_tag.children(&mut cursor) {
             if child.kind() == "attribute" {
@@ -53,8 +58,13 @@ impl HtmlAngularJsAnalyzer {
                         let value_byte_col = value_node.start_position().column + 1; // +1 for quote
                         let value_start_col = self.byte_col_to_utf16_col(source, value_start_line, value_byte_col);
 
-                        if is_ng_directive(&attr_name) {
-                            // ngディレクティブ: 属性値全体をAngular式として解析
+                        if is_directive_attribute(
+                            &attr_name,
+                            element_tag_name.as_deref(),
+                            &self.index,
+                        ) {
+                            // ngディレクティブ または custom directive / component binding:
+                            // 属性値全体をAngular式として解析
                             let property_paths = self.parse_angular_expression(value, &attr_name);
                             self.register_scope_references(uri, value, &property_paths, value_start_line as u32, value_start_col);
                         } else {

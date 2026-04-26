@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Node;
 
-use super::directives::is_ng_directive;
+use super::directives::is_directive_attribute;
 use super::variable_parser::{parse_ng_init_expression, parse_ng_repeat_expression};
 use super::HtmlAngularJsAnalyzer;
 use crate::model::{HtmlLocalVariable, HtmlLocalVariableReference, HtmlLocalVariableSource};
@@ -302,6 +302,11 @@ impl HtmlAngularJsAnalyzer {
         uri: &Url,
         active_scopes: &HashMap<String, (u32, u32)>,
     ) {
+        // 要素のタグ名を取得 (component bindings 判定で必要)
+        let element_tag_name = self
+            .find_child_by_kind(start_tag, "tag_name")
+            .map(|n| self.node_text(n, source));
+
         let mut cursor = start_tag.walk();
         for child in start_tag.children(&mut cursor) {
             if child.kind() == "attribute" {
@@ -374,8 +379,13 @@ impl HtmlAngularJsAnalyzer {
                         let value_byte_col = value_node.start_position().column + 1;
                         let value_start_col = self.byte_col_to_utf16_col(source, value_start_line, value_byte_col);
 
-                        if is_ng_directive(&attr_name) {
-                            // ngディレクティブ: 属性値全体をAngular式として解析
+                        if is_directive_attribute(
+                            &attr_name,
+                            element_tag_name.as_deref(),
+                            &self.index,
+                        ) {
+                            // ngディレクティブ または custom directive / component binding:
+                            // 属性値全体をAngular式として解析
                             // フィルタを除去
                             let expr = value.split('|').next().unwrap_or(value);
 

@@ -2728,3 +2728,158 @@ angular.module('app', []).controller('PageCtrl', function() {
     assert_eq!(binding.controller_name, "AliasedDialogCtrl");
     assert_eq!(binding.source, BindingSource::MdDialog);
 }
+
+// ============================================================
+// custom directive / component bindings の attribute 値解析
+// ============================================================
+
+#[test]
+fn test_custom_directive_attribute_value_is_parsed_as_expression() {
+    // .directive('myHighlight', ...) で登録された directive の属性値が
+    // Angular 式として解析され、scope 参照が登録されること
+    let js = r#"
+angular.module('app', [])
+    .controller('Ctrl', ['$scope', function($scope) {
+        $scope.user = {};
+    }])
+    .directive('myHighlight', [function() {
+        return { restrict: 'A' };
+    }]);
+"#;
+    let html = r#"
+<div ng-controller="Ctrl">
+    <span my-highlight="user.name">label</span>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let refs = index.html.get_html_scope_references(&html_uri);
+    // 既存パーサーは top-level identifier のみ拾う ("user.name" → "user")。
+    // ここでは「式として解析されること」を確認したいので "user" が拾われていれば OK
+    let names: Vec<&str> = refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        names.iter().any(|n| *n == "user"),
+        "custom directive 'my-highlight' の属性値が解析され 'user' が登録されるべき (refs: {:?})",
+        names
+    );
+}
+
+#[test]
+fn test_unregistered_attribute_does_not_parse_as_expression() {
+    // 登録されていない属性は Angular 式として解析されない (現状維持)
+    let js = r#"
+angular.module('app', []).controller('Ctrl', ['$scope', function($scope) {
+    $scope.user = {};
+}]);
+"#;
+    let html = r#"
+<div ng-controller="Ctrl">
+    <span data-foo="user.name">label</span>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        !names.iter().any(|n| *n == "user"),
+        "未登録 directive 'data-foo' の属性値は scope 参照として登録されるべきでない (refs: {:?})",
+        names
+    );
+}
+
+#[test]
+fn test_component_binding_attribute_value_is_parsed_as_expression() {
+    // .component('userCard', { bindings: { user: '<', onSelect: '&' } })
+    // で登録された binding 名と一致する属性値が Angular 式として解析される
+    let js = r#"
+angular.module('app', [])
+    .controller('Ctrl', ['$scope', function($scope) {
+        $scope.currentUser = {};
+        $scope.handleSelect = function() {};
+    }])
+    .component('userCard', {
+        templateUrl: 'card.html',
+        bindings: {
+            user: '<',
+            onSelect: '&'
+        }
+    });
+"#;
+    let html = r#"
+<div ng-controller="Ctrl">
+    <user-card user="currentUser" on-select="handleSelect()"></user-card>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        names.contains(&"currentUser"),
+        "<user-card user=\"currentUser\"> の 'currentUser' が scope 参照として登録されるべき (refs: {:?})",
+        names
+    );
+    assert!(
+        names.contains(&"handleSelect"),
+        "<user-card on-select=\"handleSelect()\"> の 'handleSelect' が scope 参照として登録されるべき (refs: {:?})",
+        names
+    );
+}
+
+#[test]
+fn test_component_unknown_binding_attribute_is_ignored() {
+    // component に存在しない binding 名の属性は Angular 式として解析されない
+    let js = r#"
+angular.module('app', [])
+    .controller('Ctrl', ['$scope', function($scope) { $scope.foo = 1; }])
+    .component('userCard', {
+        bindings: { user: '<' }
+    });
+"#;
+    let html = r#"
+<div ng-controller="Ctrl">
+    <user-card unknown-attr="foo"></user-card>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        !names.contains(&"foo"),
+        "未定義 binding 'unknown-attr' の属性値 'foo' は scope 参照として登録されるべきでない (refs: {:?})",
+        names
+    );
+}
+
+#[test]
+fn test_data_prefix_is_stripped_for_directive_lookup() {
+    // data- 接頭辞付きの custom directive も認識される
+    let js = r#"
+angular.module('app', [])
+    .controller('Ctrl', ['$scope', function($scope) {
+        $scope.x = 1;
+    }])
+    .directive('myDir', [function() { return {}; }]);
+"#;
+    let html = r#"
+<div ng-controller="Ctrl">
+    <span data-my-dir="x">label</span>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        names.contains(&"x"),
+        "data- prefix 付き custom directive の属性値も解析されるべき (refs: {:?})",
+        names
+    );
+}

@@ -62,6 +62,14 @@ impl DefinitionStore {
         self.definitions.contains_key(name)
     }
 
+    /// 指定した名前 + Kind の定義が存在するか
+    pub fn has_definition_of_kind(&self, name: &str, kind: SymbolKind) -> bool {
+        self.definitions
+            .get(name)
+            .map(|defs| defs.iter().any(|s| s.kind == kind))
+            .unwrap_or(false)
+    }
+
     pub fn get_references(&self, name: &str) -> Vec<SymbolReference> {
         self.references
             .get(name)
