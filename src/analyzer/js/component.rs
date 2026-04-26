@@ -48,8 +48,15 @@ impl AngularJsAnalyzer {
                         "filter" => self.extract_component_definition(node, source, uri, SymbolKind::Filter, ctx),
                         "constant" => self.extract_component_definition(node, source, uri, SymbolKind::Constant, ctx),
                         "value" => self.extract_component_definition(node, source, uri, SymbolKind::Value, ctx),
-                        "open" => self.extract_open_binding(node, callee, source, uri),
-                        "show" => self.extract_material_show_binding(node, callee, source, uri),
+                        "open" | "show" => {
+                            self.extract_template_service_binding(
+                                method_name.as_str(),
+                                node,
+                                callee,
+                                source,
+                                uri,
+                            )
+                        }
                         "config" | "run" => self.extract_run_config_di(node, source, ctx),
                         "when" | "otherwise" => self.extract_route_when_di(node, source, uri, ctx),
                         "state" => self.extract_state_provider_di(node, source, uri, ctx),
@@ -60,95 +67,40 @@ impl AngularJsAnalyzer {
         }
     }
 
-    /// .open({controller, templateUrl}) 系のテンプレートバインディングを抽出
+    /// `.show()` / `.open()` 系のテンプレートバインディング抽出を一手に引き受ける
     ///
-    /// 認識パターン:
-    /// ```javascript
-    /// $uibModal.open({ controller: 'X', templateUrl: '...' });   // UI Bootstrap Modal
-    /// $modal.open({ controller: 'X', templateUrl: '...' });      // 同 (旧名)
-    /// $mdPanel.open({ controller: 'X', templateUrl: '...' });    // Angular Material Panel
-    /// ngDialog.open({ controller: 'X', templateUrl: '...' });    // ngDialog (3rd party)
-    /// ```
+    /// 対応サービスは `TEMPLATE_SERVICE_REGISTRY` に登録された組み合わせのみ。
+    /// 新しい modal/dialog 系サービスを追加する場合は、レジストリに1行足すだけで済む。
     ///
-    /// オブジェクト名で BindingSource を区別する。それ以外の `.open()` 呼び出し
-    /// (file.open() 等) は自動的にスキップされる。
-    fn extract_open_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
-        let binding_source = if let Some(object) = callee.child_by_field_name("object") {
-            let obj_text = self.node_text(object, source);
-            // 順序重要: より具体的な接尾辞から先に判定する
-            if obj_text.ends_with("$mdPanel") || obj_text.ends_with("mdPanel") {
-                BindingSource::MdPanel
-            } else if obj_text.ends_with("$ngDialog")
-                || obj_text.ends_with("ngDialog")
-            {
-                BindingSource::NgDialog
-            } else if obj_text.ends_with("$uibModal") || obj_text.ends_with("$modal") {
-                BindingSource::UibModal
-            } else if obj_text.ends_with("Modal") {
-                // 後方互換: ローカル変数名が ...Modal で終わる場合は UibModal 扱い
-                BindingSource::UibModal
-            } else {
-                return;
-            }
-        } else {
-            return;
+    /// 認識しないオブジェクトでの `.open()` / `.show()` (file.open() 等) は
+    /// 自動的にスキップされる。
+    fn extract_template_service_binding(
+        &self,
+        method: &str,
+        node: Node,
+        callee: Node,
+        source: &str,
+        uri: &Url,
+    ) {
+        let object = match callee.child_by_field_name("object") {
+            Some(o) => o,
+            None => return,
+        };
+        let obj_text = self.node_text(object, source);
+        let binding_source = match detect_template_service(method, &obj_text) {
+            Some(bs) => bs,
+            None => return,
         };
 
-        // 引数からオブジェクトを取得
         if let Some(args) = node.child_by_field_name("arguments") {
             if let Some(first_arg) = args.named_child(0) {
                 if first_arg.kind() == "object" {
-                    self.extract_template_binding_from_object(first_arg, source, uri, binding_source);
-                }
-            }
-        }
-    }
-
-    /// Angular Material の .show({controller, templateUrl}) からテンプレートバインディングを抽出
-    ///
-    /// 認識パターン:
-    /// ```javascript
-    /// $mdDialog.show({
-    ///     controller: 'EditDialogCtrl',
-    ///     templateUrl: 'templates/edit-dialog.html'
-    /// });
-    /// $mdBottomSheet.show({
-    ///     controller: 'OptionsSheetCtrl',
-    ///     templateUrl: 'templates/options-sheet.html'
-    /// });
-    /// $mdToast.show({
-    ///     controller: 'CustomToastCtrl',
-    ///     templateUrl: 'templates/custom-toast.html'
-    /// });
-    /// ```
-    ///
-    /// オブジェクトが `$mdDialog` / `$mdBottomSheet` / `$mdToast` (および DI
-    /// で受けた `mdDialog` / `mdBottomSheet` / `mdToast` エイリアス) の場合
-    /// のみマッチ。
-    ///
-    /// `$mdDialog.confirm()` / `$mdDialog.alert()` / `$mdToast.simple()` の
-    /// プリセットビルダーはオブジェクト引数を取らないため自動的にスキップされる。
-    fn extract_material_show_binding(&self, node: Node, callee: Node, source: &str, uri: &Url) {
-        let binding_source = if let Some(object) = callee.child_by_field_name("object") {
-            let obj_text = self.node_text(object, source);
-            if obj_text.ends_with("$mdDialog") || obj_text.ends_with("mdDialog") {
-                BindingSource::MdDialog
-            } else if obj_text.ends_with("$mdBottomSheet") || obj_text.ends_with("mdBottomSheet") {
-                BindingSource::MdBottomSheet
-            } else if obj_text.ends_with("$mdToast") || obj_text.ends_with("mdToast") {
-                BindingSource::MdToast
-            } else {
-                return;
-            }
-        } else {
-            return;
-        };
-
-        // 引数からオブジェクトを取得
-        if let Some(args) = node.child_by_field_name("arguments") {
-            if let Some(first_arg) = args.named_child(0) {
-                if first_arg.kind() == "object" {
-                    self.extract_template_binding_from_object(first_arg, source, uri, binding_source);
+                    self.extract_template_binding_from_object(
+                        first_arg,
+                        source,
+                        uri,
+                        binding_source,
+                    );
                 }
             }
         }
@@ -1106,5 +1058,137 @@ impl AngularJsAnalyzer {
                 }
             }
         }
+    }
+}
+
+/// `.show()` / `.open()` 呼び出しでテンプレートバインディングとして
+/// 認識すべきサービスのレジストリ。
+///
+/// 各エントリ: `(method, base_name, BindingSource)`
+/// - `method`: "show" | "open"
+/// - `base_name`: `$` 接頭辞なしの基本名（DI後のローカル変数名でも一致するように
+///   `matches_service` 内で `$` 付き / なし両方を末尾一致でチェック）
+///
+/// 新サービスを足したい場合はここに1行追加するだけ。BindingSource enum と
+/// その label メソッドにも variant を足す必要はあるが、ディスパッチ側の
+/// 変更は不要。
+const TEMPLATE_SERVICE_REGISTRY: &[(&str, &str, BindingSource)] = &[
+    // .show() 系
+    ("show", "mdDialog", BindingSource::MdDialog),
+    ("show", "mdBottomSheet", BindingSource::MdBottomSheet),
+    ("show", "mdToast", BindingSource::MdToast),
+    // .open() 系
+    ("open", "mdPanel", BindingSource::MdPanel),
+    ("open", "ngDialog", BindingSource::NgDialog),
+    ("open", "uibModal", BindingSource::UibModal),
+    ("open", "modal", BindingSource::UibModal), // 旧名 ($modal)
+];
+
+/// `obj_text` が `base_name` を末尾に含むか（`$` 接頭辞付き / なしの両方を許容）
+/// 例: base_name="mdDialog" は obj_text="$mdDialog" や "this.$mdDialog" や
+/// ローカル変数 "mdDialog" にマッチする
+fn matches_service(obj_text: &str, base_name: &str) -> bool {
+    // 末尾が "$<base>" または "<base>" であることをチェック
+    // ただし他の長い名前にひっかからないよう、直前文字が識別子文字でないことを確認
+    let with_dollar = format!("${}", base_name);
+    if obj_text.ends_with(&with_dollar) {
+        // "$mdDialog" の直前は識別子境界 (BOF / "." / "[" など)
+        let prefix_len = obj_text.len() - with_dollar.len();
+        return prefix_len == 0
+            || !obj_text.as_bytes()[prefix_len - 1].is_ascii_alphanumeric();
+    }
+    if obj_text.ends_with(base_name) {
+        let prefix_len = obj_text.len() - base_name.len();
+        // 直前が `$` の場合は上で処理済み (with_dollar 不一致で来たということは
+        // base_name 末尾に他の文字が連結している = ここでは不一致)
+        if prefix_len == 0 {
+            return true;
+        }
+        let prev = obj_text.as_bytes()[prefix_len - 1];
+        return prev != b'$' && !prev.is_ascii_alphanumeric();
+    }
+    false
+}
+
+/// `(method, obj_text)` から該当する `BindingSource` を返す
+///
+/// レジストリに登録されたサービス以外は `None` (= 無視)
+fn detect_template_service(method: &str, obj_text: &str) -> Option<BindingSource> {
+    for (m, base, source) in TEMPLATE_SERVICE_REGISTRY {
+        if *m == method && matches_service(obj_text, base) {
+            return Some(*source);
+        }
+    }
+    // 後方互換: ローカル変数名が `...Modal` で終わる .open() は UibModal として扱う
+    // (例: `var myModal = $uibModal; myModal.open({...})`)
+    // このパターンは古いプロジェクトで稀に使われる慣用句のため残している
+    if method == "open" && obj_text.ends_with("Modal") {
+        return Some(BindingSource::UibModal);
+    }
+    None
+}
+
+#[cfg(test)]
+mod template_service_registry_tests {
+    use super::*;
+
+    #[test]
+    fn matches_service_with_dollar_prefix() {
+        assert!(matches_service("$mdDialog", "mdDialog"));
+        assert!(matches_service("this.$mdDialog", "mdDialog"));
+    }
+
+    #[test]
+    fn matches_service_without_dollar_prefix() {
+        assert!(matches_service("mdDialog", "mdDialog"));
+        assert!(matches_service("self.mdDialog", "mdDialog"));
+    }
+
+    #[test]
+    fn matches_service_rejects_unrelated_suffix() {
+        // "fooMdDialog" のように長い識別子の末尾に偶然一致してもマッチしない
+        assert!(!matches_service("fooMdDialog", "mdDialog"));
+        assert!(!matches_service("not$mdDialog", "mdDialog"));
+    }
+
+    #[test]
+    fn detect_template_service_dispatch() {
+        assert_eq!(
+            detect_template_service("show", "$mdDialog"),
+            Some(BindingSource::MdDialog)
+        );
+        assert_eq!(
+            detect_template_service("show", "$mdToast"),
+            Some(BindingSource::MdToast)
+        );
+        assert_eq!(
+            detect_template_service("open", "$mdPanel"),
+            Some(BindingSource::MdPanel)
+        );
+        assert_eq!(
+            detect_template_service("open", "$uibModal"),
+            Some(BindingSource::UibModal)
+        );
+        assert_eq!(
+            detect_template_service("open", "$modal"),
+            Some(BindingSource::UibModal)
+        );
+        // method ミスマッチ
+        assert_eq!(detect_template_service("open", "$mdDialog"), None);
+        // 未登録サービス
+        assert_eq!(detect_template_service("show", "$unknown"), None);
+        // 他の .open() 呼び出し
+        assert_eq!(detect_template_service("open", "fileSystem"), None);
+    }
+
+    #[test]
+    fn detect_template_service_backward_compat_modal_suffix() {
+        // 古い慣用句: ローカル変数名が ...Modal で終わる .open() は UibModal 扱い
+        assert_eq!(
+            detect_template_service("open", "myModal"),
+            Some(BindingSource::UibModal)
+        );
+        // .show() では効かない
+        assert_eq!(detect_template_service("show", "myModal"), None);
     }
 }

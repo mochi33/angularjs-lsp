@@ -341,17 +341,7 @@ impl CodeLensHandler {
     ) -> CodeLens {
         let js_filename = js_uri.path().rsplit('/').next().unwrap_or("unknown");
 
-        let source_label = match source {
-            BindingSource::RouteProvider => "$routeProvider",
-            BindingSource::StateProvider => "$stateProvider",
-            BindingSource::UibModal => "$uibModal",
-            BindingSource::MdDialog => "$mdDialog",
-            BindingSource::MdBottomSheet => "$mdBottomSheet",
-            BindingSource::MdToast => "$mdToast",
-            BindingSource::MdPanel => "$mdPanel",
-            BindingSource::NgDialog => "ngDialog",
-            BindingSource::NgController => "ng-controller",
-        };
+        let source_label = source.label();
 
         let title = format!("Bound from: {} in {}", source_label, js_filename);
 
@@ -441,17 +431,7 @@ impl CodeLensHandler {
             .next()
             .unwrap_or(&binding.template_path);
 
-        let source_label = match binding.source {
-            BindingSource::RouteProvider => "$routeProvider",
-            BindingSource::StateProvider => "$stateProvider",
-            BindingSource::UibModal => "$uibModal",
-            BindingSource::MdDialog => "$mdDialog",
-            BindingSource::MdBottomSheet => "$mdBottomSheet",
-            BindingSource::MdToast => "$mdToast",
-            BindingSource::MdPanel => "$mdPanel",
-            BindingSource::NgDialog => "ngDialog",
-            BindingSource::NgController => "ng-controller",
-        };
+        let source_label = binding.source.label();
 
         let title = format!(
             "{}: {} -> {}",
