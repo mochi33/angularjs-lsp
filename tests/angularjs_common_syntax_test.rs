@@ -2287,6 +2287,249 @@ angular.module('app', []).controller('PageCtrl', ['$scope', function($scope) {
 }
 
 #[test]
+fn test_md_bottom_sheet_template_binding() {
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$mdBottomSheet', function($mdBottomSheet) {
+    $mdBottomSheet.show({
+        controller: 'OptionsSheetCtrl',
+        templateUrl: 'templates/options-sheet.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("options-sheet.html"))
+        .expect("$mdBottomSheet.show のテンプレートバインディングが登録されるべき");
+
+    assert_eq!(binding.controller_name, "OptionsSheetCtrl");
+    assert_eq!(
+        binding.source,
+        BindingSource::MdBottomSheet,
+        "BindingSource は MdBottomSheet であるべき"
+    );
+}
+
+#[test]
+fn test_md_bottom_sheet_controller_reference_registered() {
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$mdBottomSheet', function($mdBottomSheet) {
+    $mdBottomSheet.show({
+        controller: 'ShareSheetCtrl',
+        templateUrl: 'templates/share-sheet.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(
+        has_reference(&index, "ShareSheetCtrl"),
+        "$mdBottomSheet.show の controller 参照が登録されるべき"
+    );
+}
+
+#[test]
+fn test_md_bottom_sheet_aliased_via_di() {
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', function() {
+    var mdBottomSheet = angular.injector(['ng', 'material.components.bottomSheet']).get('$mdBottomSheet');
+    mdBottomSheet.show({
+        controller: 'AliasedSheetCtrl',
+        templateUrl: 'templates/aliased-sheet.html'
+    });
+});
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("aliased-sheet.html"))
+        .expect("mdBottomSheet (エイリアス) からも binding を抽出すべき");
+    assert_eq!(binding.controller_name, "AliasedSheetCtrl");
+    assert_eq!(binding.source, BindingSource::MdBottomSheet);
+}
+
+#[test]
+fn test_md_dialog_and_md_bottom_sheet_distinguished() {
+    // 同一ファイル内に両方が存在しても BindingSource で区別されること
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('MixCtrl', ['$mdDialog', '$mdBottomSheet',
+    function($mdDialog, $mdBottomSheet) {
+        $mdDialog.show({ controller: 'DialogA', templateUrl: 'a.html' });
+        $mdBottomSheet.show({ controller: 'SheetB', templateUrl: 'b.html' });
+    }]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+
+    let a = bindings
+        .iter()
+        .find(|b| b.template_path.ends_with("a.html"))
+        .expect("a.html のバインディングがあるべき");
+    let b = bindings
+        .iter()
+        .find(|b| b.template_path.ends_with("b.html"))
+        .expect("b.html のバインディングがあるべき");
+
+    assert_eq!(a.source, BindingSource::MdDialog);
+    assert_eq!(b.source, BindingSource::MdBottomSheet);
+}
+
+// ============================================================
+// $mdToast / $mdPanel / ngDialog バインディング
+// ============================================================
+
+#[test]
+fn test_md_toast_show_template_binding() {
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$mdToast', function($mdToast) {
+    $mdToast.show({
+        controller: 'CustomToastCtrl',
+        templateUrl: 'templates/custom-toast.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("custom-toast.html"))
+        .expect("$mdToast.show のテンプレートバインディングが登録されるべき");
+
+    assert_eq!(binding.controller_name, "CustomToastCtrl");
+    assert_eq!(binding.source, BindingSource::MdToast);
+    assert!(
+        has_reference(&index, "CustomToastCtrl"),
+        "controller 文字列参照も登録されるべき"
+    );
+}
+
+#[test]
+fn test_md_panel_open_template_binding() {
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$mdPanel', function($mdPanel) {
+    $mdPanel.open({
+        controller: 'PanelCtrl',
+        templateUrl: 'templates/panel.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("panel.html"))
+        .expect("$mdPanel.open のテンプレートバインディングが登録されるべき");
+
+    assert_eq!(binding.controller_name, "PanelCtrl");
+    assert_eq!(binding.source, BindingSource::MdPanel);
+    assert!(
+        has_reference(&index, "PanelCtrl"),
+        "controller 文字列参照も登録されるべき"
+    );
+}
+
+#[test]
+fn test_ng_dialog_open_template_binding() {
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['ngDialog', function(ngDialog) {
+    ngDialog.open({
+        controller: 'NgDialogCtrl',
+        templateUrl: 'templates/ng-dialog.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("ng-dialog.html"))
+        .expect("ngDialog.open のテンプレートバインディングが登録されるべき");
+
+    assert_eq!(binding.controller_name, "NgDialogCtrl");
+    assert_eq!(binding.source, BindingSource::NgDialog);
+    assert!(
+        has_reference(&index, "NgDialogCtrl"),
+        "controller 文字列参照も登録されるべき"
+    );
+}
+
+#[test]
+fn test_uib_modal_still_recognized_after_open_refactor() {
+    // .open() 経路のリファクタで $uibModal が壊れていないことを確認（回帰防止）
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['$uibModal', function($uibModal) {
+    $uibModal.open({
+        controller: 'StillUibCtrl',
+        templateUrl: 'templates/still-uib.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let binding = bindings
+        .iter()
+        .find(|b| b.template_path.contains("still-uib.html"))
+        .expect("$uibModal は引き続き UibModal として認識されるべき");
+
+    assert_eq!(binding.source, BindingSource::UibModal);
+}
+
+#[test]
+fn test_md_panel_and_ng_dialog_distinguished_from_uib_modal() {
+    // 同じ .open() でもオブジェクト名で BindingSource が分かれること
+    use angularjs_lsp::model::BindingSource;
+
+    let source = r#"
+angular.module('app', []).controller('MixCtrl', ['$uibModal', '$mdPanel', 'ngDialog',
+    function($uibModal, $mdPanel, ngDialog) {
+        $uibModal.open({ controller: 'A', templateUrl: 'a.html' });
+        $mdPanel.open({ controller: 'B', templateUrl: 'b.html' });
+        ngDialog.open({ controller: 'C', templateUrl: 'c.html' });
+    }]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let a = bindings.iter().find(|b| b.template_path.ends_with("a.html")).unwrap();
+    let b = bindings.iter().find(|b| b.template_path.ends_with("b.html")).unwrap();
+    let c = bindings.iter().find(|b| b.template_path.ends_with("c.html")).unwrap();
+    assert_eq!(a.source, BindingSource::UibModal);
+    assert_eq!(b.source, BindingSource::MdPanel);
+    assert_eq!(c.source, BindingSource::NgDialog);
+}
+
+#[test]
+fn test_other_open_calls_still_ignored() {
+    // file.open() のような無関係な .open() は無視されること
+    let source = r#"
+angular.module('app', []).controller('PageCtrl', ['fileSystem', function(fs) {
+    fs.open({ controller: 'NotAModalCtrl', templateUrl: 'fake.html' });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    assert!(
+        bindings.is_empty(),
+        "無関係な .open() は無視されるべき (got: {:?})",
+        bindings.iter().map(|b| &b.template_path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_md_dialog_aliased_via_di() {
     // DI で受けた $mdDialog の別名（mdDialog 等）も認識する
     use angularjs_lsp::model::BindingSource;
