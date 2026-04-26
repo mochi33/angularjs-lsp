@@ -10,6 +10,9 @@ pub enum BindingSource {
     UibModal,
     MdDialog,
     MdBottomSheet,
+    MdToast,
+    MdPanel,
+    NgDialog,
 }
 
 /// HTMLテンプレートとコントローラーのバインディング
