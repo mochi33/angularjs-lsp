@@ -29,6 +29,9 @@ pub enum HtmlLocalVariableSource {
     NgRepeatIterator,
     /// ng-repeat="(key, value) in obj" -> "key", "value"
     NgRepeatKeyValue,
+    /// ng-repeat スコープで暗黙に利用可能な特殊変数
+    /// ($index, $first, $last, $middle, $odd, $even)
+    NgRepeatSpecial,
 }
 
 impl HtmlLocalVariableSource {
@@ -37,6 +40,7 @@ impl HtmlLocalVariableSource {
             HtmlLocalVariableSource::NgInit => "ng-init",
             HtmlLocalVariableSource::NgRepeatIterator => "ng-repeat",
             HtmlLocalVariableSource::NgRepeatKeyValue => "ng-repeat",
+            HtmlLocalVariableSource::NgRepeatSpecial => "ng-repeat (special)",
         }
     }
 }
