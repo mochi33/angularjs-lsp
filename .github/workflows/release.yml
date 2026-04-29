@@ -121,13 +121,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # VSCode extension packaging (optional)
+  # VSCode extension packaging + Open VSX publish
   vscode-extension:
     name: Package VSCode Extension
     needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
 
     steps:
       - name: Checkout
@@ -152,3 +154,13 @@ jobs:
           files: vscode-extension/*.vsix
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Open VSX publish (skipped if OVSX_PAT secret is not configured)
+      - name: Publish to Open VSX
+        if: env.OVSX_PAT != ''
+        working-directory: vscode-extension
+        run: npx ovsx publish *.vsix -p "$OVSX_PAT"
+
+      - name: Skip Open VSX publish (no OVSX_PAT secret)
+        if: env.OVSX_PAT == ''
+        run: echo "::warning::OVSX_PAT secret not set, skipping Open VSX publish. Add it via gh secret set OVSX_PAT to enable automatic publishing."
