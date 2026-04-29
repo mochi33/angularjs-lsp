@@ -438,6 +438,255 @@ angular.module('app', [])
 }
 
 // ==========================================================================
+// `$routeProvider` / `$stateProvider` のレシーバ検証
+// ==========================================================================
+
+#[test]
+fn test_route_provider_renamed_via_array_di() {
+    // 配列 DI で $routeProvider を `rp` にリネームしているケース
+    // → DI 経由のレシーバ解決で route binding として認識されるべき
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$routeProvider', function(rp) {
+    rp.when('/home', {
+        templateUrl: 'home.html',
+        controller: 'HomeCtrl'
+    });
+}]);
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        1,
+        "rename された $routeProvider 経由でも binding 登録"
+    );
+    assert_eq!(bindings[0].template_path, "home.html");
+    assert_eq!(bindings[0].controller_name, "HomeCtrl");
+}
+
+#[test]
+fn test_route_provider_implicit_di() {
+    // 暗黙 DI で $routeProvider をパラメータ名のまま使うケース
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(function($routeProvider) {
+    $routeProvider.when('/home', {
+        templateUrl: 'home.html',
+        controller: 'HomeCtrl'
+    });
+});
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(bindings.len(), 1, "暗黙 DI でも binding 登録");
+}
+
+#[test]
+fn test_when_on_unrelated_object_is_not_route_binding() {
+    // route provider と無関係なオブジェクトの .when(string, {object}) は
+    // route binding として誤認しない
+    let index = analyze(
+        r#"
+function setup() {
+    var stateMachine = {
+        when: function(state, config) {}
+    };
+    stateMachine.when('idle', {
+        templateUrl: 'foo.html',
+        controller: 'FooCtrl'
+    });
+}
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert!(
+        bindings.is_empty(),
+        "$routeProvider でないレシーバの .when() は無視されるべき, 実際 = {:?}",
+        bindings
+    );
+    // 同様に controller の参照も登録されないこと
+    assert!(
+        index.definitions.get_references("FooCtrl").is_empty(),
+        "$routeProvider でないレシーバ経由の controller 参照は登録されないべき"
+    );
+}
+
+#[test]
+fn test_state_provider_renamed_via_array_di() {
+    // ui-router: 配列 DI で $stateProvider を `sp` にリネーム
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$stateProvider', function(sp) {
+    sp.state('home', {
+        templateUrl: 'home.html',
+        controller: 'HomeCtrl'
+    });
+}]);
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        1,
+        "rename された $stateProvider 経由でも binding 登録"
+    );
+}
+
+#[test]
+fn test_state_on_unrelated_object_is_not_state_binding() {
+    let index = analyze(
+        r#"
+function setup() {
+    var router = {
+        state: function(name, config) {}
+    };
+    router.state('home', {
+        templateUrl: 'home.html',
+        controller: 'HomeCtrl'
+    });
+}
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert!(
+        bindings.is_empty(),
+        "$stateProvider でないレシーバの .state() は無視されるべき"
+    );
+}
+
+#[test]
+fn test_route_provider_top_level_call() {
+    // DI スコープ外でも、レシーバが直接 $routeProvider なら検出する
+    let index = analyze(
+        r#"
+$routeProvider.when('/home', {
+    templateUrl: 'home.html',
+    controller: 'HomeCtrl'
+});
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        1,
+        "トップレベル直接 $routeProvider.when() は検出"
+    );
+}
+
+#[test]
+fn test_state_provider_top_level_call() {
+    let index = analyze(
+        r#"
+$stateProvider.state('home', {
+    templateUrl: 'home.html',
+    controller: 'HomeCtrl'
+});
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(bindings.len(), 1);
+}
+
+#[test]
+fn test_route_provider_via_member_expression_receiver() {
+    // `module.$routeProvider.when(...)` のようなメンバアクセスを末尾でマッチ
+    let index = analyze(
+        r#"
+this.$routeProvider.when('/home', {
+    templateUrl: 'home.html',
+    controller: 'HomeCtrl'
+});
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        1,
+        "this.$routeProvider のメンバアクセスでも検出"
+    );
+}
+
+#[test]
+fn test_route_provider_chained_calls_renamed() {
+    // チェイン + DI rename の組み合わせ: チェインの根が DI 経由で
+    // $routeProvider に解決されるケースが全 .when() で正しく認識されるか
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$routeProvider', function(rp) {
+    rp.when('/home', { templateUrl: 'home.html', controller: 'HomeCtrl' })
+      .when('/users', { templateUrl: 'users.html', controller: 'UsersCtrl' })
+      .otherwise({ redirectTo: '/home' });
+}]);
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        2,
+        "チェイン + rename された .when() 全件が binding 登録, 実際 = {:?}",
+        bindings.iter().map(|b| &b.template_path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_chain_receiver_unrelated_origin_is_not_route() {
+    // チェインの根が $routeProvider と無関係のオブジェクトなら、
+    // チェインの中の .when() も route binding として扱わない
+    let index = analyze(
+        r#"
+function setup() {
+    var router = {
+        when: function() { return router; },
+        otherwise: function() { return router; }
+    };
+    router.when('/foo', { templateUrl: 'foo.html', controller: 'FooCtrl' })
+          .when('/bar', { templateUrl: 'bar.html', controller: 'BarCtrl' });
+}
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert!(
+        bindings.is_empty(),
+        "router.when のチェインは route binding として扱わない"
+    );
+}
+
+// ==========================================================================
 // 一時変数解決: 複合ケース
 // ==========================================================================
 

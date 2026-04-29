@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Node;
 
@@ -54,12 +56,14 @@ impl AngularJsAnalyzer {
                 injected_services: self.collect_injected_services(node, source),
                 has_scope: self.has_scope_in_di_array(node, source),
                 has_root_scope: self.has_root_scope_in_di_array(node, source),
+                param_to_service: self.build_param_to_service_from_array(node, source),
             },
             "function_expression" | "arrow_function" | "function_declaration"
             | "class" | "class_declaration" => DiInfo {
                 injected_services: self.collect_services_from_function_params(node, source),
                 has_scope: self.has_scope_in_function_params(node, source),
                 has_root_scope: self.has_root_scope_in_function_params(node, source),
+                param_to_service: self.build_param_to_service_from_function(node, source),
             },
             "identifier" => {
                 // 識別子の場合は実体を解決して中身を見る
@@ -303,6 +307,94 @@ impl AngularJsAnalyzer {
             }
         }
         false
+    }
+
+    /// 配列 DI から「関数パラメータ名 → サービス名」のマッピングを構築する
+    ///
+    /// 認識パターン:
+    /// ```javascript
+    /// ['$routeProvider', '$scope', function(rp, scope) {}]
+    /// // → {"rp" → "$routeProvider", "scope" → "$scope"}
+    /// ```
+    ///
+    /// 配列要素の string と関数パラメータの位置を 1:1 で対応させる。
+    /// 数が不一致の場合は短い方に合わせる (前から先勝ち)。
+    pub(super) fn build_param_to_service_from_array(
+        &self,
+        node: Node,
+        source: &str,
+    ) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if node.kind() != "array" {
+            return map;
+        }
+
+        let mut services: Vec<String> = Vec::new();
+        let mut function_node: Option<Node> = None;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "string" => services.push(self.extract_string_value(child, source)),
+                "function_expression" | "arrow_function" | "class" => {
+                    function_node = Some(child);
+                }
+                "identifier" => {
+                    // 配列末尾が識別子のケース (関数を別変数で受け渡し)。
+                    // 識別子経由の解決はホット経路ではないので param_to_service は空のままにする。
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(func) = function_node {
+            let params = self.extract_function_param_names(func, source);
+            for (param, service) in params.into_iter().zip(services.into_iter()) {
+                map.insert(param, service);
+            }
+        }
+
+        map
+    }
+
+    /// 関数 (式 / 宣言 / class) のパラメータから「パラメータ名 → サービス名」の
+    /// 暗黙 DI マッピングを構築する。
+    ///
+    /// 暗黙 DI ではパラメータ名がそのままサービス名になるので、自己マッピングを返す。
+    /// 認識パターン:
+    /// ```javascript
+    /// function($routeProvider, $scope) {}
+    /// // → {"$routeProvider" → "$routeProvider", "$scope" → "$scope"}
+    /// ```
+    pub(super) fn build_param_to_service_from_function(
+        &self,
+        node: Node,
+        source: &str,
+    ) -> HashMap<String, String> {
+        let params = self.extract_function_param_names(node, source);
+        params.into_iter().map(|p| (p.clone(), p)).collect()
+    }
+
+    /// 関数 (式 / 宣言 / class constructor) のパラメータ識別子名を順番通りに返す
+    pub(super) fn extract_function_param_names(&self, node: Node, source: &str) -> Vec<String> {
+        let func_node = match node.kind() {
+            "function_expression" | "arrow_function" | "function_declaration"
+            | "method_definition" => Some(node),
+            "class_declaration" | "class" => self.get_constructor_from_class(node, source),
+            _ => None,
+        };
+
+        let mut names = Vec::new();
+        if let Some(func) = func_node {
+            if let Some(params) = func.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                for child in params.children(&mut cursor) {
+                    if child.kind() == "identifier" {
+                        names.push(self.node_text(child, source).to_string());
+                    }
+                }
+            }
+        }
+        names
     }
 
     /// 関数パラメータから $scope 以外のサービス名を収集する

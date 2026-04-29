@@ -182,6 +182,14 @@ impl AngularJsAnalyzer {
         // $scope がある場合、または injected_services が空でない場合にスコープをプッシュ
         if has_scope || has_root_scope || !injected_services.is_empty() {
             if let Some((body_start, body_end)) = self.find_function_body_range(*last, source) {
+                // 配列 DI のパラメータ名 → サービス名マッピングを構築
+                // (関数本体内で `$routeProvider.when(...)` のレシーバ判定に使う)
+                let param_names = self.extract_function_param_names(*last, source);
+                let param_to_service: std::collections::HashMap<String, String> = param_names
+                    .into_iter()
+                    .zip(dependencies.iter().cloned())
+                    .collect();
+
                 ctx.push_scope(super::context::DiScope {
                     component_name: component_name.clone(),
                     injected_services,
@@ -189,6 +197,7 @@ impl AngularJsAnalyzer {
                     body_end_line: body_end,
                     has_scope,
                     has_root_scope,
+                    param_to_service,
                 });
             }
         }
