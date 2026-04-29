@@ -310,6 +310,8 @@ impl Backend {
                         .collect();
                     let before_embedded_refs =
                         bl_index.definitions.get_reference_names_for_uri(&bl_uri);
+                    let before_embedded_defs =
+                        bl_index.definitions.get_definition_names_for_uri(&bl_uri);
 
                     let scripts = bl_html_analyzer
                         .analyze_document_and_extract_scripts(&bl_uri, &latest_text);
@@ -347,12 +349,16 @@ impl Backend {
                         .collect();
                     let after_embedded_refs =
                         bl_index.definitions.get_reference_names_for_uri(&bl_uri);
+                    let after_embedded_defs =
+                        bl_index.definitions.get_definition_names_for_uri(&bl_uri);
 
                     Some((
                         before_html_props,
                         after_html_props,
                         before_embedded_refs,
                         after_embedded_refs,
+                        before_embedded_defs,
+                        after_embedded_defs,
                     ))
                 })
                 .await
@@ -364,6 +370,8 @@ impl Backend {
                     after_html_props,
                     before_embedded_refs,
                     after_embedded_refs,
+                    before_embedded_defs,
+                    after_embedded_defs,
                 )) = analysis_result
                 {
                     publish_html_diagnostics(&client, &index, &diagnostics_config, &uri).await;
@@ -382,7 +390,18 @@ impl Backend {
                         publish_js_diagnostics(&client, &index, &diagnostics_config, &js_uri).await;
                     }
 
-                    let _ = client.semantic_tokens_refresh().await;
+                    // semantic_tokens_refresh は workspace 全 HTML に再要求が走る
+                    // 重い操作なので、埋め込みスクリプトの定義シンボル集合に変化が
+                    // 無ければスキップ。他 HTML のセマンティックトークンは global
+                    // definitions table 経由でしか連動しない。HTML 自身のスコープ
+                    // 参照変化 (`{{vm.foo}}` 追加など) は当該 HTML のトークンにしか
+                    // 影響せず、それは didChange 後に LSP クライアントが自動再要求する。
+                    if before_embedded_defs != after_embedded_defs {
+                        let _ = client.semantic_tokens_refresh().await;
+                    }
+                    // code_lens_refresh は据え置き: ng-include / ng-controller /
+                    // 埋め込み template binding など、複数の cross-file dep があり、
+                    // 完全な gating には別途状態スナップショットが要るため
                     let _ = client.code_lens_refresh().await;
                 }
             });
@@ -459,7 +478,16 @@ impl Backend {
                         publish_html_diagnostics(&client, &index, &diagnostics_config, &html_uri).await;
                     }
 
-                    let _ = client.semantic_tokens_refresh().await;
+                    // semantic_tokens_refresh は workspace 全 HTML に再要求が走る
+                    // 重い操作なので、JS の定義シンボル集合に変化が無ければスキップ。
+                    // 他 HTML のセマンティックトークンは global definitions table 経由で
+                    // しかこの JS と連動しないため、symbols 同一なら何も変わらない。
+                    if before_symbols != after_symbols {
+                        let _ = client.semantic_tokens_refresh().await;
+                    }
+                    // code_lens_refresh は据え置き: templateUrl / route binding /
+                    // component template など、シンボル集合に現れない state 変更で
+                    // 他ファイル lens が変わるケースをカバーするため
                     let _ = client.code_lens_refresh().await;
                 }
             });
