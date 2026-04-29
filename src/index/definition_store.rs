@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
 
@@ -7,7 +9,10 @@ use crate::model::{Symbol, SymbolKind, SymbolReference};
 pub struct DefinitionStore {
     definitions: DashMap<String, Vec<Symbol>>,
     references: DashMap<String, Vec<SymbolReference>>,
-    document_symbols: DashMap<Url, Vec<String>>,
+    /// URI → そのドキュメントから add された定義/参照のシンボル名集合。
+    /// `get_definitions_for_uri` 等の URI 逆引きを O(該当ドキュメントのシンボル数)
+    /// で行うためのインデックス。重複登録を避けるため HashSet で保持する。
+    document_symbols: DashMap<Url, HashSet<String>>,
 }
 
 impl DefinitionStore {
@@ -31,7 +36,7 @@ impl DefinitionStore {
         });
         if !is_duplicate {
             entry.push(symbol);
-            self.document_symbols.entry(uri).or_default().push(name);
+            self.document_symbols.entry(uri).or_default().insert(name);
         }
     }
 
@@ -47,7 +52,7 @@ impl DefinitionStore {
         });
         if !is_duplicate {
             entry.push(reference);
-            self.document_symbols.entry(uri).or_default().push(name);
+            self.document_symbols.entry(uri).or_default().insert(name);
         }
     }
 
@@ -96,14 +101,9 @@ impl DefinitionStore {
 
     /// 指定JSファイルの全スコープ変数定義を取得
     pub fn get_scope_definitions_for_js(&self, uri: &Url) -> Vec<Symbol> {
-        self.definitions
-            .iter()
-            .flat_map(|entry| entry.value().clone())
-            .filter(|s| {
-                &s.uri == uri
-                    && (s.kind == SymbolKind::ScopeProperty || s.kind == SymbolKind::ScopeMethod)
-            })
-            .collect()
+        self.collect_definitions_for_uri(uri, |s| {
+            s.kind == SymbolKind::ScopeProperty || s.kind == SymbolKind::ScopeMethod
+        })
     }
 
     /// 参照のみ存在するシンボル名を取得（定義がないもの）
@@ -191,11 +191,30 @@ impl DefinitionStore {
 
     /// 指定URIのドキュメント内定義を取得
     pub fn get_definitions_for_uri(&self, uri: &Url) -> Vec<Symbol> {
-        self.definitions
-            .iter()
-            .flat_map(|entry| entry.value().clone())
-            .filter(|s| &s.uri == uri)
-            .collect()
+        self.collect_definitions_for_uri(uri, |_| true)
+    }
+
+    /// `document_symbols` の URI 逆引きを使い、`definitions` を全件走査せずに
+    /// 当該ドキュメントの定義だけ取り出す。`predicate` が true の Symbol のみ
+    /// 返す。
+    fn collect_definitions_for_uri<F>(&self, uri: &Url, predicate: F) -> Vec<Symbol>
+    where
+        F: Fn(&Symbol) -> bool,
+    {
+        let Some(names) = self.document_symbols.get(uri) else {
+            return Vec::new();
+        };
+        let mut result = Vec::new();
+        for name in names.value() {
+            if let Some(entry) = self.definitions.get(name) {
+                for symbol in entry.value() {
+                    if &symbol.uri == uri && predicate(symbol) {
+                        result.push(symbol.clone());
+                    }
+                }
+            }
+        }
+        result
     }
 
     pub fn clear_document(&self, uri: &Url) {
@@ -330,5 +349,127 @@ mod tests {
         // （これがなければ get_reference_only_names で他の reference-only も誤判定する）
         assert!(!store.has_definition("Ctrl.$scope.mochi"));
         assert!(store.get_reference_only_names().is_empty());
+    }
+
+    #[test]
+    fn get_definitions_for_uri_returns_only_target_uri() {
+        let store = DefinitionStore::new();
+        let uri_a = Url::parse("file:///a.js").unwrap();
+        let uri_b = Url::parse("file:///b.js").unwrap();
+
+        store.add_definition(make_definition("Ctrl.$scope.foo", &uri_a));
+        store.add_definition(make_definition("Ctrl.$scope.bar", &uri_a));
+        store.add_definition(make_definition("Ctrl.$scope.shared", &uri_a));
+        store.add_definition(make_definition("Ctrl.$scope.shared", &uri_b));
+
+        let mut names: Vec<String> = store
+            .get_definitions_for_uri(&uri_a)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "Ctrl.$scope.bar".to_string(),
+                "Ctrl.$scope.foo".to_string(),
+                "Ctrl.$scope.shared".to_string(),
+            ]
+        );
+
+        let names_b: Vec<String> = store
+            .get_definitions_for_uri(&uri_b)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names_b, vec!["Ctrl.$scope.shared".to_string()]);
+    }
+
+    #[test]
+    fn get_scope_definitions_for_js_filters_by_kind() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        let span = Span::new(0, 0, 0, 4);
+        let scope_prop =
+            SymbolBuilder::new("Ctrl.$scope.x".to_string(), SymbolKind::ScopeProperty, uri.clone())
+                .definition_span(span)
+                .name_span(span)
+                .build();
+        let scope_method = SymbolBuilder::new(
+            "Ctrl.$scope.fn".to_string(),
+            SymbolKind::ScopeMethod,
+            uri.clone(),
+        )
+        .definition_span(Span::new(1, 0, 1, 2))
+        .name_span(Span::new(1, 0, 1, 2))
+        .build();
+        let controller =
+            SymbolBuilder::new("Ctrl".to_string(), SymbolKind::Controller, uri.clone())
+                .definition_span(Span::new(2, 0, 2, 4))
+                .name_span(Span::new(2, 0, 2, 4))
+                .build();
+
+        store.add_definition(scope_prop);
+        store.add_definition(scope_method);
+        store.add_definition(controller);
+
+        let mut names: Vec<String> = store
+            .get_scope_definitions_for_js(&uri)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Ctrl.$scope.fn".to_string(), "Ctrl.$scope.x".to_string()]
+        );
+    }
+
+    #[test]
+    fn document_symbols_dedupes_repeated_adds() {
+        // 同じ name に対して複数の定義/参照が登録されても、document_symbols 側
+        // には 1 度だけ含まれるべき (URI 逆引きで同じ name を何度も
+        // definitions.get() しないようにするため)
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        // 定義側: 異なる span で 2 回登録 (どちらも有効な定義として残る)
+        let def1 = SymbolBuilder::new(
+            "Ctrl.$scope.x".to_string(),
+            SymbolKind::ScopeProperty,
+            uri.clone(),
+        )
+        .definition_span(Span::new(0, 0, 0, 1))
+        .name_span(Span::new(0, 0, 0, 1))
+        .build();
+        let def2 = SymbolBuilder::new(
+            "Ctrl.$scope.x".to_string(),
+            SymbolKind::ScopeProperty,
+            uri.clone(),
+        )
+        .definition_span(Span::new(2, 0, 2, 1))
+        .name_span(Span::new(2, 0, 2, 1))
+        .build();
+        store.add_definition(def1);
+        store.add_definition(def2);
+
+        // 同じ name で参照も登録
+        store.add_reference(SymbolReference {
+            name: "Ctrl.$scope.x".to_string(),
+            uri: uri.clone(),
+            span: Span::new(3, 0, 3, 1),
+        });
+
+        // document_symbols には "Ctrl.$scope.x" が 1 度だけ入っているべき
+        let entry = store
+            .document_symbols
+            .get(&uri)
+            .expect("uri entry exists");
+        assert_eq!(entry.value().len(), 1);
+        assert!(entry.value().contains("Ctrl.$scope.x"));
+
+        // 一方で definitions 側には 2 件残っている
+        assert_eq!(store.get_definitions("Ctrl.$scope.x").len(), 2);
     }
 }
