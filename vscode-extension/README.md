@@ -70,8 +70,8 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 |--------|------|---------|-------------|
 | `include` | `string[]` | `[]` (all files) | Glob patterns for files to analyze. If empty, all files are included. |
 | `exclude` | `string[]` | (see below) | Glob patterns for files/directories to exclude. |
-| `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. |
-| `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. |
+| `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. **Fallback only**: the language server first detects this from `$interpolateProvider.startSymbol(...)` in your JS source. See note below. |
+| `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. **Fallback only** (same as above). |
 | `cache` | `boolean` | `true` | Enable caching of parsed symbols. Cache is stored in `.angularjs-lsp/cache/`. |
 | `diagnostics.enabled` | `boolean` | `true` | Enable diagnostics for undefined scope properties and local variables. |
 | `diagnostics.severity` | `string` | `"warning"` | Severity level: `"error"`, `"warning"`, `"hint"`, or `"information"`. |
@@ -84,6 +84,22 @@ By default, the following patterns are excluded:
 - `**/dist/**`
 - `**/build/**`
 - `**/.*/**` (hidden files/directories)
+
+### Interpolation symbols
+
+The language server resolves `{{ }}` (or your custom delimiters) in this order:
+
+1. `$interpolateProvider.startSymbol(...)` / `.endSymbol(...)` calls detected in your JS source —
+   no LSP-specific config needed. Both implicit DI and array-style DI rename are recognized:
+
+   ```js
+   angular.module('app').config(['$interpolateProvider', function(ip) {
+     ip.startSymbol('[[').endSymbol(']]');
+   }]);
+   ```
+
+2. `interpolate.startSymbol` / `interpolate.endSymbol` in `ajsconfig.json` (fallback).
+3. AngularJS default `{{` / `}}`.
 
 ## Commands
 
