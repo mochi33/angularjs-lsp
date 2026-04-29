@@ -90,6 +90,79 @@ async fn republish_all_js_diagnostics(
     }
 }
 
+/// HTML スコープ参照の property_path から末尾のプロパティ名 (leaf) を抜き出す。
+/// 例: "vm.foo" -> "foo", "foo" -> "foo", "vm.foo.bar" -> "bar"
+fn property_path_leaf(property_path: &str) -> &str {
+    match property_path.rfind('.') {
+        Some(idx) => &property_path[idx + 1..],
+        None => property_path,
+    }
+}
+
+/// HTML ファイル更新後、その変更で診断結果が変わり得る開いている JS ファイルの
+/// URI 集合を返す。
+///
+/// JS の `check_unused_scope_variables` は次の経路で HTML に依存している:
+/// 1. HTML テンプレ参照: `is_scope_variable_referenced(MyCtrl.$scope.foo)` が
+///    HTML スコープ参照 (例: `{{vm.foo}}`) を全件スキャン
+/// 2. HTML 埋め込みスクリプト参照: 埋め込みスクリプトが他 JS のシンボルを
+///    参照すると `definitions.references` に書き込まれ、
+///    `is_referenced_in_other_js` チェックが変動する
+///
+/// よって変更前後の (1)(2) の名前集合の和に、JS の scope 定義名がマッチする
+/// 開いている JS だけ再診断対象にすれば良い。
+///
+/// 過剰包含 (controller alias 解決を省略するなど) はあるが、
+/// 「開いている JS 全件 × is_scope_variable_referenced 全 HTML スキャン」より
+/// 圧倒的に軽量。開いていない JS (`documents` に無い) は除外する。
+fn collect_affected_js_uris(
+    index: &Arc<Index>,
+    documents: &Arc<DashMap<Url, String>>,
+    before_html_property_names: &HashSet<String>,
+    after_html_property_names: &HashSet<String>,
+    before_embedded_ref_names: &HashSet<String>,
+    after_embedded_ref_names: &HashSet<String>,
+) -> HashSet<Url> {
+    let mut affected: HashSet<Url> = HashSet::new();
+
+    let property_candidates: HashSet<&String> = before_html_property_names
+        .union(after_html_property_names)
+        .collect();
+    let symbol_candidates: HashSet<&String> = before_embedded_ref_names
+        .union(after_embedded_ref_names)
+        .collect();
+
+    if property_candidates.is_empty() && symbol_candidates.is_empty() {
+        return affected;
+    }
+
+    for entry in documents.iter() {
+        let js_uri = entry.key();
+        if !is_js_file(js_uri) {
+            continue;
+        }
+
+        let scope_defs = index.definitions.get_scope_definitions_for_js(js_uri);
+        for def in scope_defs {
+            // 全名一致 (埋め込みスクリプトからの直接参照経路)
+            if symbol_candidates.contains(&def.name) {
+                affected.insert(js_uri.clone());
+                break;
+            }
+            // プロパティ名末尾一致 (HTML テンプレ参照経路)
+            if let Some((_, property_path)) = index.parse_scope_symbol_name(&def.name) {
+                let leaf = property_path_leaf(&property_path).to_string();
+                if property_candidates.contains(&leaf) {
+                    affected.insert(js_uri.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    affected
+}
+
 /// JS ファイル更新後、その変更で診断結果が変わり得る開いている HTML ファイルの
 /// URI 集合を返す。
 ///
@@ -215,28 +288,31 @@ impl Backend {
 
                 // Run CPU-intensive analysis on the blocking thread pool
                 //
-                // 戻り値: Some((had_embedded_scripts_before, has_embedded_scripts_after))
+                // 戻り値: Some((before_html_props, after_html_props,
+                //               before_embedded_refs, after_embedded_refs))
                 //   - 解析が走らなかった場合は None
-                //   - 両方 false なら HTML 更新が JS 側のシンボル空間に影響しないので
-                //     「全 JS 診断の再発行」をスキップできる
-                //   - どちらかが true なら、JS ファイル側の参照解決結果が変わり得るので
-                //     依存ファイルの診断を更新する必要がある
+                //   - HTML スコープ参照の property leaf 名集合 (before/after) と
+                //     埋め込みスクリプトが書き込んだ参照シンボル名集合 (before/after)
+                //     を返す。これら和集合に対し、定義名がマッチする開いている JS
+                //     だけ再診断する (collect_affected_js_uris)
                 let analysis_result = tokio::task::spawn_blocking(move || {
                     let latest_text = match bl_documents.get(&bl_uri) {
                         Some(doc) => doc.value().clone(),
                         None => return None,
                     };
 
-                    // 解析前: この HTML に紐付く JS 由来シンボルがあるか
-                    // (前回 embedded script 由来で登録されたものが clear_document で消える)
-                    let had_embedded_before = !bl_index
-                        .definitions
-                        .get_definitions_for_uri(&bl_uri)
-                        .is_empty();
+                    // before スナップショット: 解析後に clear されてしまうので先に取得
+                    let before_html_props: HashSet<String> = bl_index
+                        .html
+                        .get_html_scope_references(&bl_uri)
+                        .iter()
+                        .map(|r| property_path_leaf(&r.property_path).to_string())
+                        .collect();
+                    let before_embedded_refs =
+                        bl_index.definitions.get_reference_names_for_uri(&bl_uri);
 
                     let scripts = bl_html_analyzer
                         .analyze_document_and_extract_scripts(&bl_uri, &latest_text);
-                    let has_embedded_after = !scripts.is_empty();
                     bl_index.templates.mark_html_analyzed(&bl_uri);
                     for script in scripts {
                         bl_analyzer.analyze_embedded_script(
@@ -261,26 +337,49 @@ impl Backend {
                             bl_html_analyzer.analyze_document(&child_uri, doc.value());
                         }
                     }
-                    Some((had_embedded_before, has_embedded_after))
+
+                    // after スナップショット
+                    let after_html_props: HashSet<String> = bl_index
+                        .html
+                        .get_html_scope_references(&bl_uri)
+                        .iter()
+                        .map(|r| property_path_leaf(&r.property_path).to_string())
+                        .collect();
+                    let after_embedded_refs =
+                        bl_index.definitions.get_reference_names_for_uri(&bl_uri);
+
+                    Some((
+                        before_html_props,
+                        after_html_props,
+                        before_embedded_refs,
+                        after_embedded_refs,
+                    ))
                 })
                 .await
                 .ok()
                 .flatten();
 
-                if let Some((had_embedded_before, has_embedded_after)) = analysis_result {
+                if let Some((
+                    before_html_props,
+                    after_html_props,
+                    before_embedded_refs,
+                    after_embedded_refs,
+                )) = analysis_result
+                {
                     publish_html_diagnostics(&client, &index, &diagnostics_config, &uri).await;
 
-                    // JS シンボルに変化があり得る場合のみ、開いている JS ファイルの
-                    // 診断を再発行する。embedded script が前後どちらも無ければ
-                    // この HTML 更新は JS 側のシンボル解決に影響しないのでスキップ。
-                    if had_embedded_before || has_embedded_after {
-                        republish_all_js_diagnostics(
-                            &client,
-                            &index,
-                            &diagnostics_config,
-                            &documents,
-                        )
-                        .await;
+                    // この HTML 変更で診断結果が変わり得る開いている JS だけ
+                    // ピンポイントに再発行する
+                    let affected_js = collect_affected_js_uris(
+                        &index,
+                        &documents,
+                        &before_html_props,
+                        &after_html_props,
+                        &before_embedded_refs,
+                        &after_embedded_refs,
+                    );
+                    for js_uri in affected_js {
+                        publish_js_diagnostics(&client, &index, &diagnostics_config, &js_uri).await;
                     }
 
                     let _ = client.semantic_tokens_refresh().await;
@@ -1801,5 +1900,296 @@ mod collect_affected_html_uris_tests {
         for u in &affected {
             assert!(documents.contains_key(u), "documents に無い URI を返さない");
         }
+    }
+}
+
+#[cfg(test)]
+mod collect_affected_js_uris_tests {
+    use super::*;
+    use crate::model::{
+        HtmlScopeReference, Span, SymbolBuilder, SymbolKind, SymbolReference,
+    };
+
+    fn js(path: &str) -> Url {
+        Url::parse(&format!("file://{}", path)).unwrap()
+    }
+    fn html(path: &str) -> Url {
+        Url::parse(&format!("file://{}", path)).unwrap()
+    }
+
+    fn add_scope_property(index: &Index, name: &str, js_uri: &Url) {
+        let span = Span::new(0, 0, 0, name.len() as u32);
+        let symbol = SymbolBuilder::new(name.to_string(), SymbolKind::ScopeProperty, js_uri.clone())
+            .definition_span(span)
+            .name_span(span)
+            .build();
+        index.definitions.add_definition(symbol);
+    }
+
+    fn add_embedded_script_reference(index: &Index, name: &str, html_uri: &Url) {
+        index.definitions.add_reference(SymbolReference {
+            name: name.to_string(),
+            uri: html_uri.clone(),
+            span: Span::new(0, 0, 0, name.len() as u32),
+        });
+    }
+
+    fn add_html_scope_ref_for_setup(
+        index: &Index,
+        property_path: &str,
+        html_uri: &Url,
+    ) {
+        index.html.add_html_scope_reference(HtmlScopeReference {
+            property_path: property_path.to_string(),
+            uri: html_uri.clone(),
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: property_path.len() as u32,
+        });
+    }
+
+    fn build_documents(uris: &[&Url]) -> Arc<DashMap<Url, String>> {
+        let docs = DashMap::new();
+        for u in uris {
+            docs.insert((*u).clone(), String::new());
+        }
+        Arc::new(docs)
+    }
+
+    fn names<I: IntoIterator<Item = &'static str>>(iter: I) -> HashSet<String> {
+        iter.into_iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn property_path_leaf_returns_last_component() {
+        assert_eq!(property_path_leaf("foo"), "foo");
+        assert_eq!(property_path_leaf("vm.foo"), "foo");
+        assert_eq!(property_path_leaf("vm.foo.bar"), "bar");
+    }
+
+    #[test]
+    fn collects_js_with_matching_property_name() {
+        // HTML が `vm.foo` を参照、JS が `MyCtrl.$scope.foo` を定義 → 影響あり
+        let index = Arc::new(Index::new());
+        let js_uri = js("/app/ctrl.js");
+        let html_uri = html("/app/page.html");
+
+        add_scope_property(&index, "MyCtrl.$scope.foo", &js_uri);
+        let documents = build_documents(&[&js_uri, &html_uri]);
+
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &HashSet::new(),
+            &names(["foo"]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(
+            affected.contains(&js_uri),
+            "プロパティ名一致の JS が含まれるべき"
+        );
+    }
+
+    #[test]
+    fn collects_js_referenced_by_embedded_script_full_name() {
+        // HTML 埋め込みスクリプトが `MyCtrl.$scope.foo` を参照、
+        // JS がそのシンボルを定義 → 影響あり
+        let index = Arc::new(Index::new());
+        let js_uri = js("/app/ctrl.js");
+        let html_uri = html("/app/page.html");
+
+        add_scope_property(&index, "MyCtrl.$scope.foo", &js_uri);
+        let documents = build_documents(&[&js_uri, &html_uri]);
+
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &names(["MyCtrl.$scope.foo"]),
+        );
+        assert!(
+            affected.contains(&js_uri),
+            "埋め込みスクリプト直接参照の JS が含まれるべき"
+        );
+    }
+
+    #[test]
+    fn collects_js_when_only_before_set_has_match() {
+        // 削除ケース: HTML が以前 `vm.foo` を参照していたが消えた。
+        // JS の MyCtrl.$scope.foo は今 unused に変わるので再診断対象。
+        let index = Arc::new(Index::new());
+        let js_uri = js("/app/ctrl.js");
+        let html_uri = html("/app/page.html");
+
+        add_scope_property(&index, "MyCtrl.$scope.foo", &js_uri);
+        let documents = build_documents(&[&js_uri, &html_uri]);
+
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &names(["foo"]),    // before
+            &HashSet::new(),    // after
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(
+            affected.contains(&js_uri),
+            "削除前の参照名一致でも対象にする (before only)"
+        );
+    }
+
+    #[test]
+    fn skips_unrelated_js_files() {
+        // OtherCtrl.$scope.bar を定義する JS は、`foo` 参照の HTML 変更とは無関係
+        let index = Arc::new(Index::new());
+        let js_uri = js("/app/other.js");
+        let html_uri = html("/app/page.html");
+
+        add_scope_property(&index, "OtherCtrl.$scope.bar", &js_uri);
+        let documents = build_documents(&[&js_uri, &html_uri]);
+
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &HashSet::new(),
+            &names(["foo"]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(
+            !affected.contains(&js_uri),
+            "プロパティ名が一致しない JS は対象外"
+        );
+    }
+
+    #[test]
+    fn skips_unopened_js_files() {
+        // documents に無い JS は対象外 (閉じてるので発行不要)
+        let index = Arc::new(Index::new());
+        let unopened_js = js("/app/closed.js");
+        let html_uri = html("/app/page.html");
+
+        add_scope_property(&index, "MyCtrl.$scope.foo", &unopened_js);
+        // unopened_js は documents に入れない
+        let documents = build_documents(&[&html_uri]);
+
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &HashSet::new(),
+            &names(["foo"]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(
+            affected.is_empty(),
+            "未オープン JS は再発行対象に含めない"
+        );
+    }
+
+    #[test]
+    fn returns_empty_when_no_candidates() {
+        // before/after が両方空 → スキャン不要・空集合
+        let index = Arc::new(Index::new());
+        let js_uri = js("/app/ctrl.js");
+        let html_uri = html("/app/page.html");
+
+        add_scope_property(&index, "MyCtrl.$scope.foo", &js_uri);
+        let documents = build_documents(&[&js_uri, &html_uri]);
+
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(affected.is_empty(), "候補名がなければ空集合");
+    }
+
+    #[test]
+    fn property_leaf_match_with_dotted_path() {
+        // HTML 参照 `vm.foo`, JS 定義 `MyCtrl.$scope.foo` → leaf 一致
+        // (HtmlScopeReference の property_path が "vm.foo" 形式でも leaf 抽出で照合)
+        let index = Arc::new(Index::new());
+        let js_uri = js("/app/ctrl.js");
+        let html_uri = html("/app/page.html");
+
+        // 後の改修で property_path から leaf を取り出すロジックを追加した場合、
+        // この経路でも検出できることを保証
+        add_scope_property(&index, "MyCtrl.$scope.foo", &js_uri);
+        add_html_scope_ref_for_setup(&index, "vm.foo", &html_uri);
+        let documents = build_documents(&[&js_uri, &html_uri]);
+
+        // collect_affected_js_uris は property names (leaf) を直接受け取る前提なので、
+        // 呼び出し元で leaf 抽出する。ここは leaf 化済みの "foo" を渡してテスト
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &HashSet::new(),
+            &names(["foo"]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(affected.contains(&js_uri));
+    }
+
+    #[test]
+    fn skips_non_js_documents() {
+        // documents に HTML だけが入っているケースで、HTML を JS と誤認しない
+        let index = Arc::new(Index::new());
+        let html_uri = html("/app/page.html");
+
+        // HTML URI に scope-property 風の定義があっても、is_js_file で弾かれる
+        add_scope_property(&index, "MyCtrl.$scope.foo", &html_uri);
+        let documents = build_documents(&[&html_uri]);
+
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &HashSet::new(),
+            &names(["foo"]),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(affected.is_empty(), "HTML URI は対象外");
+    }
+
+    #[test]
+    fn returns_open_js_when_embedded_script_referenced_symbol_removed() {
+        // 削除ケース (埋め込みスクリプト経由): 前は HTML 埋め込みスクリプトから
+        // MyCtrl.$scope.foo を参照していたが消えた → JS の "他JSから参照あり"
+        // 判定が変わるので再診断対象
+        let index = Arc::new(Index::new());
+        let js_uri = js("/app/ctrl.js");
+        let html_uri = html("/app/page.html");
+
+        add_scope_property(&index, "MyCtrl.$scope.foo", &js_uri);
+        // before として add しておくが、collect_affected_js_uris の入力としては
+        // before セットに名前を渡せば良いので、ここではリファレンス追加は省略
+        let documents = build_documents(&[&js_uri, &html_uri]);
+
+        let affected = collect_affected_js_uris(
+            &index,
+            &documents,
+            &HashSet::new(),
+            &HashSet::new(),
+            &names(["MyCtrl.$scope.foo"]), // before only
+            &HashSet::new(),
+        );
+        assert!(
+            affected.contains(&js_uri),
+            "埋め込みスクリプト参照の削除ケースも対象"
+        );
+
+        // before/after 両方の経路を実引き当てるための補助確認: add_embedded_script_reference は
+        // 実際には server 内 spawn_blocking 内で get_reference_names_for_uri と組み合わせて
+        // before/after を構築する。テストでは入力集合を直接渡して挙動を検証している。
+        let _ = add_embedded_script_reference; // ヘルパー未使用警告抑制
     }
 }

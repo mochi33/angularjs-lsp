@@ -217,6 +217,18 @@ impl DefinitionStore {
         result
     }
 
+    /// 指定 URI から参照されているシンボル名集合を取得
+    /// (HTML 埋め込みスクリプトが書き込んだ参照を URI 単位で逆引きするのに使う)
+    pub fn get_reference_names_for_uri(&self, uri: &Url) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        for entry in self.references.iter() {
+            if entry.value().iter().any(|r| &r.uri == uri) {
+                names.insert(entry.key().clone());
+            }
+        }
+        names
+    }
+
     pub fn clear_document(&self, uri: &Url) {
         if let Some((_, symbols)) = self.document_symbols.remove(uri) {
             for symbol_name in symbols {
