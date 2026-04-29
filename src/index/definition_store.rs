@@ -257,14 +257,24 @@ impl DefinitionStore {
 
     /// 指定 URI から参照されているシンボル名集合を取得
     /// (HTML 埋め込みスクリプトが書き込んだ参照を URI 単位で逆引きするのに使う)
+    ///
+    /// `document_symbols` URI 逆引きを使い、当該 URI に紐づくシンボル名だけ
+    /// 走査する。旧実装は workspace 全 references を走査して O(全シンボル数 ×
+    /// 平均参照数) だったが、本実装は O(該当 URI のシンボル数 × 同名参照数)
+    /// に絞られる。`get_definition_names_for_uri` と対称な実装。
     pub fn get_reference_names_for_uri(&self, uri: &Url) -> HashSet<String> {
-        let mut names = HashSet::new();
-        for entry in self.references.iter() {
-            if entry.value().iter().any(|r| &r.uri == uri) {
-                names.insert(entry.key().clone());
+        let Some(names) = self.document_symbols.get(uri) else {
+            return HashSet::new();
+        };
+        let mut result = HashSet::new();
+        for name in names.value() {
+            if let Some(entry) = self.references.get(name) {
+                if entry.value().iter().any(|r| &r.uri == uri) {
+                    result.insert(name.clone());
+                }
             }
         }
-        names
+        result
     }
 
     /// 指定 URI に定義があるシンボル名集合を取得
@@ -797,5 +807,74 @@ mod tests {
 
         // span 範囲外
         assert_eq!(store.find_symbol_at_position(&uri, 5, 0), None);
+    }
+
+    #[test]
+    fn get_reference_names_for_uri_collects_only_target_uri() {
+        let store = DefinitionStore::new();
+        let uri_a = Url::parse("file:///a.html").unwrap();
+        let uri_b = Url::parse("file:///b.html").unwrap();
+
+        // uri_a が "RefA1" / "RefA2" を参照、uri_b が "RefB1" / "RefA1" (同名) を参照
+        store.add_reference(make_reference("RefA1", &uri_a));
+        store.add_reference(make_reference("RefA2", &uri_a));
+        store.add_reference(make_reference("RefB1", &uri_b));
+        store.add_reference(make_reference("RefA1", &uri_b)); // 別 URI に同名
+
+        let names_a = store.get_reference_names_for_uri(&uri_a);
+        assert_eq!(names_a.len(), 2);
+        assert!(names_a.contains("RefA1"));
+        assert!(names_a.contains("RefA2"));
+
+        let names_b = store.get_reference_names_for_uri(&uri_b);
+        assert_eq!(names_b.len(), 2);
+        assert!(names_b.contains("RefA1")); // 同名でも uri_b 側にも参照あるので拾う
+        assert!(names_b.contains("RefB1"));
+    }
+
+    #[test]
+    fn get_reference_names_for_uri_includes_names_with_only_references() {
+        // 定義のないシンボル名 (リファレンスのみ) もちゃんと拾う
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        store.add_reference(make_reference("OnlyRef", &uri));
+        // 定義は登録しない
+
+        let names = store.get_reference_names_for_uri(&uri);
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("OnlyRef"));
+    }
+
+    #[test]
+    fn get_reference_names_for_uri_excludes_definition_only_names() {
+        // 定義しか持たないシンボル名 (この URI からの参照は無い) は除外
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        store.add_definition(make_definition("DefOnly", &uri));
+        // リファレンスは追加しない
+
+        let names = store.get_reference_names_for_uri(&uri);
+        assert!(names.is_empty(), "定義しかない URI はリファレンス無し");
+    }
+
+    #[test]
+    fn get_reference_names_for_uri_returns_empty_for_unknown_uri() {
+        let store = DefinitionStore::new();
+        let uri = Url::parse("file:///never-touched.js").unwrap();
+        assert!(store.get_reference_names_for_uri(&uri).is_empty());
+    }
+
+    #[test]
+    fn get_reference_names_for_uri_drops_after_clear_document() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        store.add_reference(make_reference("Foo", &uri));
+        assert_eq!(store.get_reference_names_for_uri(&uri).len(), 1);
+
+        store.clear_document(&uri);
+        assert!(store.get_reference_names_for_uri(&uri).is_empty());
     }
 }
