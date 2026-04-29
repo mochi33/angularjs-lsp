@@ -63,6 +63,31 @@ impl InterpolateStore {
         self.js_detected.clear();
     }
 
+    /// キャッシュ書き出し用に全 JS 検出エントリを取り出す。
+    ///
+    /// 返り値は `(URI, start_symbol, end_symbol)` の Vec。順序は不定。
+    /// `config_fallback` は `ajsconfig.json` から起動時に再構築されるので
+    /// キャッシュ対象には含めない。
+    pub fn iter_js_detected_for_cache(&self) -> Vec<(Url, Option<String>, Option<String>)> {
+        self.js_detected
+            .iter()
+            .map(|e| {
+                let (s, end) = e.value().clone();
+                (e.key().clone(), s, end)
+            })
+            .collect()
+    }
+
+    /// キャッシュ復元用にエントリを丸ごと書き戻す。
+    /// 既存エントリがあれば上書きする (start/end どちらか片方だけ既存値があるケースは
+    /// 通常の `set_*_symbol` 経路で発生するが、復元時は丸ごとの上書きで十分)。
+    pub fn restore_from_cache(&self, uri: Url, start: Option<String>, end: Option<String>) {
+        if start.is_none() && end.is_none() {
+            return;
+        }
+        self.js_detected.insert(uri, (start, end));
+    }
+
     /// 解決された (start_symbol, end_symbol) を返す。
     ///
     /// JS 検出値 → ajsconfig フォールバック → デフォルト の順で解決する。
@@ -186,5 +211,55 @@ mod tests {
         store.set_start_symbol(url("/a.js"), "<%".to_string());
         store.set_end_symbol(url("/b.js"), "%>".to_string());
         assert_eq!(store.resolved(), ("<%".to_string(), "%>".to_string()));
+    }
+
+    #[test]
+    fn iter_js_detected_for_cache_returns_all_entries() {
+        let store = InterpolateStore::new();
+        store.set_start_symbol(url("/a.js"), "<%".to_string());
+        store.set_end_symbol(url("/a.js"), "%>".to_string());
+        store.set_start_symbol(url("/b.js"), "[[".to_string());
+
+        let mut entries = store.iter_js_detected_for_cache();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, url("/a.js"));
+        assert_eq!(entries[0].1, Some("<%".to_string()));
+        assert_eq!(entries[0].2, Some("%>".to_string()));
+        assert_eq!(entries[1].0, url("/b.js"));
+        assert_eq!(entries[1].1, Some("[[".to_string()));
+        assert_eq!(entries[1].2, None);
+    }
+
+    #[test]
+    fn restore_from_cache_round_trip() {
+        // 1. 元の store を構築
+        let store = InterpolateStore::new();
+        store.set_start_symbol(url("/a.js"), "<%".to_string());
+        store.set_end_symbol(url("/a.js"), "%>".to_string());
+        store.set_start_symbol(url("/b.js"), "[[".to_string());
+        let snapshot = store.iter_js_detected_for_cache();
+
+        // 2. 別 store に復元
+        let restored = InterpolateStore::new();
+        for (uri, s, e) in snapshot {
+            restored.restore_from_cache(uri, s, e);
+        }
+
+        // 3. resolved() が同じ結果になること
+        assert_eq!(store.resolved(), restored.resolved());
+
+        // /a.js の start/end が両方復元されていること
+        let entries = restored.iter_js_detected_for_cache();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn restore_from_cache_skips_empty_entries() {
+        let store = InterpolateStore::new();
+        store.restore_from_cache(url("/a.js"), None, None);
+        // 空エントリはスキップされる
+        assert!(store.iter_js_detected_for_cache().is_empty());
     }
 }
