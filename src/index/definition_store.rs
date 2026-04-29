@@ -591,6 +591,9 @@ mod tests {
 
         store.clear_document(&uri);
         assert!(store.get_definition_names_for_uri(&uri).is_empty());
+    }
+
+    #[test]
     fn for_each_reference_visits_all_refs() {
         let store = DefinitionStore::new();
         let uri_a = Url::parse("file:///a.js").unwrap();

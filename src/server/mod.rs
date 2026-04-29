@@ -99,6 +99,62 @@ fn property_path_leaf(property_path: &str) -> &str {
     }
 }
 
+/// `pending_reanalysis` キューが空になるまでドレインし、各 URI を `analyze_one` で
+/// 処理する。
+///
+/// 単純に `take_pending_reanalysis` を 1 回呼んで Vec ループする実装では:
+/// 1. ループ中に panic / 早期 return すると、`take` 時の clear で全エントリが
+///    消失して二度と再解析されない (取りこぼし)
+/// 2. `analyze_one` 中に**孫**が新たに pending に追加されても、その同じラウンド
+///    では消費されない (深い ng-include で更新が遅延)
+///
+/// 本ヘルパーはドレインループ + `visited` セット + 深さ上限で対応する:
+/// - ループの先頭で `take_pending_reanalysis` を再呼び出し → 孫まで追える
+/// - `visited` で同一 URI の重複処理を防ぐ → 循環や重複再パース防止
+/// - `MAX_ROUNDS` 上限で万一の暴走を防ぐ
+///
+/// `skip_uri` は呼び出し側が自分自身を pending から除外するために渡す
+/// (typically 編集中の親 URI)。
+fn drain_pending_reanalysis<F>(index: &Index, skip_uri: &Url, mut analyze_one: F)
+where
+    F: FnMut(&Url),
+{
+    /// ng-include の現実的なネスト深さ (経験則として 8 段あれば十分)。
+    /// これを超える場合は循環の疑いがあるので打ち切る。
+    const MAX_ROUNDS: usize = 8;
+
+    let mut visited: HashSet<Url> = HashSet::new();
+    visited.insert(skip_uri.clone());
+
+    for round in 0..MAX_ROUNDS {
+        let pending = index.take_pending_reanalysis();
+        if pending.is_empty() {
+            break;
+        }
+
+        let mut progressed = false;
+        for child_uri in pending {
+            if !visited.insert(child_uri.clone()) {
+                continue;
+            }
+            analyze_one(&child_uri);
+            progressed = true;
+        }
+
+        if !progressed {
+            break;
+        }
+
+        if round + 1 == MAX_ROUNDS {
+            tracing::warn!(
+                "drain_pending_reanalysis: hit MAX_ROUNDS={} (possible ng-include cycle, skip_uri={})",
+                MAX_ROUNDS,
+                skip_uri
+            );
+        }
+    }
+}
+
 /// HTML 編集の影響範囲を判断するためのスナップショット。
 ///
 /// `before != after` を確認するだけで、診断・semanticTokens/refresh・codeLens/refresh
@@ -453,20 +509,16 @@ impl Backend {
                     }
 
                     bl_index.remove_from_pending_reanalysis(&bl_uri);
-                    let pending_uris = bl_index.take_pending_reanalysis();
-                    for child_uri in pending_uris {
-                        if child_uri == bl_uri {
-                            continue;
-                        }
-                        if let Some(doc) = bl_documents.get(&child_uri) {
+                    drain_pending_reanalysis(&bl_index, &bl_uri, |child_uri| {
+                        if let Some(doc) = bl_documents.get(child_uri) {
                             tracing::debug!(
-                                "process_pending_reanalysis: reanalyzing {} (triggered by {})",
+                                "drain_pending_reanalysis: reanalyzing {} (triggered by {})",
                                 child_uri,
                                 bl_uri
                             );
-                            bl_html_analyzer.analyze_document(&child_uri, doc.value());
+                            bl_html_analyzer.analyze_document(child_uri, doc.value());
                         }
-                    }
+                    });
 
                     // after スナップショット
                     let after = HtmlChangeSnapshot::capture(&bl_index, &bl_uri);
@@ -614,17 +666,14 @@ impl Backend {
                     bl_analyzer
                         .analyze_embedded_script(&bl_uri, &script.source, script.line_offset);
                 }
-                // process_pending_reanalysis inlined (&self cannot be sent to spawn_blocking)
+                // drain_pending_reanalysis を spawn_blocking 内で直接呼ぶ
+                // (&self を送れないため process_pending_reanalysis ではなく直接 helper)
                 bl_index.remove_from_pending_reanalysis(&bl_uri);
-                let pending = bl_index.take_pending_reanalysis();
-                for child_uri in pending {
-                    if child_uri == bl_uri {
-                        continue;
+                drain_pending_reanalysis(&bl_index, &bl_uri, |child_uri| {
+                    if let Some(doc) = bl_documents.get(child_uri) {
+                        bl_html_analyzer.analyze_document(child_uri, doc.value());
                     }
-                    if let Some(doc) = bl_documents.get(&child_uri) {
-                        bl_html_analyzer.analyze_document(&child_uri, doc.value());
-                    }
-                }
+                });
             })
             .await
             .unwrap_or(());
@@ -680,24 +729,16 @@ impl Backend {
 
     fn process_pending_reanalysis(&self, current_uri: &Url) {
         self.index.remove_from_pending_reanalysis(current_uri);
-
-        let pending_uris = self.index.take_pending_reanalysis();
-
-        for child_uri in pending_uris {
-            if &child_uri == current_uri {
-                continue;
-            }
-
-            if let Some(doc) = self.documents.get(&child_uri) {
+        drain_pending_reanalysis(&self.index, current_uri, |child_uri| {
+            if let Some(doc) = self.documents.get(child_uri) {
                 tracing::debug!(
-                    "process_pending_reanalysis: reanalyzing {} (triggered by {})",
+                    "drain_pending_reanalysis: reanalyzing {} (triggered by {})",
                     child_uri,
                     current_uri
                 );
-                self.html_analyzer
-                    .analyze_document(&child_uri, doc.value());
+                self.html_analyzer.analyze_document(child_uri, doc.value());
             }
-        }
+        });
     }
 
     async fn scan_workspace(&self) {
@@ -2578,5 +2619,176 @@ mod change_snapshot_tests {
         // before ⊂ after だが集合は異なる → 差分検知
         assert_ne!(before, after);
         assert!(before.cross_file_lens_state_changed(&after));
+    }
+}
+
+#[cfg(test)]
+mod drain_pending_reanalysis_tests {
+    use super::*;
+
+    fn url(path: &str) -> Url {
+        Url::parse(&format!("file://{}", path)).unwrap()
+    }
+
+    #[test]
+    fn drains_single_pending_uri() {
+        let index = Index::new();
+        let parent = url("/parent.html");
+        let child = url("/child.html");
+        index.add_pending_reanalysis(child.clone());
+
+        let mut visited: Vec<Url> = Vec::new();
+        drain_pending_reanalysis(&index, &parent, |u| visited.push(u.clone()));
+
+        assert_eq!(visited, vec![child]);
+        assert!(
+            index.take_pending_reanalysis().is_empty(),
+            "ドレイン後 pending は空"
+        );
+    }
+
+    #[test]
+    fn drains_grandchild_added_during_iteration() {
+        // 子の analyze 中に孫が pending に追加される → 同じ呼び出しで処理される
+        let index = Index::new();
+        let parent = url("/parent.html");
+        let child = url("/child.html");
+        let grand = url("/grand.html");
+        index.add_pending_reanalysis(child.clone());
+
+        let grand_clone = grand.clone();
+        let mut visited: Vec<Url> = Vec::new();
+        drain_pending_reanalysis(&index, &parent, |u| {
+            visited.push(u.clone());
+            if u == &child {
+                index.add_pending_reanalysis(grand_clone.clone());
+            }
+        });
+
+        assert!(visited.contains(&child), "child は処理される");
+        assert!(visited.contains(&grand), "孫も同じ呼び出しで処理される");
+        assert_eq!(visited.len(), 2);
+    }
+
+    #[test]
+    fn drains_great_grandchild_too() {
+        // 3 段ネスト: child → grand → great_grand
+        let index = Index::new();
+        let parent = url("/parent.html");
+        let child = url("/child.html");
+        let grand = url("/grand.html");
+        let great_grand = url("/great.html");
+        index.add_pending_reanalysis(child.clone());
+
+        let grand_clone = grand.clone();
+        let great_clone = great_grand.clone();
+        let mut visited: Vec<Url> = Vec::new();
+        drain_pending_reanalysis(&index, &parent, |u| {
+            visited.push(u.clone());
+            if u == &child {
+                index.add_pending_reanalysis(grand_clone.clone());
+            } else if u == &grand_clone {
+                index.add_pending_reanalysis(great_clone.clone());
+            }
+        });
+
+        assert!(visited.contains(&child));
+        assert!(visited.contains(&grand));
+        assert!(visited.contains(&great_grand));
+    }
+
+    #[test]
+    fn skips_uri_matching_skip_uri() {
+        // skip_uri は「自分自身を再解析対象から除外する」目的なので、pending に
+        // 入っていてもスキップされる
+        let index = Index::new();
+        let parent = url("/parent.html");
+        index.add_pending_reanalysis(parent.clone());
+
+        let mut visited: Vec<Url> = Vec::new();
+        drain_pending_reanalysis(&index, &parent, |u| visited.push(u.clone()));
+
+        assert!(visited.is_empty(), "skip_uri は処理されない");
+    }
+
+    #[test]
+    fn deduplicates_with_visited_set() {
+        // 同じ URI が複数ラウンドで pending に再投入されても 1 回しか処理されない
+        let index = Index::new();
+        let parent = url("/parent.html");
+        let child = url("/child.html");
+        index.add_pending_reanalysis(child.clone());
+
+        let child_clone = child.clone();
+        let mut visit_count = 0;
+        drain_pending_reanalysis(&index, &parent, |u| {
+            visit_count += 1;
+            if u == &child_clone {
+                // 自分自身を再キューしようとする (循環シミュレーション)
+                index.add_pending_reanalysis(child_clone.clone());
+            }
+        });
+
+        assert_eq!(visit_count, 1, "visited セットで重複処理を防ぐ");
+    }
+
+    #[test]
+    fn handles_cyclic_ng_includes() {
+        // a が b を pending、b が a を pending → 互いに無限再キューしようとするが
+        // visited で打ち止めになる
+        let index = Index::new();
+        let parent = url("/parent.html");
+        let a = url("/a.html");
+        let b = url("/b.html");
+        index.add_pending_reanalysis(a.clone());
+
+        let a_clone = a.clone();
+        let b_clone = b.clone();
+        let mut visited: Vec<Url> = Vec::new();
+        drain_pending_reanalysis(&index, &parent, |u| {
+            visited.push(u.clone());
+            if u == &a_clone {
+                index.add_pending_reanalysis(b_clone.clone());
+            } else if u == &b_clone {
+                index.add_pending_reanalysis(a_clone.clone());
+            }
+        });
+
+        assert_eq!(visited.len(), 2, "a と b が 1 回ずつ処理されて停止");
+        assert!(visited.contains(&a));
+        assert!(visited.contains(&b));
+    }
+
+    #[test]
+    fn returns_when_pending_is_empty_initially() {
+        let index = Index::new();
+        let parent = url("/parent.html");
+
+        let mut visit_count = 0;
+        drain_pending_reanalysis(&index, &parent, |_| visit_count += 1);
+
+        assert_eq!(visit_count, 0);
+    }
+
+    #[test]
+    fn analyze_one_failure_does_not_drop_remaining_pending() {
+        // analyze_one が一部 URI で何もしない (ドキュメントが見つからない等) ケース。
+        // 残りの pending エントリは引き続き drain される。
+        let index = Index::new();
+        let parent = url("/parent.html");
+        let a = url("/a.html");
+        let b = url("/b.html");
+        index.add_pending_reanalysis(a.clone());
+        index.add_pending_reanalysis(b.clone());
+
+        let mut visited: Vec<Url> = Vec::new();
+        drain_pending_reanalysis(&index, &parent, |u| {
+            // a は "ドキュメント無し" を模して何もしない、b は visited に積む
+            if u != &a {
+                visited.push(u.clone());
+            }
+        });
+
+        assert_eq!(visited, vec![b]);
     }
 }
