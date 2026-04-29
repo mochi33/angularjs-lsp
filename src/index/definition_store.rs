@@ -188,26 +188,37 @@ impl DefinitionStore {
     }
 
     /// 位置からシンボルを検索（最も小さい範囲を優先）
+    ///
+    /// `document_symbols` URI 逆引きを使い、当該 URI のシンボル名候補だけ
+    /// `definitions` / `references` から取り出して走査する。旧実装は workspace
+    /// 全シンボル/参照を走査して O(N) だったが、本実装は O(該当 URI のシンボル
+    /// 数 + 参照数) に絞られる。
     pub fn find_symbol_at_position(&self, uri: &Url, line: u32, col: u32) -> Option<String> {
+        let Some(names) = self.document_symbols.get(uri) else {
+            return None;
+        };
+
         let mut best_match: Option<(String, u32)> = None;
 
-        for entry in self.definitions.iter() {
-            for symbol in entry.value() {
-                if &symbol.uri == uri && symbol.name_span.contains(line, col) {
-                    let size = symbol.name_span.range_size();
-                    if best_match.is_none() || size < best_match.as_ref().unwrap().1 {
-                        best_match = Some((symbol.name.clone(), size));
+        for name in names.value() {
+            if let Some(entry) = self.definitions.get(name) {
+                for symbol in entry.value() {
+                    if &symbol.uri == uri && symbol.name_span.contains(line, col) {
+                        let size = symbol.name_span.range_size();
+                        if best_match.is_none() || size < best_match.as_ref().unwrap().1 {
+                            best_match = Some((symbol.name.clone(), size));
+                        }
                     }
                 }
             }
-        }
 
-        for entry in self.references.iter() {
-            for reference in entry.value() {
-                if &reference.uri == uri && reference.span.contains(line, col) {
-                    let size = reference.span.range_size();
-                    if best_match.is_none() || size < best_match.as_ref().unwrap().1 {
-                        best_match = Some((reference.name.clone(), size));
+            if let Some(entry) = self.references.get(name) {
+                for reference in entry.value() {
+                    if &reference.uri == uri && reference.span.contains(line, col) {
+                        let size = reference.span.range_size();
+                        if best_match.is_none() || size < best_match.as_ref().unwrap().1 {
+                            best_match = Some((reference.name.clone(), size));
+                        }
                     }
                 }
             }
@@ -677,5 +688,114 @@ mod tests {
     fn any_reference_returns_false_for_unknown_name() {
         let store = DefinitionStore::new();
         assert!(!store.any_reference("does.not.exist", |_| true));
+    }
+
+    fn make_definition_at(name: &str, uri: &Url, span: Span) -> Symbol {
+        SymbolBuilder::new(name.to_string(), SymbolKind::ScopeProperty, uri.clone())
+            .definition_span(span)
+            .name_span(span)
+            .build()
+    }
+
+    fn make_reference_at(name: &str, uri: &Url, span: Span) -> SymbolReference {
+        SymbolReference {
+            name: name.to_string(),
+            uri: uri.clone(),
+            span,
+        }
+    }
+
+    #[test]
+    fn find_symbol_at_position_returns_none_for_unknown_uri() {
+        let store = DefinitionStore::new();
+        let uri = Url::parse("file:///never-touched.js").unwrap();
+        assert_eq!(store.find_symbol_at_position(&uri, 0, 0), None);
+    }
+
+    #[test]
+    fn find_symbol_at_position_finds_definition() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        // line 5, col 0..6 に "MyCtrl" の定義を入れる
+        let span = Span::new(5, 0, 5, 6);
+        store.add_definition(make_definition_at("MyCtrl", &uri, span));
+
+        assert_eq!(
+            store.find_symbol_at_position(&uri, 5, 3),
+            Some("MyCtrl".to_string())
+        );
+    }
+
+    #[test]
+    fn find_symbol_at_position_finds_reference() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        // 定義はないがリファレンスだけある
+        let span = Span::new(10, 4, 10, 10);
+        store.add_reference(make_reference_at("RefOnly", &uri, span));
+
+        assert_eq!(
+            store.find_symbol_at_position(&uri, 10, 7),
+            Some("RefOnly".to_string())
+        );
+    }
+
+    #[test]
+    fn find_symbol_at_position_prefers_smallest_range() {
+        // 大きな範囲と小さな範囲が同じ位置で重なる場合、小さな方を返す
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        // 範囲: line 0, col 0..20 (20文字)
+        let big_span = Span::new(0, 0, 0, 20);
+        store.add_definition(make_definition_at("OuterSymbol", &uri, big_span));
+
+        // 範囲: line 0, col 5..10 (5文字) ← 小さい
+        let small_span = Span::new(0, 5, 0, 10);
+        store.add_definition(make_definition_at("Inner", &uri, small_span));
+
+        // 両方含む位置 (col=7) → 小さい方の Inner を返す
+        assert_eq!(
+            store.find_symbol_at_position(&uri, 0, 7),
+            Some("Inner".to_string())
+        );
+    }
+
+    #[test]
+    fn find_symbol_at_position_ignores_other_uris() {
+        // 別 URI に同じ名前のシンボルがあっても、対象 URI でしか定義/参照を返さない
+        let store = DefinitionStore::new();
+        let uri_a = Url::parse("file:///a.js").unwrap();
+        let uri_b = Url::parse("file:///b.js").unwrap();
+
+        let span = Span::new(0, 0, 0, 6);
+        // Same name "Shared" defined in both, position-overlapping
+        store.add_definition(make_definition_at("Shared", &uri_a, span));
+        store.add_definition(make_definition_at("Shared", &uri_b, span));
+
+        // uri_a で問い合わせると uri_a 側の定義しか拾わない (シンボル名は同じだが OK)
+        assert_eq!(
+            store.find_symbol_at_position(&uri_a, 0, 3),
+            Some("Shared".to_string())
+        );
+        // uri_b で問い合わせても uri_b 側の定義を拾う
+        assert_eq!(
+            store.find_symbol_at_position(&uri_b, 0, 3),
+            Some("Shared".to_string())
+        );
+    }
+
+    #[test]
+    fn find_symbol_at_position_returns_none_for_unmatched_position() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        let span = Span::new(0, 0, 0, 6);
+        store.add_definition(make_definition_at("MyCtrl", &uri, span));
+
+        // span 範囲外
+        assert_eq!(store.find_symbol_at_position(&uri, 5, 0), None);
     }
 }
