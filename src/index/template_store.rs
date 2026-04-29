@@ -686,6 +686,13 @@ impl TemplateStore {
         self.pending_reanalysis.remove(uri);
     }
 
+    /// 再解析キューに URI を直接追加。通常は `queue_child_for_reanalysis` 経由で
+    /// ng-include binding 解決時に自動追加されるが、テストや手動キューイング用に
+    /// 公開している。
+    pub fn add_pending_reanalysis(&self, uri: Url) {
+        self.pending_reanalysis.insert(uri);
+    }
+
     pub fn mark_html_analyzed(&self, uri: &Url) {
         self.analyzed_html_files.insert(uri.clone());
     }

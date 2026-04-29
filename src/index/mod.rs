@@ -71,6 +71,11 @@ impl Index {
         self.templates.remove_from_pending_reanalysis(uri);
     }
 
+    /// 再解析キューに URI を追加 (drain_pending_reanalysis のテスト用に主に利用)
+    pub fn add_pending_reanalysis(&self, uri: Url) {
+        self.templates.add_pending_reanalysis(uri);
+    }
+
     pub fn mark_html_analyzed(&self, uri: &Url) {
         self.templates.mark_html_analyzed(uri);
     }
