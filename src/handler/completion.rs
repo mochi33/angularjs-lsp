@@ -185,11 +185,27 @@ impl CompletionHandler {
 
                 items
             } else {
-                // サービス名が指定された場合、そのサービスのメソッドのみを返す
+                // サービス名/コントローラー名が指定された場合、そのプレフィックスを持つ
+                // メソッド (service の `.method()` や controller の `this.X`) のみを返す。
+                //
+                // `MyCtrl.$scope.foo` や `MyCtrl.$rootScope.foo` も name 上は
+                // `MyCtrl.` で始まるが、これらは別途 `$scope` / `$rootScope`
+                // プレフィックス分岐で扱う候補なので、ここでは除外する
+                // (HTML 補完で `update` (Function) と `$scope.update` (Method) が
+                //  同時に出る重複の原因となるため)。
                 let method_prefix = format!("{}.", prefix);
                 definitions
                     .into_iter()
-                    .filter(|s| s.name.starts_with(&method_prefix))
+                    .filter(|s| {
+                        s.name.starts_with(&method_prefix)
+                            && !matches!(
+                                s.kind,
+                                SymbolKind::ScopeProperty
+                                    | SymbolKind::ScopeMethod
+                                    | SymbolKind::RootScopeProperty
+                                    | SymbolKind::RootScopeMethod
+                            )
+                    })
                     .map(|symbol| {
                         // "ServiceName.methodName" から "methodName" だけを抽出
                         let method_name = symbol
