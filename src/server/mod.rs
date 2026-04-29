@@ -105,6 +105,105 @@ fn property_path_leaf(property_path: &str) -> &str {
     }
 }
 
+/// `completion` ハンドラの sync 計算結果。`spawn_blocking` から戻った後、
+/// async 側でこれを見て tsserver にフォールバックするか結果を返すかを判断する。
+enum CompletionDecision {
+    /// AngularJS の補完候補が見つかった → そのまま返す
+    Resolved(CompletionResponse),
+    /// AngularJS では何も提案しない & tsserver も呼ばない (補完なし)
+    NoResult,
+    /// AngularJS では解決できないので tsserver にフォールバック
+    FallbackToTsProxy,
+}
+
+/// `completion` の CPU-bound な計算 (HTML/JS の AngularJS 補完抽出) を行う。
+///
+/// `spawn_blocking` 内で動かすため `&self` ではなく必要なものを Arc clone で
+/// 受け取る。tokio runtime に触れない純粋同期関数。
+fn compute_completion_decision(
+    index: Arc<Index>,
+    html_analyzer: Arc<HtmlAngularJsAnalyzer>,
+    documents: Arc<DashMap<Url, String>>,
+    uri: Url,
+    line: u32,
+    col: u32,
+) -> CompletionDecision {
+    // HTML file completion
+    if is_html_file(&uri) {
+        if let Some(doc) = documents.get(&uri) {
+            let source = doc.value();
+
+            // Directive completion context
+            if let Some((prefix, is_tag_name, element_tag_name)) =
+                html_analyzer.get_directive_completion_context_with_tag(source, line, col)
+            {
+                let handler = CompletionHandler::new(Arc::clone(&index));
+                let mut items: Vec<CompletionItem> = Vec::new();
+
+                // 属性名位置 + 既知 component 要素 → bindings を提案
+                if !is_tag_name {
+                    if let Some(ref tag_name) = element_tag_name {
+                        items.extend(handler.complete_component_bindings(tag_name, &prefix));
+                    }
+                }
+
+                // 既存のディレクティブ補完（ng-* など）も併せて返す
+                if let Some(CompletionResponse::Array(directive_items)) =
+                    handler.complete_directives(&prefix, is_tag_name)
+                {
+                    let mut seen: HashSet<String> =
+                        items.iter().map(|i| i.label.clone()).collect();
+                    for item in directive_items {
+                        if seen.insert(item.label.clone()) {
+                            items.push(item);
+                        }
+                    }
+                }
+
+                if !items.is_empty() {
+                    return CompletionDecision::Resolved(CompletionResponse::Array(items));
+                }
+            }
+
+            // Angular context completion
+            if html_analyzer.is_in_angular_context(source, line, col) {
+                let handler = CompletionHandler::new(Arc::clone(&index));
+                let items = handler.complete_in_html_angular_context(&uri, line);
+                if !items.is_empty() {
+                    return CompletionDecision::Resolved(CompletionResponse::Array(items));
+                }
+            }
+        }
+        return CompletionDecision::NoResult;
+    }
+
+    // JS file completion
+    let service_prefix = documents
+        .get(&uri)
+        .and_then(|doc| get_service_prefix_at_cursor(doc.value(), line, col));
+
+    // Non-AngularJS object pattern -> fallback to TypeScript
+    if let Some(ref prefix) = service_prefix {
+        if prefix != "$scope" && !index.definitions.is_service_or_factory(prefix) {
+            return CompletionDecision::FallbackToTsProxy;
+        }
+    }
+
+    let controller_name = index.controllers.get_controller_at(&uri, line);
+    let injected_services = index.controllers.get_injected_services_at(&uri, line);
+
+    let handler = CompletionHandler::new(Arc::clone(&index));
+    if let Some(completions) = handler.complete_with_context(
+        service_prefix.as_deref(),
+        controller_name.as_deref(),
+        &injected_services,
+    ) {
+        return CompletionDecision::Resolved(completions);
+    }
+
+    CompletionDecision::FallbackToTsProxy
+}
+
 /// `pending_reanalysis` キューが空になるまでドレインし、各 URI を `analyze_one` で
 /// 処理する。
 ///
@@ -1658,15 +1757,21 @@ impl LanguageServer for Backend {
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        let uri = &params.text_document_position.text_document.uri;
-
-        let handler = ReferencesHandler::new(Arc::clone(&self.index));
-        if let Some(refs) = handler.find_references(params.clone()) {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let index = Arc::clone(&self.index);
+        let params_for_blocking = params.clone();
+        let local_refs = tokio::task::spawn_blocking(move || {
+            ReferencesHandler::new(index).find_references(params_for_blocking)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(refs) = local_refs {
             return Ok(Some(refs));
         }
 
-        self.ensure_ts_file_opened(uri).await;
-        self.ensure_ts_synced(uri).await;
+        self.ensure_ts_file_opened(&uri).await;
+        self.ensure_ts_synced(&uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.references(&params).await);
         }
@@ -1678,13 +1783,21 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let pos = &params.text_document_position_params.position;
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        let pos = params.text_document_position_params.position;
 
-        let handler = DefinitionHandler::new(Arc::clone(&self.index));
-        let source = self.documents.get(uri).map(|s| s.value().clone());
-        if let Some(def) = handler.goto_definition_with_source(params.clone(), source.as_deref())
-        {
+        let source = self.documents.get(&uri).map(|s| s.value().clone());
+        let index = Arc::clone(&self.index);
+        let params_for_blocking = params.clone();
+        let local_def = tokio::task::spawn_blocking(move || {
+            DefinitionHandler::new(index)
+                .goto_definition_with_source(params_for_blocking, source.as_deref())
+        })
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(def) = local_def {
             self.client
                 .log_message(
                     MessageType::INFO,
@@ -1707,8 +1820,8 @@ impl LanguageServer for Backend {
             )
             .await;
 
-        self.ensure_ts_file_opened(uri).await;
-        self.ensure_ts_synced(uri).await;
+        self.ensure_ts_file_opened(&uri).await;
+        self.ensure_ts_synced(&uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.goto_definition(&params).await);
         }
@@ -1717,15 +1830,21 @@ impl LanguageServer for Backend {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let uri = &params.text_document_position_params.text_document.uri;
-
-        let handler = HoverHandler::new(Arc::clone(&self.index));
-        if let Some(hover) = handler.hover(params.clone()) {
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        let index = Arc::clone(&self.index);
+        let params_for_blocking = params.clone();
+        let local_hover = tokio::task::spawn_blocking(move || {
+            HoverHandler::new(index).hover(params_for_blocking)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(hover) = local_hover {
             return Ok(Some(hover));
         }
 
-        self.ensure_ts_file_opened(uri).await;
-        self.ensure_ts_synced(uri).await;
+        self.ensure_ts_file_opened(&uri).await;
+        self.ensure_ts_synced(&uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.hover(&params).await);
         }
@@ -1737,23 +1856,33 @@ impl LanguageServer for Backend {
         &self,
         params: SignatureHelpParams,
     ) -> Result<Option<SignatureHelp>> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let position = &params.text_document_position_params.position;
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        let position = params.text_document_position_params.position;
 
-        let source = match self.documents.get(uri) {
+        let source = match self.documents.get(&uri) {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
 
-        let handler = SignatureHelpHandler::new(Arc::clone(&self.index));
-        if let Some(sig_help) =
-            handler.signature_help(uri, position.line, position.character, &source)
-        {
+        let index = Arc::clone(&self.index);
+        let blocking_uri = uri.clone();
+        let local_sig = tokio::task::spawn_blocking(move || {
+            SignatureHelpHandler::new(index).signature_help(
+                &blocking_uri,
+                position.line,
+                position.character,
+                &source,
+            )
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(sig_help) = local_sig {
             return Ok(Some(sig_help));
         }
 
-        self.ensure_ts_file_opened(uri).await;
-        self.ensure_ts_synced(uri).await;
+        self.ensure_ts_file_opened(&uri).await;
+        self.ensure_ts_synced(&uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.signature_help(&params).await);
         }
@@ -1765,125 +1894,77 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        let uri = &params.text_document.uri;
-
-        let handler = DocumentSymbolHandler::new(Arc::clone(&self.index));
-        if let Some(symbols) = handler.document_symbols(uri) {
-            return Ok(Some(symbols));
-        }
-
-        Ok(None)
+        let uri = params.text_document.uri.clone();
+        let index = Arc::clone(&self.index);
+        // CPU-bound work を blocking スレッドに退避し、tokio worker を解放する。
+        // (多数ファイル open 時に handler が tokio worker を占有して他 LSP リクエストが
+        //  詰まる問題を回避するため。以下の handler 群でも同様)
+        let result = tokio::task::spawn_blocking(move || {
+            DocumentSymbolHandler::new(index).document_symbols(&uri)
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(result)
     }
 
     async fn completion(
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
-        let uri = &params.text_document_position.text_document.uri;
+        let uri = params.text_document_position.text_document.uri.clone();
         let line = params.text_document_position.position.line;
         let col = params.text_document_position.position.character;
 
-        // HTML file completion
-        if is_html_file(uri) {
-            if let Some(doc) = self.documents.get(uri) {
-                let source = doc.value();
+        // CPU-bound 部分 (HTML/JS の AngularJS 補完計算) を spawn_blocking に
+        // 退避し、ts_proxy フォールバック判定だけ async 側で扱う。
+        let index = Arc::clone(&self.index);
+        let html_analyzer = Arc::clone(&self.html_analyzer);
+        let documents = Arc::clone(&self.documents);
+        let blocking_uri = uri.clone();
+        let decision = tokio::task::spawn_blocking(move || {
+            compute_completion_decision(
+                index,
+                html_analyzer,
+                documents,
+                blocking_uri,
+                line,
+                col,
+            )
+        })
+        .await
+        .unwrap_or(CompletionDecision::NoResult);
 
-                // Directive completion context
-                if let Some((prefix, is_tag_name, element_tag_name)) = self
-                    .html_analyzer
-                    .get_directive_completion_context_with_tag(source, line, col)
-                {
-                    let handler = CompletionHandler::new(Arc::clone(&self.index));
-                    let mut items: Vec<CompletionItem> = Vec::new();
-
-                    // 属性名位置 + 既知 component 要素 → bindings を提案
-                    if !is_tag_name {
-                        if let Some(ref tag_name) = element_tag_name {
-                            items.extend(
-                                handler.complete_component_bindings(tag_name, &prefix),
-                            );
-                        }
-                    }
-
-                    // 既存のディレクティブ補完（ng-* など）も併せて返す
-                    if let Some(CompletionResponse::Array(directive_items)) =
-                        handler.complete_directives(&prefix, is_tag_name)
-                    {
-                        let mut seen: std::collections::HashSet<String> =
-                            items.iter().map(|i| i.label.clone()).collect();
-                        for item in directive_items {
-                            if seen.insert(item.label.clone()) {
-                                items.push(item);
-                            }
-                        }
-                    }
-
-                    if !items.is_empty() {
-                        return Ok(Some(CompletionResponse::Array(items)));
-                    }
-                }
-
-                // Angular context completion
-                if self.html_analyzer.is_in_angular_context(source, line, col) {
-                    let handler = CompletionHandler::new(Arc::clone(&self.index));
-                    let items = handler.complete_in_html_angular_context(uri, line);
-                    if !items.is_empty() {
-                        return Ok(Some(CompletionResponse::Array(items)));
-                    }
-                }
-            }
-            return Ok(None);
-        }
-
-        // JS file completion
-        let service_prefix = self
-            .documents
-            .get(uri)
-            .and_then(|doc| get_service_prefix_at_cursor(doc.value(), line, col));
-
-        // Non-AngularJS object pattern -> fallback to TypeScript
-        if let Some(ref prefix) = service_prefix {
-            if prefix != "$scope" && !self.index.definitions.is_service_or_factory(prefix) {
-                self.ensure_ts_file_opened(uri).await;
-                self.ensure_ts_synced(uri).await;
+        match decision {
+            CompletionDecision::Resolved(c) => Ok(Some(c)),
+            CompletionDecision::NoResult => Ok(None),
+            CompletionDecision::FallbackToTsProxy => {
+                self.ensure_ts_file_opened(&uri).await;
+                self.ensure_ts_synced(&uri).await;
                 if let Some(ref proxy) = *self.ts_proxy.read().await {
                     return Ok(proxy.completion(&params).await);
                 }
-                return Ok(None);
+                Ok(None)
             }
         }
-
-        let controller_name = self.index.controllers.get_controller_at(uri, line);
-        let injected_services = self.index.controllers.get_injected_services_at(uri, line);
-
-        let handler = CompletionHandler::new(Arc::clone(&self.index));
-        if let Some(completions) = handler.complete_with_context(
-            service_prefix.as_deref(),
-            controller_name.as_deref(),
-            &injected_services,
-        ) {
-            return Ok(Some(completions));
-        }
-
-        self.ensure_ts_file_opened(uri).await;
-        self.ensure_ts_synced(uri).await;
-        if let Some(ref proxy) = *self.ts_proxy.read().await {
-            return Ok(proxy.completion(&params).await);
-        }
-
-        Ok(None)
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
-        let uri = &params.text_document_position.text_document.uri;
-
-        let handler = RenameHandler::new(Arc::clone(&self.index));
-        if let Some(edit) = handler.rename(params.clone()) {
+        let uri = params.text_document_position.text_document.uri.clone();
+        let index = Arc::clone(&self.index);
+        let params_for_blocking = params.clone();
+        let local_edit = tokio::task::spawn_blocking(move || {
+            RenameHandler::new(index).rename(params_for_blocking)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(edit) = local_edit {
             return Ok(Some(edit));
         }
 
-        self.ensure_ts_file_opened(uri).await;
-        self.ensure_ts_synced(uri).await;
+        self.ensure_ts_file_opened(&uri).await;
+        self.ensure_ts_synced(&uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.rename(&params).await);
         }
@@ -1895,38 +1976,53 @@ impl LanguageServer for Backend {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        let handler = RenameHandler::new(Arc::clone(&self.index));
-        if let Some(response) = handler.prepare_rename(params) {
-            return Ok(Some(response));
-        }
-
-        Ok(None)
+        let index = Arc::clone(&self.index);
+        let result = tokio::task::spawn_blocking(move || {
+            RenameHandler::new(index).prepare_rename(params)
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(result)
     }
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
-        let uri = &params.text_document.uri;
-        let handler = CodeLensHandler::new(Arc::clone(&self.index));
-        Ok(handler.code_lens(uri))
+        let uri = params.text_document.uri.clone();
+        let index = Arc::clone(&self.index);
+        let result = tokio::task::spawn_blocking(move || {
+            CodeLensHandler::new(index).code_lens(&uri)
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(result)
     }
 
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        let uri = &params.text_document.uri;
-        let handler = SemanticTokensHandler::new(Arc::clone(&self.index));
-        if let Some(tokens) = handler.semantic_tokens_full(uri) {
-            return Ok(Some(SemanticTokensResult::Tokens(tokens)));
-        }
-        Ok(None)
+        let uri = params.text_document.uri.clone();
+        let index = Arc::clone(&self.index);
+        let tokens = tokio::task::spawn_blocking(move || {
+            SemanticTokensHandler::new(index).semantic_tokens_full(&uri)
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(tokens.map(SemanticTokensResult::Tokens))
     }
 
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        let handler = WorkspaceSymbolHandler::new(Arc::clone(&self.index));
-        let symbols = handler.handle(&params.query);
+        let index = Arc::clone(&self.index);
+        let symbols = tokio::task::spawn_blocking(move || {
+            WorkspaceSymbolHandler::new(index).handle(&params.query)
+        })
+        .await
+        .unwrap_or_default();
         if symbols.is_empty() {
             return Ok(None);
         }
