@@ -3,6 +3,7 @@ pub mod controller_store;
 pub mod definition_store;
 pub mod export_store;
 pub mod html_store;
+pub mod interpolate_store;
 mod query;
 pub mod template_store;
 
@@ -11,11 +12,12 @@ pub use controller_store::ControllerStore;
 pub use definition_store::DefinitionStore;
 pub use export_store::ExportStore;
 pub use html_store::HtmlStore;
+pub use interpolate_store::InterpolateStore;
 pub use template_store::TemplateStore;
 
 use tower_lsp::lsp_types::Url;
 
-/// Index ファサード — 6つの専門ストアを束ねる
+/// Index ファサード — 7つの専門ストアを束ねる
 pub struct Index {
     pub definitions: DefinitionStore,
     pub controllers: ControllerStore,
@@ -23,6 +25,7 @@ pub struct Index {
     pub html: HtmlStore,
     pub exports: ExportStore,
     pub components: ComponentStore,
+    pub interpolate: InterpolateStore,
 }
 
 impl Index {
@@ -34,6 +37,7 @@ impl Index {
             html: HtmlStore::new(),
             exports: ExportStore::new(),
             components: ComponentStore::new(),
+            interpolate: InterpolateStore::new(),
         }
     }
 
@@ -45,6 +49,7 @@ impl Index {
         self.html.clear_document(uri);
         self.exports.clear_document(uri);
         self.components.clear_document(uri);
+        self.interpolate.clear_document(uri);
     }
 
     /// 全てのインデックスデータをクリア
@@ -55,6 +60,7 @@ impl Index {
         self.html.clear_all();
         self.exports.clear_all();
         self.components.clear_all();
+        self.interpolate.clear_all();
     }
 
     /// HTML参照情報のみをクリア（Pass 3で収集する情報）

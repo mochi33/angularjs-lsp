@@ -23,6 +23,16 @@ pub(super) struct DiScope {
     pub(super) has_scope: bool,
     /// $rootScope がDIされているかどうか
     pub(super) has_root_scope: bool,
+    /// 関数パラメータ名 → DI されたサービス名のマッピング
+    ///
+    /// 暗黙 DI:    `function($routeProvider) {}` → `{"$routeProvider" → "$routeProvider"}`
+    /// 配列 DI:    `['$routeProvider', function(rp) {}]` → `{"rp" → "$routeProvider"}`
+    /// `$inject`: `Setup.$inject = ['$routeProvider']; function Setup(rp) {}`
+    ///            → `{"rp" → "$routeProvider"}`
+    ///
+    /// `$routeProvider.when(...)` のようなチェイン呼び出しで、レシーバの識別子が
+    /// 特定のサービスに DI 由来で対応するかを判定するのに使う。
+    pub(super) param_to_service: HashMap<String, String>,
 }
 
 /// ノードから抽出されたDI情報
@@ -36,6 +46,8 @@ pub(super) struct DiInfo {
     pub(super) has_scope: bool,
     /// $rootScope がDIされているか
     pub(super) has_root_scope: bool,
+    /// パラメータ名 → サービス名のマッピング (詳細は `DiScope::param_to_service` 参照)
+    pub(super) param_to_service: HashMap<String, String>,
 }
 
 impl DiInfo {
@@ -44,12 +56,19 @@ impl DiInfo {
             injected_services: Vec::new(),
             has_scope: false,
             has_root_scope: false,
+            param_to_service: HashMap::new(),
         }
     }
 
-    /// DI情報があるかどうか（サービス、$scope、$rootScope のいずれか）
+    /// DI情報があるかどうか（サービス、$scope、$rootScope、または param_to_service マッピングのいずれか）
+    ///
+    /// `param_to_service` だけ存在するケース (例: `['$routeProvider', function(rp) {...}]`)
+    /// もレシーバ解決用に DiScope を積む必要があるため、ここで含める。
     pub(super) fn has_any(&self) -> bool {
-        !self.injected_services.is_empty() || self.has_scope || self.has_root_scope
+        !self.injected_services.is_empty()
+            || self.has_scope
+            || self.has_root_scope
+            || !self.param_to_service.is_empty()
     }
 }
 
@@ -97,6 +116,27 @@ impl AnalyzerContext {
     /// 現在のモジュール名を取得
     pub(super) fn get_current_module(&self) -> Option<&String> {
         self.current_module.as_ref()
+    }
+
+    /// 指定位置で `param_name` がどのサービスに DI されているか解決する。
+    ///
+    /// 内側から外側に DiScope を辿り、最初にマッチするものを返す。
+    /// `$inject` パターン経由のスコープも合わせて見る。
+    ///
+    /// 例:
+    /// - 暗黙 DI: `function($routeProvider) { $routeProvider.when(...) }` で
+    ///   `resolve_di_param("$routeProvider", line)` → `Some("$routeProvider")`
+    /// - 配列 DI: `['$routeProvider', function(rp) { rp.when(...) }]` で
+    ///   `resolve_di_param("rp", line)` → `Some("$routeProvider")`
+    pub(super) fn resolve_di_param(&self, param_name: &str, line: u32) -> Option<&str> {
+        for scope in self.di_scopes.iter().rev() {
+            if line >= scope.body_start_line && line <= scope.body_end_line {
+                if let Some(service) = scope.param_to_service.get(param_name) {
+                    return Some(service.as_str());
+                }
+            }
+        }
+        None
     }
 
     /// 指定位置でサービスがDIされているかどうかをチェック

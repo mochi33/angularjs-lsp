@@ -438,6 +438,411 @@ angular.module('app', [])
 }
 
 // ==========================================================================
+// `$routeProvider` / `$stateProvider` のレシーバ検証
+// ==========================================================================
+
+#[test]
+fn test_route_provider_renamed_via_array_di() {
+    // 配列 DI で $routeProvider を `rp` にリネームしているケース
+    // → DI 経由のレシーバ解決で route binding として認識されるべき
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$routeProvider', function(rp) {
+    rp.when('/home', {
+        templateUrl: 'home.html',
+        controller: 'HomeCtrl'
+    });
+}]);
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        1,
+        "rename された $routeProvider 経由でも binding 登録"
+    );
+    assert_eq!(bindings[0].template_path, "home.html");
+    assert_eq!(bindings[0].controller_name, "HomeCtrl");
+}
+
+#[test]
+fn test_route_provider_implicit_di() {
+    // 暗黙 DI で $routeProvider をパラメータ名のまま使うケース
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(function($routeProvider) {
+    $routeProvider.when('/home', {
+        templateUrl: 'home.html',
+        controller: 'HomeCtrl'
+    });
+});
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(bindings.len(), 1, "暗黙 DI でも binding 登録");
+}
+
+#[test]
+fn test_when_on_unrelated_object_is_not_route_binding() {
+    // route provider と無関係なオブジェクトの .when(string, {object}) は
+    // route binding として誤認しない
+    let index = analyze(
+        r#"
+function setup() {
+    var stateMachine = {
+        when: function(state, config) {}
+    };
+    stateMachine.when('idle', {
+        templateUrl: 'foo.html',
+        controller: 'FooCtrl'
+    });
+}
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert!(
+        bindings.is_empty(),
+        "$routeProvider でないレシーバの .when() は無視されるべき, 実際 = {:?}",
+        bindings
+    );
+    // 同様に controller の参照も登録されないこと
+    assert!(
+        index.definitions.get_references("FooCtrl").is_empty(),
+        "$routeProvider でないレシーバ経由の controller 参照は登録されないべき"
+    );
+}
+
+#[test]
+fn test_state_provider_renamed_via_array_di() {
+    // ui-router: 配列 DI で $stateProvider を `sp` にリネーム
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$stateProvider', function(sp) {
+    sp.state('home', {
+        templateUrl: 'home.html',
+        controller: 'HomeCtrl'
+    });
+}]);
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        1,
+        "rename された $stateProvider 経由でも binding 登録"
+    );
+}
+
+#[test]
+fn test_state_on_unrelated_object_is_not_state_binding() {
+    let index = analyze(
+        r#"
+function setup() {
+    var router = {
+        state: function(name, config) {}
+    };
+    router.state('home', {
+        templateUrl: 'home.html',
+        controller: 'HomeCtrl'
+    });
+}
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert!(
+        bindings.is_empty(),
+        "$stateProvider でないレシーバの .state() は無視されるべき"
+    );
+}
+
+#[test]
+fn test_route_provider_top_level_call() {
+    // DI スコープ外でも、レシーバが直接 $routeProvider なら検出する
+    let index = analyze(
+        r#"
+$routeProvider.when('/home', {
+    templateUrl: 'home.html',
+    controller: 'HomeCtrl'
+});
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        1,
+        "トップレベル直接 $routeProvider.when() は検出"
+    );
+}
+
+#[test]
+fn test_state_provider_top_level_call() {
+    let index = analyze(
+        r#"
+$stateProvider.state('home', {
+    templateUrl: 'home.html',
+    controller: 'HomeCtrl'
+});
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(bindings.len(), 1);
+}
+
+#[test]
+fn test_route_provider_via_member_expression_receiver() {
+    // `module.$routeProvider.when(...)` のようなメンバアクセスを末尾でマッチ
+    let index = analyze(
+        r#"
+this.$routeProvider.when('/home', {
+    templateUrl: 'home.html',
+    controller: 'HomeCtrl'
+});
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        1,
+        "this.$routeProvider のメンバアクセスでも検出"
+    );
+}
+
+#[test]
+fn test_route_provider_chained_calls_renamed() {
+    // チェイン + DI rename の組み合わせ: チェインの根が DI 経由で
+    // $routeProvider に解決されるケースが全 .when() で正しく認識されるか
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$routeProvider', function(rp) {
+    rp.when('/home', { templateUrl: 'home.html', controller: 'HomeCtrl' })
+      .when('/users', { templateUrl: 'users.html', controller: 'UsersCtrl' })
+      .otherwise({ redirectTo: '/home' });
+}]);
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert_eq!(
+        bindings.len(),
+        2,
+        "チェイン + rename された .when() 全件が binding 登録, 実際 = {:?}",
+        bindings.iter().map(|b| &b.template_path).collect::<Vec<_>>()
+    );
+}
+
+// ==========================================================================
+// `$interpolateProvider.startSymbol/endSymbol` 検出
+// ==========================================================================
+
+#[test]
+fn test_interpolate_provider_start_and_end_symbols() {
+    // 配列 DI で $interpolateProvider を受け取って startSymbol/endSymbol 設定
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol('[[');
+    $interpolateProvider.endSymbol(']]');
+}]);
+"#,
+    );
+
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("[[".to_string(), "]]".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_renamed_via_array_di() {
+    // 配列 DI で `ip` にリネーム → DI 経由で receiver 解決される
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function(ip) {
+    ip.startSymbol('<%');
+    ip.endSymbol('%>');
+}]);
+"#,
+    );
+
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("<%".to_string(), "%>".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_implicit_di() {
+    // 暗黙 DI 形式
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(function($interpolateProvider) {
+    $interpolateProvider.startSymbol('{<');
+    $interpolateProvider.endSymbol('>}');
+});
+"#,
+    );
+
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("{<".to_string(), ">}".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_dynamic_argument_ignored() {
+    // 動的引数 (変数参照) は無視 (静的解析できない)
+    let index = analyze(
+        r#"
+var s = '[[';
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol(s);
+}]);
+"#,
+    );
+
+    // start は default のまま
+    assert_eq!(index.interpolate.resolved().0, "{{".to_string());
+}
+
+#[test]
+fn test_interpolate_provider_unrelated_object_ignored() {
+    // $interpolateProvider 以外のオブジェクトの startSymbol は無視
+    let index = analyze(
+        r#"
+var random = {};
+random.startSymbol('[[');
+random.endSymbol(']]');
+"#,
+    );
+
+    // デフォルトのまま
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("{{".to_string(), "}}".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_only_start_symbol_set() {
+    // startSymbol だけ JS 検出、endSymbol はフォールバック側
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol('[[');
+}]);
+"#,
+    );
+
+    assert_eq!(index.interpolate.resolved().0, "[[".to_string());
+    assert_eq!(index.interpolate.resolved().1, "}}".to_string());
+}
+
+#[test]
+fn test_interpolate_provider_chained_calls() {
+    // チェイン呼び出し
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider
+        .startSymbol('{|')
+        .endSymbol('|}');
+}]);
+"#,
+    );
+
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("{|".to_string(), "|}".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_clear_document_resets() {
+    // 該当 JS を re-analyze する状況: 一度設定後、別の解析でクリアされる
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol('[[');
+    $interpolateProvider.endSymbol(']]');
+}]);
+"#,
+    );
+
+    assert_eq!(index.interpolate.resolved().0, "[[".to_string());
+
+    // re-analyze (空の) 状態で同 URI が startSymbol を含まなくなる → デフォルトに戻る
+    let analyzer = AngularJsAnalyzer::new(Arc::clone(&index));
+    analyzer.analyze_document(&test_uri(), "// nothing here\n");
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("{{".to_string(), "}}".to_string())
+    );
+}
+
+#[test]
+fn test_chain_receiver_unrelated_origin_is_not_route() {
+    // チェインの根が $routeProvider と無関係のオブジェクトなら、
+    // チェインの中の .when() も route binding として扱わない
+    let index = analyze(
+        r#"
+function setup() {
+    var router = {
+        when: function() { return router; },
+        otherwise: function() { return router; }
+    };
+    router.when('/foo', { templateUrl: 'foo.html', controller: 'FooCtrl' })
+          .when('/bar', { templateUrl: 'bar.html', controller: 'BarCtrl' });
+}
+"#,
+    );
+
+    let bindings = index
+        .templates
+        .get_template_bindings_for_js_file(&test_uri());
+    assert!(
+        bindings.is_empty(),
+        "router.when のチェインは route binding として扱わない"
+    );
+}
+
+// ==========================================================================
 // 一時変数解決: 複合ケース
 // ==========================================================================
 

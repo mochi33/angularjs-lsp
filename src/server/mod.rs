@@ -1198,18 +1198,9 @@ impl LanguageServer for Backend {
                 let config = AjsConfig::load_from_dir(&path);
                 cache_enabled = config.cache;
 
-                self.html_analyzer
-                    .set_interpolate_config(config.interpolate.clone());
+                // interpolate 記号は JS の `$interpolateProvider.startSymbol/endSymbol`
+                // から動的に解決する (ajsconfig.json 経由の設定経路は撤廃済み)。
                 *self.diagnostics_config.write().await = config.diagnostics.clone();
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!(
-                            "Interpolate symbols: {} ... {}",
-                            config.interpolate.start_symbol, config.interpolate.end_symbol
-                        ),
-                    )
-                    .await;
 
                 if !config.include.is_empty() {
                     self.client

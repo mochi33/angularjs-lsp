@@ -58,12 +58,133 @@ impl AngularJsAnalyzer {
                             )
                         }
                         "config" | "run" => self.extract_run_config_di(node, source, ctx),
-                        "when" | "otherwise" => self.extract_route_when_di(node, source, uri, ctx),
-                        "state" => self.extract_state_provider_di(node, source, uri, ctx),
+                        "when" | "otherwise" => {
+                            // レシーバが `$routeProvider` (DI 経由含む) のときだけ
+                            // route binding として扱う。これがないと任意の
+                            // `obj.when(s, {controller, templateUrl})` を誤検知する。
+                            if self.is_provider_receiver(callee, source, ctx, "routeProvider") {
+                                self.extract_route_when_di(node, source, uri, ctx);
+                            }
+                        }
+                        "startSymbol" | "endSymbol" => {
+                            // `$interpolateProvider.startSymbol('[[')` のような呼び出しから
+                            // interpolate 記号をワークスペース全体の設定として収集する。
+                            // ajsconfig.json 設定よりも優先される (詳細は InterpolateStore)
+                            if self.is_provider_receiver(callee, source, ctx, "interpolateProvider") {
+                                self.extract_interpolate_symbol_call(
+                                    node,
+                                    source,
+                                    uri,
+                                    method_name.as_str(),
+                                );
+                            }
+                        }
+                        "state" => {
+                            // 同上、`$stateProvider` (ui-router) 限定
+                            if self.is_provider_receiver(callee, source, ctx, "stateProvider") {
+                                self.extract_state_provider_di(node, source, uri, ctx);
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
+        }
+    }
+
+    /// `$interpolateProvider.startSymbol('[[')` / `.endSymbol(']]')` の呼び出しから
+    /// interpolate 記号を抽出して `Index::interpolate` に登録する。
+    ///
+    /// 文字列リテラル以外 (動的式) は無視する。
+    pub(super) fn extract_interpolate_symbol_call(
+        &self,
+        node: Node,
+        source: &str,
+        uri: &Url,
+        method: &str,
+    ) {
+        let args = match node.child_by_field_name("arguments") {
+            Some(a) => a,
+            None => return,
+        };
+        let first_arg = match args.named_child(0) {
+            Some(a) => a,
+            None => return,
+        };
+        if first_arg.kind() != "string" {
+            return;
+        }
+        let value = self.extract_string_value(first_arg, source);
+        match method {
+            "startSymbol" => self.index.interpolate.set_start_symbol(uri.clone(), value),
+            "endSymbol" => self.index.interpolate.set_end_symbol(uri.clone(), value),
+            _ => {}
+        }
+    }
+
+    /// `.when()` / `.otherwise()` / `.state()` のレシーバが `$routeProvider` /
+    /// `$stateProvider` (またはそれに DI されたローカル変数) かを判定する。
+    ///
+    /// 任意の `obj.when(s, {controller, templateUrl})` を route binding として
+    /// 誤検知しないためのガード。次のいずれかにマッチすれば true:
+    ///
+    /// 1. レシーバ識別子がそのまま `$<base>` または `<base>` (例: `$routeProvider`)
+    ///    あるいは末尾が `.<base>` / `.$<base>` (例: `module.$routeProvider`)
+    /// 2. レシーバ識別子が DI スコープ内のパラメータで、サービス名が `$<base>` に解決
+    ///    (例: array DI で `['$routeProvider', function(rp) { rp.when(...) }]`)
+    /// 3. レシーバがチェイン (`a.when(...).when(...)`) の場合、チェインを辿って根の
+    ///    receiver で再判定 (`$routeProvider.when()` は `$routeProvider` を返す慣習)
+    fn is_provider_receiver(
+        &self,
+        callee: Node,
+        source: &str,
+        ctx: &AnalyzerContext,
+        base_name: &str,
+    ) -> bool {
+        let object = match callee.child_by_field_name("object") {
+            Some(o) => o,
+            None => return false,
+        };
+        // チェイン: `a.b(...).c(...)` の場合、内側の `.c()` のレシーバは `a.b(...)` 自体
+        // (call_expression)。これを `a` まで剥がす。
+        let root = Self::unwrap_chain_receiver(object);
+        let root_text = self.node_text(root, source);
+
+        // 1. 直接マッチ ($routeProvider / module.$routeProvider など)
+        if matches_service(&root_text, base_name) {
+            return true;
+        }
+
+        // 2. 単純識別子なら DI 経由でリネームされたローカル変数の可能性をチェック
+        if root.kind() == "identifier" {
+            let line = self.offset_line(callee.start_position().row as u32);
+            if let Some(service) = ctx.resolve_di_param(&root_text, line) {
+                return matches_service(service, base_name);
+            }
+        }
+
+        false
+    }
+
+    /// チェイン呼び出し `a.b().c().d()` の根の receiver `a` を取り出す。
+    /// member_expression callee の call_expression を辿る。
+    fn unwrap_chain_receiver(mut node: Node) -> Node {
+        loop {
+            if node.kind() != "call_expression" {
+                return node;
+            }
+            let callee = match node.child_by_field_name("function") {
+                Some(c) => c,
+                None => return node,
+            };
+            if callee.kind() != "member_expression" {
+                return node;
+            }
+            let object = match callee.child_by_field_name("object") {
+                Some(o) => o,
+                None => return node,
+            };
+            node = object;
         }
     }
 
@@ -389,6 +510,7 @@ impl AngularJsAnalyzer {
                                             body_end_line: body_end,
                                             has_scope: di_info.has_scope,
                                             has_root_scope: di_info.has_root_scope,
+                                            param_to_service: di_info.param_to_service,
                                         };
                                         ctx.push_scope(di_scope);
                                     }
@@ -477,6 +599,7 @@ impl AngularJsAnalyzer {
                                             body_end_line: body_end,
                                             has_scope: di_info.has_scope,
                                             has_root_scope: di_info.has_root_scope,
+                                            param_to_service: di_info.param_to_service,
                                         };
                                         ctx.push_scope(di_scope);
                                     }
@@ -507,6 +630,7 @@ impl AngularJsAnalyzer {
                             body_end_line: body_end,
                             has_scope: di_info.has_scope,
                             has_root_scope: di_info.has_root_scope,
+                            param_to_service: di_info.param_to_service,
                         };
                         ctx.push_scope(di_scope);
                     }
@@ -603,6 +727,7 @@ impl AngularJsAnalyzer {
                                     body_end_line: body_end,
                                     has_scope: di_info.has_scope,
                                     has_root_scope: di_info.has_root_scope,
+                                    param_to_service: di_info.param_to_service,
                                 };
                                 ctx.push_scope(di_scope);
                             }

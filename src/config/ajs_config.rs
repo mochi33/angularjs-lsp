@@ -6,10 +6,14 @@ use serde::Deserialize;
 use super::path_matcher::PathMatcher;
 
 /// ajsconfig.json の設定
+///
+/// 注意: 旧来は `interpolate.startSymbol` / `interpolate.endSymbol` を持って
+/// いたが、現在は AngularJS ソースの `$interpolateProvider.startSymbol(...)` /
+/// `.endSymbol(...)` から動的に解決するため当該フィールドは廃止した。
+/// 古い `ajsconfig.json` に `interpolate` フィールドが残っていても、`serde` の
+/// 標準動作で未知フィールドとして黙って無視される。
 #[derive(Debug, Clone, Deserialize)]
 pub struct AjsConfig {
-    #[serde(default)]
-    pub interpolate: InterpolateConfig,
     /// 解析対象のglobパターン（空の場合は全ファイル対象）
     #[serde(default)]
     pub include: Vec<String>,
@@ -69,37 +73,9 @@ fn default_exclude() -> Vec<String> {
     ]
 }
 
-/// interpolate記号の設定
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InterpolateConfig {
-    #[serde(default = "default_start_symbol")]
-    pub start_symbol: String,
-    #[serde(default = "default_end_symbol")]
-    pub end_symbol: String,
-}
-
-fn default_start_symbol() -> String {
-    "{{".to_string()
-}
-
-fn default_end_symbol() -> String {
-    "}}".to_string()
-}
-
-impl Default for InterpolateConfig {
-    fn default() -> Self {
-        Self {
-            start_symbol: default_start_symbol(),
-            end_symbol: default_end_symbol(),
-        }
-    }
-}
-
 impl Default for AjsConfig {
     fn default() -> Self {
         Self {
-            interpolate: InterpolateConfig::default(),
             include: Vec::new(),
             exclude: default_exclude(),
             cache: false,
@@ -149,29 +125,31 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AjsConfig::default();
-        assert_eq!(config.interpolate.start_symbol, "{{");
-        assert_eq!(config.interpolate.end_symbol, "}}");
+        assert!(config.include.is_empty());
+        assert!(!config.cache);
     }
 
     #[test]
-    fn test_parse_config() {
+    fn test_legacy_interpolate_field_is_ignored() {
+        // 旧フォーマットの ajsconfig.json (interpolate フィールドあり) を読み込んでも
+        // serde は未知フィールドを無視するのでパース成功するべき。
+        // interpolate 解決は AngularJS ソース由来に一本化されているのでこの値は使われない。
         let json = r#"{
             "interpolate": {
                 "startSymbol": "[[",
                 "endSymbol": "]]"
-            }
+            },
+            "cache": true
         }"#;
         let config: AjsConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.interpolate.start_symbol, "[[");
-        assert_eq!(config.interpolate.end_symbol, "]]");
+        assert!(config.cache, "interpolate フィールドがあっても他フィールドは正しく読み込まれる");
     }
 
     #[test]
     fn test_empty_config() {
         let json = r#"{}"#;
         let config: AjsConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.interpolate.start_symbol, "{{");
-        assert_eq!(config.interpolate.end_symbol, "}}");
+        assert!(config.include.is_empty());
     }
 
     #[test]

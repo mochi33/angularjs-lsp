@@ -1,11 +1,10 @@
 //! HTML内のAngularJSディレクティブを解析するモジュール
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use tower_lsp::lsp_types::Url;
 use tree_sitter::{Node, Tree};
 
-use crate::config::InterpolateConfig;
 use crate::index::Index;
 
 pub mod controller;
@@ -27,7 +26,6 @@ pub use script::EmbeddedScript;
 pub struct HtmlAngularJsAnalyzer {
     index: Arc<Index>,
     js_analyzer: Arc<crate::analyzer::js::AngularJsAnalyzer>,
-    interpolate: RwLock<InterpolateConfig>,
 }
 
 impl HtmlAngularJsAnalyzer {
@@ -35,24 +33,17 @@ impl HtmlAngularJsAnalyzer {
         Self {
             index,
             js_analyzer,
-            interpolate: RwLock::new(InterpolateConfig::default()),
         }
     }
 
-    /// interpolate設定を更新
-    pub fn set_interpolate_config(&self, config: InterpolateConfig) {
-        if let Ok(mut interpolate) = self.interpolate.write() {
-            *interpolate = config;
-        }
-    }
-
-    /// 現在のinterpolate設定を取得
+    /// 現在のinterpolate記号を取得する。
+    ///
+    /// 解決順は `Index::interpolate.resolved()` に委譲:
+    /// 1. JS の `$interpolateProvider.startSymbol(...)` / `.endSymbol(...)` で検出された値
+    /// 2. `ajsconfig.json` の `interpolate` (フォールバック)
+    /// 3. AngularJS デフォルト `{{` / `}}`
     pub(self) fn get_interpolate_symbols(&self) -> (String, String) {
-        if let Ok(config) = self.interpolate.read() {
-            (config.start_symbol.clone(), config.end_symbol.clone())
-        } else {
-            ("{{".to_string(), "}}".to_string())
-        }
+        self.index.interpolate.resolved()
     }
 
     /// HTMLドキュメントを解析（単独ファイル解析用）

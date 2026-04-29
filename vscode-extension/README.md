@@ -52,10 +52,6 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 {
   "include": ["src/**/*.js", "app/**/*.js"],
   "exclude": ["**/test/**", "**/vendor/**"],
-  "interpolate": {
-    "startSymbol": "{{",
-    "endSymbol": "}}"
-  },
   "cache": true,
   "diagnostics": {
     "enabled": true,
@@ -70,8 +66,6 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 |--------|------|---------|-------------|
 | `include` | `string[]` | `[]` (all files) | Glob patterns for files to analyze. If empty, all files are included. |
 | `exclude` | `string[]` | (see below) | Glob patterns for files/directories to exclude. |
-| `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. |
-| `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. |
 | `cache` | `boolean` | `true` | Enable caching of parsed symbols. Cache is stored in `.angularjs-lsp/cache/`. |
 | `diagnostics.enabled` | `boolean` | `true` | Enable diagnostics for undefined scope properties and local variables. |
 | `diagnostics.severity` | `string` | `"warning"` | Severity level: `"error"`, `"warning"`, `"hint"`, or `"information"`. |
