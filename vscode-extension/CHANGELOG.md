@@ -1,5 +1,12 @@
 # Change Log
 
+## [0.3.1] - 2026-04-30
+
+### Fixes
+- LSP 起動時に既に開かれていた HTML/JS ファイルが、新規ファイルを開くまで解析されない問題を修正 (PR #39)
+  - `initialized()` の workspace scan 完了後に `republish_open_files_after_init` を実行し、(a) 開いている全ファイルを buffer 内容で再解析、(b) 全 open file の診断を再発行 (HTML + JS)、(c) `semantic_tokens_refresh` / `code_lens_refresh` を発火
+  - 旧来は scan_workspace が disk 内容で開いているファイルを上書きしてしまうレースと、HTML 診断 / refresh signal の取りこぼしが重なり、新規ファイル open まで解析が走らないように見える症状があった
+
 ## [0.3.0] - 2026-04-30
 
 ### Breaking changes
