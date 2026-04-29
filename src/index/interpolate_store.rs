@@ -1,5 +1,3 @@
-use std::sync::RwLock;
-
 use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
 
@@ -12,32 +10,21 @@ type DetectedEntry = (Url, (Option<String>, Option<String>));
 /// 解決順:
 /// 1. JS ソース中で検出された `$interpolateProvider.startSymbol(...)` /
 ///    `$interpolateProvider.endSymbol(...)` の値 (URI ごとに保持)
-/// 2. `ajsconfig.json` の `interpolate.startSymbol` / `interpolate.endSymbol`
-///    (フォールバック)
-/// 3. AngularJS デフォルトの `{{` / `}}`
+/// 2. AngularJS デフォルトの `{{` / `}}`
+///
+/// 旧来は `ajsconfig.json` の `interpolate.startSymbol/endSymbol` を
+/// フォールバックとしていたが、現在は AngularJS 構文からの解決に一本化している。
 pub struct InterpolateStore {
     /// JS から検出された symbols (URI → (start, end))。
     /// 各 URI は `$interpolateProvider.startSymbol(...)` か
     /// `$interpolateProvider.endSymbol(...)` のどちらか/両方を持ち得る。
     js_detected: DashMap<Url, (Option<String>, Option<String>)>,
-    /// `ajsconfig.json` の `interpolate` 設定 (フォールバック)。
-    /// 起動時に `set_config_fallback` で設定される。
-    /// 初期値は AngularJS デフォルトの `{{` / `}}`。
-    config_fallback: RwLock<(String, String)>,
 }
 
 impl InterpolateStore {
     pub fn new() -> Self {
         Self {
             js_detected: DashMap::new(),
-            config_fallback: RwLock::new(("{{".to_string(), "}}".to_string())),
-        }
-    }
-
-    /// `ajsconfig.json` の interpolate 設定をフォールバックとして登録する
-    pub fn set_config_fallback(&self, start: String, end: String) {
-        if let Ok(mut c) = self.config_fallback.write() {
-            *c = (start, end);
         }
     }
 
@@ -90,7 +77,7 @@ impl InterpolateStore {
 
     /// 解決された (start_symbol, end_symbol) を返す。
     ///
-    /// JS 検出値 → ajsconfig フォールバック → デフォルト の順で解決する。
+    /// JS 検出値 → AngularJS デフォルト (`{{` / `}}`) の順で解決する。
     /// 複数の URI が JS 検出値を持つ場合は URI 順 (lexicographic) で最初に
     /// 見つかった非 None 値を採用する (決定的)。
     /// start と end は別々に解決されるので、片方だけ JS 検出されたケースも
@@ -118,16 +105,9 @@ impl InterpolateStore {
             }
         }
 
-        let fallback = self
-            .config_fallback
-            .read()
-            .ok()
-            .map(|c| c.clone())
-            .unwrap_or_else(|| ("{{".to_string(), "}}".to_string()));
-
         (
-            start.unwrap_or(fallback.0),
-            end.unwrap_or(fallback.1),
+            start.unwrap_or_else(|| "{{".to_string()),
+            end.unwrap_or_else(|| "}}".to_string()),
         )
     }
 }
@@ -153,16 +133,8 @@ mod tests {
     }
 
     #[test]
-    fn config_fallback_overrides_default() {
+    fn js_detected_overrides_default() {
         let store = InterpolateStore::new();
-        store.set_config_fallback("[[".to_string(), "]]".to_string());
-        assert_eq!(store.resolved(), ("[[".to_string(), "]]".to_string()));
-    }
-
-    #[test]
-    fn js_detected_overrides_config_fallback() {
-        let store = InterpolateStore::new();
-        store.set_config_fallback("[[".to_string(), "]]".to_string());
         let uri = url("/app/config.js");
         store.set_start_symbol(uri.clone(), "{<".to_string());
         store.set_end_symbol(uri, ">}".to_string());
@@ -170,14 +142,13 @@ mod tests {
     }
 
     #[test]
-    fn partial_js_detected_falls_back_for_missing_side() {
-        // start のみ JS 検出、end は config フォールバック
+    fn partial_js_detected_falls_back_to_default_for_missing_side() {
+        // start のみ JS 検出、end はデフォルトの `}}` にフォールバック
         let store = InterpolateStore::new();
-        store.set_config_fallback("[[".to_string(), "]]".to_string());
         let uri = url("/app/config.js");
         store.set_start_symbol(uri, "{<".to_string());
-        // end_symbol は未設定
-        assert_eq!(store.resolved(), ("{<".to_string(), "]]".to_string()));
+        // end_symbol は未設定 → default `}}`
+        assert_eq!(store.resolved(), ("{<".to_string(), "}}".to_string()));
     }
 
     #[test]

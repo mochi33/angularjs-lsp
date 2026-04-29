@@ -155,10 +155,6 @@ Create an `ajsconfig.json` file in your project root to customize the language s
 {
   "include": ["src/**/*.js", "app/**/*.js"],
   "exclude": ["**/test/**", "**/vendor/**"],
-  "interpolate": {
-    "startSymbol": "{{",
-    "endSymbol": "}}"
-  },
   "cache": true,
   "diagnostics": {
     "enabled": true,
@@ -167,14 +163,17 @@ Create an `ajsconfig.json` file in your project root to customize the language s
 }
 ```
 
+> **Note**: Interpolation delimiters (`{{` / `}}`) are **not** configured here.
+> The language server detects them from `$interpolateProvider.startSymbol(...)` /
+> `.endSymbol(...)` calls in your AngularJS source. See
+> [Interpolation symbols](#interpolation-symbols) for details.
+
 ### Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `include` | `string[]` | `[]` (all files) | Glob patterns for files to analyze. If empty, all files are included. |
 | `exclude` | `string[]` | (see below) | Glob patterns for files/directories to exclude. |
-| `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. **Fallback only**: the language server first detects the symbols from `$interpolateProvider.startSymbol(...)` calls in your JS source. This config is consulted only when no such call is found. See [Interpolation symbol resolution](#interpolation-symbol-resolution). |
-| `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. **Fallback only** (same as above). |
 | `cache` | `boolean` | `true` | Enable caching of parsed symbols. Cache is stored in `.angularjs-lsp/cache/`. |
 | `diagnostics.enabled` | `boolean` | `true` | Enable diagnostics for undefined scope properties and local variables. |
 | `diagnostics.severity` | `string` | `"warning"` | Severity level: `"error"`, `"warning"`, `"hint"`, or `"information"`. |
@@ -204,55 +203,29 @@ By default, the following patterns are excluded:
 }
 ```
 
-### Interpolation symbol resolution
+### Interpolation symbols
 
-The language server resolves the interpolation delimiters in this order:
+The language server resolves AngularJS interpolation delimiters from your JS source by
+detecting `$interpolateProvider.startSymbol(...)` / `.endSymbol(...)` calls.
+This matches AngularJS's actual runtime behavior, so there is no separate LSP config to keep in sync.
 
-1. **`$interpolateProvider.startSymbol(...)` / `.endSymbol(...)` calls in your JS source** (preferred).
-   This matches AngularJS's actual runtime behavior, so you don't need to keep an LSP-specific config in sync with your code.
+```js
+angular.module('app', [])
+  .config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol('[[');
+    $interpolateProvider.endSymbol(']]');
+  }]);
+```
 
-   ```js
-   angular.module('app', [])
-     .config(['$interpolateProvider', function($interpolateProvider) {
-       $interpolateProvider.startSymbol('[[');
-       $interpolateProvider.endSymbol(']]');
-     }]);
-   ```
+The following invocation patterns are all recognized:
 
-   Implicit DI (`function($interpolateProvider) { ... }`), array-DI rename
-   (`['$interpolateProvider', function(ip) { ip.startSymbol('[[') }]`), and chained calls
-   (`.startSymbol('[[').endSymbol(']]')`) are all detected.
-
-2. **`ajsconfig.json`'s `interpolate.startSymbol` / `interpolate.endSymbol`** (fallback).
-   Useful when your project sets symbols outside JS (e.g., via build-time replacement)
-   or when you only want to override the LSP's perception without touching code.
-
-3. **AngularJS default `{{` / `}}`** (final fallback).
+- Implicit DI: `function($interpolateProvider) { $interpolateProvider.startSymbol('[[') }`
+- Array-style DI with rename: `['$interpolateProvider', function(ip) { ip.startSymbol('[[') }]`
+- Chained calls: `.startSymbol('[[').endSymbol(']]')`
 
 `start` and `end` are resolved independently, so projects that customize only one side
 (e.g., `startSymbol('[[')` while keeping `}}` as the end) still work correctly.
-
-**Custom interpolation symbols (e.g., for ERB/Jinja compatibility):**
-
-The recommended approach is to set them in your AngularJS source (the LSP picks them up automatically):
-
-```js
-angular.module('app', []).config(['$interpolateProvider', function($interpolateProvider) {
-  $interpolateProvider.startSymbol('[[');
-  $interpolateProvider.endSymbol(']]');
-}]);
-```
-
-If you cannot or prefer not to touch the JS, fall back to `ajsconfig.json`:
-
-```json
-{
-  "interpolate": {
-    "startSymbol": "[[",
-    "endSymbol": "]]"
-  }
-}
-```
+If neither call is found, the AngularJS default `{{` / `}}` is used.
 
 **Disable diagnostics or change severity:**
 ```json

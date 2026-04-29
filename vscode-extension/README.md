@@ -52,10 +52,6 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 {
   "include": ["src/**/*.js", "app/**/*.js"],
   "exclude": ["**/test/**", "**/vendor/**"],
-  "interpolate": {
-    "startSymbol": "{{",
-    "endSymbol": "}}"
-  },
   "cache": true,
   "diagnostics": {
     "enabled": true,
@@ -64,14 +60,17 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 }
 ```
 
+> **Note**: Interpolation delimiters (`{{` / `}}`) are **not** configured here.
+> They are detected from `$interpolateProvider.startSymbol(...)` /
+> `.endSymbol(...)` calls in your AngularJS source.
+> See [Interpolation symbols](#interpolation-symbols) below.
+
 ### Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `include` | `string[]` | `[]` (all files) | Glob patterns for files to analyze. If empty, all files are included. |
 | `exclude` | `string[]` | (see below) | Glob patterns for files/directories to exclude. |
-| `interpolate.startSymbol` | `string` | `{{` | AngularJS interpolation start symbol. **Fallback only**: the language server first detects this from `$interpolateProvider.startSymbol(...)` in your JS source. See note below. |
-| `interpolate.endSymbol` | `string` | `}}` | AngularJS interpolation end symbol. **Fallback only** (same as above). |
 | `cache` | `boolean` | `true` | Enable caching of parsed symbols. Cache is stored in `.angularjs-lsp/cache/`. |
 | `diagnostics.enabled` | `boolean` | `true` | Enable diagnostics for undefined scope properties and local variables. |
 | `diagnostics.severity` | `string` | `"warning"` | Severity level: `"error"`, `"warning"`, `"hint"`, or `"information"`. |
@@ -87,19 +86,17 @@ By default, the following patterns are excluded:
 
 ### Interpolation symbols
 
-The language server resolves `{{ }}` (or your custom delimiters) in this order:
+The language server detects `{{ }}` (or your custom delimiters) from `$interpolateProvider`
+calls in your AngularJS source — no LSP-specific config is needed. Implicit DI, array-style
+DI rename, and chained calls are all recognized:
 
-1. `$interpolateProvider.startSymbol(...)` / `.endSymbol(...)` calls detected in your JS source —
-   no LSP-specific config needed. Both implicit DI and array-style DI rename are recognized:
+```js
+angular.module('app').config(['$interpolateProvider', function(ip) {
+  ip.startSymbol('[[').endSymbol(']]');
+}]);
+```
 
-   ```js
-   angular.module('app').config(['$interpolateProvider', function(ip) {
-     ip.startSymbol('[[').endSymbol(']]');
-   }]);
-   ```
-
-2. `interpolate.startSymbol` / `interpolate.endSymbol` in `ajsconfig.json` (fallback).
-3. AngularJS default `{{` / `}}`.
+If no such call is found, the AngularJS default `{{` / `}}` is used.
 
 ## Commands
 
