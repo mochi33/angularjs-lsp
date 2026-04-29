@@ -549,6 +549,80 @@ impl Backend {
         .await;
     }
 
+    /// `initialized()` の workspace scan / cache load 完了後、開いている全ファイル
+    /// に対して再解析 + 診断再発行 + refresh signal を送る。
+    ///
+    /// 対処する問題:
+    /// 1. **Buffer-vs-disk 不整合**: scan_workspace は disk 内容で解析するため、
+    ///    既に開いている (未保存変更がある) ファイルの buffer 内容が反映されない。
+    ///    ここで再解析することで buffer 内容が最終状態として確定する。
+    /// 2. **HTML 診断の取りこぼし**: scan_workspace 末尾の
+    ///    `republish_diagnostics_for_open_js_files` は JS のみを処理する。HTML
+    ///    診断もここで再発行する。
+    /// 3. **Stale semantic tokens / code lens**: クライアントが semanticTokens を
+    ///    要求した時点で index が populate 前だった場合、空 token がキャッシュ
+    ///    される。`semantic_tokens_refresh` / `code_lens_refresh` を発火して
+    ///    クライアントに全 open file 分の再要求をさせる。
+    async fn republish_open_files_after_init(&self) {
+        // 開いている全ファイルの URI と buffer 内容を一度にスナップショット
+        // (iter 中に変更があるとレースになるため)
+        let open_files: Vec<(Url, String)> = self
+            .documents
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+
+        if open_files.is_empty() {
+            return;
+        }
+
+        // 1. buffer 内容で再解析 (CPU work は spawn_blocking)
+        for (uri, text) in &open_files {
+            if is_html_file(uri) {
+                let analyzer = Arc::clone(&self.analyzer);
+                let html_analyzer = Arc::clone(&self.html_analyzer);
+                let index = Arc::clone(&self.index);
+                let bl_uri = uri.clone();
+                let bl_text = text.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let scripts = html_analyzer
+                        .analyze_document_and_extract_scripts(&bl_uri, &bl_text);
+                    index.templates.mark_html_analyzed(&bl_uri);
+                    for script in scripts {
+                        analyzer.analyze_embedded_script(
+                            &bl_uri,
+                            &script.source,
+                            script.line_offset,
+                        );
+                    }
+                })
+                .await;
+            } else if is_js_file(uri) {
+                let analyzer = Arc::clone(&self.analyzer);
+                let bl_uri = uri.clone();
+                let bl_text = text.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    analyzer.analyze_document(&bl_uri, &bl_text);
+                })
+                .await;
+            }
+        }
+
+        // 2. 全 open file の診断を再発行 (HTML + JS)
+        for (uri, _) in &open_files {
+            if is_html_file(uri) {
+                self.publish_diagnostics_for_html(uri).await;
+            } else if is_js_file(uri) {
+                self.publish_diagnostics_for_js(uri).await;
+            }
+        }
+
+        // 3. semanticTokens / codeLens refresh 発火 (クライアント側に全 open file
+        //    分の再要求をさせる)
+        let _ = self.client.semantic_tokens_refresh().await;
+        let _ = self.client.code_lens_refresh().await;
+    }
+
     async fn on_change(&self, uri: Url, text: String) {
         self.documents.insert(uri.clone(), text.clone());
 
@@ -1604,6 +1678,11 @@ impl LanguageServer for Backend {
         } else {
             self.scan_workspace().await;
         }
+
+        // workspace scan / cache load 完了後、既に開いていたファイルに対して
+        // 解析 + 診断 + refresh を最終確定させる (初期化順の race と
+        // disk-vs-buffer 不整合を解消)
+        self.republish_open_files_after_init().await;
     }
 
     async fn execute_command(
