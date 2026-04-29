@@ -660,6 +660,162 @@ angular.module('app', [])
     );
 }
 
+// ==========================================================================
+// `$interpolateProvider.startSymbol/endSymbol` 検出
+// ==========================================================================
+
+#[test]
+fn test_interpolate_provider_start_and_end_symbols() {
+    // 配列 DI で $interpolateProvider を受け取って startSymbol/endSymbol 設定
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol('[[');
+    $interpolateProvider.endSymbol(']]');
+}]);
+"#,
+    );
+
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("[[".to_string(), "]]".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_renamed_via_array_di() {
+    // 配列 DI で `ip` にリネーム → DI 経由で receiver 解決される
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function(ip) {
+    ip.startSymbol('<%');
+    ip.endSymbol('%>');
+}]);
+"#,
+    );
+
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("<%".to_string(), "%>".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_implicit_di() {
+    // 暗黙 DI 形式
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(function($interpolateProvider) {
+    $interpolateProvider.startSymbol('{<');
+    $interpolateProvider.endSymbol('>}');
+});
+"#,
+    );
+
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("{<".to_string(), ">}".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_dynamic_argument_ignored() {
+    // 動的引数 (変数参照) は無視 (静的解析できない)
+    let index = analyze(
+        r#"
+var s = '[[';
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol(s);
+}]);
+"#,
+    );
+
+    // start は default のまま
+    assert_eq!(index.interpolate.resolved().0, "{{".to_string());
+}
+
+#[test]
+fn test_interpolate_provider_unrelated_object_ignored() {
+    // $interpolateProvider 以外のオブジェクトの startSymbol は無視
+    let index = analyze(
+        r#"
+var random = {};
+random.startSymbol('[[');
+random.endSymbol(']]');
+"#,
+    );
+
+    // デフォルトのまま
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("{{".to_string(), "}}".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_only_start_symbol_set() {
+    // startSymbol だけ JS 検出、endSymbol はフォールバック側
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol('[[');
+}]);
+"#,
+    );
+
+    assert_eq!(index.interpolate.resolved().0, "[[".to_string());
+    assert_eq!(index.interpolate.resolved().1, "}}".to_string());
+}
+
+#[test]
+fn test_interpolate_provider_chained_calls() {
+    // チェイン呼び出し
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider
+        .startSymbol('{|')
+        .endSymbol('|}');
+}]);
+"#,
+    );
+
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("{|".to_string(), "|}".to_string())
+    );
+}
+
+#[test]
+fn test_interpolate_provider_clear_document_resets() {
+    // 該当 JS を re-analyze する状況: 一度設定後、別の解析でクリアされる
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.config(['$interpolateProvider', function($interpolateProvider) {
+    $interpolateProvider.startSymbol('[[');
+    $interpolateProvider.endSymbol(']]');
+}]);
+"#,
+    );
+
+    assert_eq!(index.interpolate.resolved().0, "[[".to_string());
+
+    // re-analyze (空の) 状態で同 URI が startSymbol を含まなくなる → デフォルトに戻る
+    let analyzer = AngularJsAnalyzer::new(Arc::clone(&index));
+    analyzer.analyze_document(&test_uri(), "// nothing here\n");
+    assert_eq!(
+        index.interpolate.resolved(),
+        ("{{".to_string(), "}}".to_string())
+    );
+}
+
 #[test]
 fn test_chain_receiver_unrelated_origin_is_not_route() {
     // チェインの根が $routeProvider と無関係のオブジェクトなら、

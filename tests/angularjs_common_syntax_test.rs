@@ -1255,6 +1255,62 @@ angular.module('app', []).controller('RefCtrl', ['$scope', function($scope) {
     assert!(has_do_something_ref, "ng-clickのdoSomething()参照が認識されるべき");
 }
 
+#[test]
+fn test_html_interpolation_uses_custom_symbols_from_js() {
+    // JS で `$interpolateProvider.startSymbol/endSymbol` をカスタマイズし、
+    // HTML 側で同じカスタム記号でインターポレーションを書いた場合、
+    // 参照が正しく認識されることを確認 (HTML analyzer が Index::interpolate.resolved()
+    // から動的に記号を取得することの統合テスト)
+    let js = r#"
+angular.module('app', [])
+    .config(['$interpolateProvider', function($interpolateProvider) {
+        $interpolateProvider.startSymbol('[[');
+        $interpolateProvider.endSymbol(']]');
+    }])
+    .controller('CustomCtrl', ['$scope', function($scope) {
+        $scope.title = 'Hello';
+    }]);
+"#;
+    let html = r#"
+<div ng-controller="CustomCtrl">
+    <h1>[[ title ]]</h1>
+</div>
+"#;
+    let index = analyze_html(js, html);
+
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    assert!(
+        scope_refs.iter().any(|r| r.property_path == "title"),
+        "JS で設定された custom interpolate 記号 [[ ]] でも参照認識されるべき, refs = {:?}",
+        scope_refs.iter().map(|r| &r.property_path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_html_interpolation_default_when_not_configured_in_js() {
+    // JS で `$interpolateProvider` を触っていない場合はデフォルト `{{ }}` で解析される
+    let js = r#"
+angular.module('app', [])
+    .controller('DefaultCtrl', ['$scope', function($scope) {
+        $scope.message = 'World';
+    }]);
+"#;
+    let html = r#"
+<div ng-controller="DefaultCtrl">
+    <p>{{ message }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    assert!(
+        scope_refs.iter().any(|r| r.property_path == "message"),
+        "JS で interpolateProvider 未設定なら default `{{{{ }}}}` で参照認識されるべき"
+    );
+}
+
 // ============================================================
 // 21. 網羅的テスト：テストファイル全体の解析
 // ============================================================

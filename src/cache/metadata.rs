@@ -3,7 +3,8 @@ use std::collections::HashMap;
 
 /// Cache format version
 /// v2: HTML cache support
-pub const CACHE_VERSION: u32 = 2;
+/// v3: `$interpolateProvider` 検出値の永続化 (CachedGlobalData.interpolate_symbols 追加)
+pub const CACHE_VERSION: u32 = 3;
 
 /// Cache metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -178,9 +178,18 @@ impl CacheWriter {
     }
 
     fn save_global_data(&self, index: &Index) -> Result<(), Box<dyn std::error::Error>> {
+        // InterpolateStore の JS 検出値を URI string 化して保存
+        let interpolate_symbols: Vec<(String, Option<String>, Option<String>)> = index
+            .interpolate
+            .iter_js_detected_for_cache()
+            .into_iter()
+            .map(|(uri, start, end)| (uri.to_string(), start, end))
+            .collect();
+
         let global_data = CachedGlobalData {
             template_bindings: index.templates.get_all_template_bindings(),
             ng_include_bindings: index.templates.get_all_ng_include_bindings(),
+            interpolate_symbols,
         };
 
         let data = bincode::serialize(&global_data)?;
@@ -188,11 +197,94 @@ impl CacheWriter {
         fs::write(&global_path, data)?;
 
         debug!(
-            "Saved global cache: {} template_bindings, {} ng_include_bindings",
+            "Saved global cache: {} template_bindings, {} ng_include_bindings, {} interpolate_symbols",
             global_data.template_bindings.len(),
-            global_data.ng_include_bindings.len()
+            global_data.ng_include_bindings.len(),
+            global_data.interpolate_symbols.len()
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use tempfile::TempDir;
+    use tower_lsp::lsp_types::Url;
+
+    use crate::cache::loader::CacheLoader;
+
+    /// `$interpolateProvider` 検出値を save → load で復元できることを確認。
+    /// これがないとカスタム interpolate 記号を使うプロジェクトで cache hit 起動時に
+    /// HTML 解析がデフォルト `{{ }}` で動いてしまう。
+    #[test]
+    fn interpolate_symbols_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let workspace_root = tmp.path();
+
+        // 元 Index に interpolate 検出値を入れる
+        let original = Index::new();
+        let uri_a = Url::parse("file:///a.js").unwrap();
+        let uri_b = Url::parse("file:///b.js").unwrap();
+        original
+            .interpolate
+            .set_start_symbol(uri_a.clone(), "<%".to_string());
+        original
+            .interpolate
+            .set_end_symbol(uri_a.clone(), "%>".to_string());
+        original
+            .interpolate
+            .set_start_symbol(uri_b.clone(), "[[".to_string());
+        // uri_b は end_symbol を宣言していない (片方だけのケース)
+
+        // 書き出し
+        let writer = CacheWriter::new(workspace_root);
+        let metadata = HashMap::new();
+        writer.save_full(&original, &metadata).unwrap();
+
+        // 別 Index にロード
+        let restored = Index::new();
+        let loader = CacheLoader::new(workspace_root);
+        let valid_files: HashSet<PathBuf> = HashSet::new(); // 全エントリ skip され得るが global は無関係
+        loader.load(&restored, &valid_files).unwrap();
+
+        // resolved() が同じ結果になっていること
+        assert_eq!(original.interpolate.resolved(), restored.interpolate.resolved());
+        assert_eq!(restored.interpolate.resolved().0, "<%".to_string());
+        assert_eq!(restored.interpolate.resolved().1, "%>".to_string());
+
+        // 各 URI のエントリも復元されていること
+        let mut entries = restored.interpolate.iter_js_detected_for_cache();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, uri_a);
+        assert_eq!(entries[0].1, Some("<%".to_string()));
+        assert_eq!(entries[0].2, Some("%>".to_string()));
+        assert_eq!(entries[1].0, uri_b);
+        assert_eq!(entries[1].1, Some("[[".to_string()));
+        assert_eq!(entries[1].2, None);
+    }
+
+    #[test]
+    fn empty_interpolate_round_trip() {
+        // 検出値が無いケースでも save/load が壊れないことを確認 (後方互換性)
+        let tmp = TempDir::new().unwrap();
+        let workspace_root = tmp.path();
+
+        let original = Index::new();
+        let writer = CacheWriter::new(workspace_root);
+        writer.save_full(&original, &HashMap::new()).unwrap();
+
+        let restored = Index::new();
+        let loader = CacheLoader::new(workspace_root);
+        loader.load(&restored, &HashSet::new()).unwrap();
+
+        // デフォルトに戻る
+        assert_eq!(
+            restored.interpolate.resolved(),
+            ("{{".to_string(), "}}".to_string())
+        );
     }
 }

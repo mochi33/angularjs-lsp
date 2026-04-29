@@ -66,6 +66,19 @@ impl AngularJsAnalyzer {
                                 self.extract_route_when_di(node, source, uri, ctx);
                             }
                         }
+                        "startSymbol" | "endSymbol" => {
+                            // `$interpolateProvider.startSymbol('[[')` のような呼び出しから
+                            // interpolate 記号をワークスペース全体の設定として収集する。
+                            // ajsconfig.json 設定よりも優先される (詳細は InterpolateStore)
+                            if self.is_provider_receiver(callee, source, ctx, "interpolateProvider") {
+                                self.extract_interpolate_symbol_call(
+                                    node,
+                                    source,
+                                    uri,
+                                    method_name.as_str(),
+                                );
+                            }
+                        }
                         "state" => {
                             // 同上、`$stateProvider` (ui-router) 限定
                             if self.is_provider_receiver(callee, source, ctx, "stateProvider") {
@@ -76,6 +89,36 @@ impl AngularJsAnalyzer {
                     }
                 }
             }
+        }
+    }
+
+    /// `$interpolateProvider.startSymbol('[[')` / `.endSymbol(']]')` の呼び出しから
+    /// interpolate 記号を抽出して `Index::interpolate` に登録する。
+    ///
+    /// 文字列リテラル以外 (動的式) は無視する。
+    pub(super) fn extract_interpolate_symbol_call(
+        &self,
+        node: Node,
+        source: &str,
+        uri: &Url,
+        method: &str,
+    ) {
+        let args = match node.child_by_field_name("arguments") {
+            Some(a) => a,
+            None => return,
+        };
+        let first_arg = match args.named_child(0) {
+            Some(a) => a,
+            None => return,
+        };
+        if first_arg.kind() != "string" {
+            return;
+        }
+        let value = self.extract_string_value(first_arg, source);
+        match method {
+            "startSymbol" => self.index.interpolate.set_start_symbol(uri.clone(), value),
+            "endSymbol" => self.index.interpolate.set_end_symbol(uri.clone(), value),
+            _ => {}
         }
     }
 

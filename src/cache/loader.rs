@@ -188,7 +188,18 @@ impl CacheLoader {
             index.templates.add_ng_include_binding_with_key(key, binding);
         }
 
-        info!("Loaded global data from cache");
+        let mut restored_interpolate = 0;
+        for (uri_str, start, end) in global_data.interpolate_symbols {
+            if let Ok(uri) = Url::parse(&uri_str) {
+                index.interpolate.restore_from_cache(uri, start, end);
+                restored_interpolate += 1;
+            }
+        }
+
+        info!(
+            "Loaded global data from cache ({} interpolate entries)",
+            restored_interpolate
+        );
         Ok(())
     }
 }

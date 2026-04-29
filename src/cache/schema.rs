@@ -32,4 +32,13 @@ pub struct CachedSymbolData {
 pub struct CachedGlobalData {
     pub template_bindings: Vec<TemplateBinding>,
     pub ng_include_bindings: Vec<(String, NgIncludeBinding)>,
+    /// JS から検出された `$interpolateProvider.startSymbol/endSymbol` の値を
+    /// URI 単位で永続化する。`(uri_str, start_symbol, end_symbol)` の Vec。
+    /// 各 URI で start/end どちらか片方だけ宣言されているケースもあり得るので
+    /// それぞれ Option で保持する。
+    ///
+    /// このフィールドが無いとキャッシュからの起動時に `InterpolateStore` が
+    /// 空になり、custom interpolate 記号を使うプロジェクトで HTML 解析が
+    /// デフォルト `{{ }}` で動いてしまう。
+    pub interpolate_symbols: Vec<(String, Option<String>, Option<String>)>,
 }
