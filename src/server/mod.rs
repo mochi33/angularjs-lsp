@@ -37,12 +37,18 @@ pub struct Backend {
     html_analyzer: Arc<HtmlAngularJsAnalyzer>,
     index: Arc<Index>,
     root_uri: RwLock<Option<Url>>,
-    ts_proxy: RwLock<Option<TsProxy>>,
+    /// `tokio::spawn` 内のデバウンス済みタスクからも参照する必要があるため Arc 化。
+    ts_proxy: Arc<RwLock<Option<TsProxy>>>,
     documents: Arc<DashMap<Url, String>>,
     ts_opened_files: DashMap<Url, bool>,
     path_matcher: RwLock<Option<PathMatcher>>,
     diagnostics_config: Arc<RwLock<DiagnosticsConfig>>,
     debounce_versions: Arc<DashMap<Url, u64>>,
+    /// URI ごとに「tsserver に最後に flush した debounce_versions の値」。
+    /// `debounce_versions[uri] > ts_synced_versions[uri]` のとき未同期 (デバウンス
+    /// 待ちの did_change が積まれている)。`ensure_ts_synced` で同期済みかを
+    /// 判定し、必要なら request 直前に flush する。
+    ts_synced_versions: Arc<DashMap<Url, u64>>,
 }
 
 async fn publish_html_diagnostics(
@@ -416,12 +422,13 @@ impl Backend {
             html_analyzer,
             index,
             root_uri: RwLock::new(None),
-            ts_proxy: RwLock::new(None),
+            ts_proxy: Arc::new(RwLock::new(None)),
             documents: Arc::new(DashMap::new()),
             ts_opened_files: DashMap::new(),
             path_matcher: RwLock::new(None),
             diagnostics_config: Arc::new(RwLock::new(DiagnosticsConfig::default())),
             debounce_versions: Arc::new(DashMap::new()),
+            ts_synced_versions: Arc::new(DashMap::new()),
         }
     }
 
@@ -443,7 +450,7 @@ impl Backend {
         .await;
     }
 
-    async fn on_change(&self, uri: Url, text: String, version: i32) {
+    async fn on_change(&self, uri: Url, text: String) {
         self.documents.insert(uri.clone(), text.clone());
 
         if is_html_file(&uri) {
@@ -571,6 +578,8 @@ impl Backend {
             let documents = Arc::clone(&self.documents);
             let diagnostics_config = Arc::clone(&self.diagnostics_config);
             let debounce_versions = Arc::clone(&self.debounce_versions);
+            let ts_proxy = Arc::clone(&self.ts_proxy);
+            let ts_synced_versions = Arc::clone(&self.ts_synced_versions);
             let spawn_uri = uri.clone();
 
             tokio::spawn(async move {
@@ -608,6 +617,28 @@ impl Backend {
                 .ok()
                 .flatten();
 
+                // tsserver にも debounce 後に最新テキストを送る (毎キーストローク
+                // の IPC 送信を避ける)。`debounce_versions` の version check で
+                // 最新タスクのみ flush するので、200ms 以内の連続キーは最後の 1 回
+                // しか送らない。
+                //
+                // request 経路から ensure_ts_synced で flush される staleness
+                // 対策があるので、ここはあくまで「アイドル時に背景で同期」する役割。
+                if ts_synced_versions
+                    .get(&uri)
+                    .map(|v| *v < ver)
+                    .unwrap_or(true)
+                {
+                    if let Some(ref proxy) = *ts_proxy.read().await {
+                        if let Some(doc) = documents.get(&uri) {
+                            proxy
+                                .did_change(&uri, doc.value(), ver as i32)
+                                .await;
+                            ts_synced_versions.insert(uri.clone(), ver);
+                        }
+                    }
+                }
+
                 if let Some((before, after)) = analysis_result {
                     publish_js_diagnostics(&client, &index, &diagnostics_config, &uri).await;
 
@@ -635,14 +666,6 @@ impl Backend {
                     }
                 }
             });
-        }
-
-        // tsserver は HTML を解釈できないので JS ファイルのみ通知する
-        // (HTML を languageId=javascript で渡すと tsserver が無駄に parse する)
-        if is_js_file(&uri) {
-            if let Some(ref proxy) = *self.ts_proxy.read().await {
-                proxy.did_change(&uri, &text, version).await;
-            }
         }
     }
 
@@ -723,6 +746,33 @@ impl Backend {
             if let Some(doc) = self.documents.get(uri) {
                 proxy.did_open(uri, doc.value()).await;
                 self.ts_opened_files.insert(uri.clone(), true);
+                // open 時点のテキストは tsserver と同期済み。`debounce_versions`
+                // と同じ初期値 0 をセットして、以降の did_change 監視の起点に
+                self.ts_synced_versions.insert(uri.clone(), 0);
+            }
+        }
+    }
+
+    /// tsserver の見ているテキストを最新に同期する。
+    ///
+    /// JS on_change では `did_change` を 200ms デバウンスして spawn 内から送信する
+    /// ため、デバウンス完了前に LSP リクエスト (completion / hover など) が来ると
+    /// tsserver が古いテキストで応答してしまう。本メソッドは
+    /// `debounce_versions[uri] > ts_synced_versions[uri]` の場合のみ、リクエスト
+    /// 直前に同期送信して staleness を解消する。
+    async fn ensure_ts_synced(&self, uri: &Url) {
+        if !is_js_file(uri) {
+            return;
+        }
+        let current = self.debounce_versions.get(uri).map(|v| *v).unwrap_or(0);
+        let synced = self.ts_synced_versions.get(uri).map(|v| *v).unwrap_or(0);
+        if current <= synced {
+            return;
+        }
+        if let Some(ref proxy) = *self.ts_proxy.read().await {
+            if let Some(doc) = self.documents.get(uri) {
+                proxy.did_change(uri, doc.value(), current as i32).await;
+                self.ts_synced_versions.insert(uri.clone(), current);
             }
         }
     }
@@ -1591,15 +1641,14 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
-        let version = params.text_document.version;
         if let Some(change) = params.content_changes.into_iter().next() {
-            self.on_change(uri, change.text, version).await;
+            self.on_change(uri, change.text).await;
         }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         if let Some(text) = params.text {
-            self.on_change(params.text_document.uri, text, 0).await;
+            self.on_change(params.text_document.uri, text).await;
         }
     }
 
@@ -1612,6 +1661,9 @@ impl LanguageServer for Backend {
                 proxy.did_close(uri).await;
             }
         }
+        // 閉じられたファイルの sync 状態は不要、エントリを削除する
+        // (再 open 時に ensure_ts_file_opened が新しく初期化する)
+        self.ts_synced_versions.remove(uri);
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -1623,6 +1675,7 @@ impl LanguageServer for Backend {
         }
 
         self.ensure_ts_file_opened(uri).await;
+        self.ensure_ts_synced(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.references(&params).await);
         }
@@ -1664,6 +1717,7 @@ impl LanguageServer for Backend {
             .await;
 
         self.ensure_ts_file_opened(uri).await;
+        self.ensure_ts_synced(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.goto_definition(&params).await);
         }
@@ -1680,6 +1734,7 @@ impl LanguageServer for Backend {
         }
 
         self.ensure_ts_file_opened(uri).await;
+        self.ensure_ts_synced(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.hover(&params).await);
         }
@@ -1707,6 +1762,7 @@ impl LanguageServer for Backend {
         }
 
         self.ensure_ts_file_opened(uri).await;
+        self.ensure_ts_synced(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.signature_help(&params).await);
         }
@@ -1798,6 +1854,7 @@ impl LanguageServer for Backend {
         if let Some(ref prefix) = service_prefix {
             if prefix != "$scope" && !self.index.definitions.is_service_or_factory(prefix) {
                 self.ensure_ts_file_opened(uri).await;
+                self.ensure_ts_synced(uri).await;
                 if let Some(ref proxy) = *self.ts_proxy.read().await {
                     return Ok(proxy.completion(&params).await);
                 }
@@ -1818,6 +1875,7 @@ impl LanguageServer for Backend {
         }
 
         self.ensure_ts_file_opened(uri).await;
+        self.ensure_ts_synced(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.completion(&params).await);
         }
@@ -1834,6 +1892,7 @@ impl LanguageServer for Backend {
         }
 
         self.ensure_ts_file_opened(uri).await;
+        self.ensure_ts_synced(uri).await;
         if let Some(ref proxy) = *self.ts_proxy.read().await {
             return Ok(proxy.rename(&params).await);
         }
