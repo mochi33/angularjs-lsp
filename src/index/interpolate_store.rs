@@ -1,0 +1,190 @@
+use std::sync::RwLock;
+
+use dashmap::DashMap;
+use tower_lsp::lsp_types::Url;
+
+/// `js_detected` から取り出した 1 エントリ。`(URI, (start_symbol, end_symbol))`。
+type DetectedEntry = (Url, (Option<String>, Option<String>));
+
+/// AngularJS の interpolate 記号 (`{{` / `}}` または `$interpolateProvider` で
+/// カスタマイズされた値) を解決するストア。
+///
+/// 解決順:
+/// 1. JS ソース中で検出された `$interpolateProvider.startSymbol(...)` /
+///    `$interpolateProvider.endSymbol(...)` の値 (URI ごとに保持)
+/// 2. `ajsconfig.json` の `interpolate.startSymbol` / `interpolate.endSymbol`
+///    (フォールバック)
+/// 3. AngularJS デフォルトの `{{` / `}}`
+pub struct InterpolateStore {
+    /// JS から検出された symbols (URI → (start, end))。
+    /// 各 URI は `$interpolateProvider.startSymbol(...)` か
+    /// `$interpolateProvider.endSymbol(...)` のどちらか/両方を持ち得る。
+    js_detected: DashMap<Url, (Option<String>, Option<String>)>,
+    /// `ajsconfig.json` の `interpolate` 設定 (フォールバック)。
+    /// 起動時に `set_config_fallback` で設定される。
+    /// 初期値は AngularJS デフォルトの `{{` / `}}`。
+    config_fallback: RwLock<(String, String)>,
+}
+
+impl InterpolateStore {
+    pub fn new() -> Self {
+        Self {
+            js_detected: DashMap::new(),
+            config_fallback: RwLock::new(("{{".to_string(), "}}".to_string())),
+        }
+    }
+
+    /// `ajsconfig.json` の interpolate 設定をフォールバックとして登録する
+    pub fn set_config_fallback(&self, start: String, end: String) {
+        if let Ok(mut c) = self.config_fallback.write() {
+            *c = (start, end);
+        }
+    }
+
+    /// 指定 URI で `$interpolateProvider.startSymbol(...)` を検出した
+    pub fn set_start_symbol(&self, uri: Url, symbol: String) {
+        let mut entry = self.js_detected.entry(uri).or_insert((None, None));
+        entry.0 = Some(symbol);
+    }
+
+    /// 指定 URI で `$interpolateProvider.endSymbol(...)` を検出した
+    pub fn set_end_symbol(&self, uri: Url, symbol: String) {
+        let mut entry = self.js_detected.entry(uri).or_insert((None, None));
+        entry.1 = Some(symbol);
+    }
+
+    /// 指定 URI の検出値を削除 (clear_document 時)
+    pub fn clear_document(&self, uri: &Url) {
+        self.js_detected.remove(uri);
+    }
+
+    /// 全エントリをクリア
+    pub fn clear_all(&self) {
+        self.js_detected.clear();
+    }
+
+    /// 解決された (start_symbol, end_symbol) を返す。
+    ///
+    /// JS 検出値 → ajsconfig フォールバック → デフォルト の順で解決する。
+    /// 複数の URI が JS 検出値を持つ場合は URI 順 (lexicographic) で最初に
+    /// 見つかった非 None 値を採用する (決定的)。
+    /// start と end は別々に解決されるので、片方だけ JS 検出されたケースも
+    /// 正しく扱える。
+    pub fn resolved(&self) -> (String, String) {
+        // 決定的にするため URI でソートして走査
+        let mut entries: Vec<DetectedEntry> = self
+            .js_detected
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut start: Option<String> = None;
+        let mut end: Option<String> = None;
+        for (_, (s, e)) in entries {
+            if start.is_none() && s.is_some() {
+                start = s;
+            }
+            if end.is_none() && e.is_some() {
+                end = e;
+            }
+            if start.is_some() && end.is_some() {
+                break;
+            }
+        }
+
+        let fallback = self
+            .config_fallback
+            .read()
+            .ok()
+            .map(|c| c.clone())
+            .unwrap_or_else(|| ("{{".to_string(), "}}".to_string()));
+
+        (
+            start.unwrap_or(fallback.0),
+            end.unwrap_or(fallback.1),
+        )
+    }
+}
+
+impl Default for InterpolateStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(path: &str) -> Url {
+        Url::parse(&format!("file://{}", path)).unwrap()
+    }
+
+    #[test]
+    fn defaults_to_double_curly() {
+        let store = InterpolateStore::new();
+        assert_eq!(store.resolved(), ("{{".to_string(), "}}".to_string()));
+    }
+
+    #[test]
+    fn config_fallback_overrides_default() {
+        let store = InterpolateStore::new();
+        store.set_config_fallback("[[".to_string(), "]]".to_string());
+        assert_eq!(store.resolved(), ("[[".to_string(), "]]".to_string()));
+    }
+
+    #[test]
+    fn js_detected_overrides_config_fallback() {
+        let store = InterpolateStore::new();
+        store.set_config_fallback("[[".to_string(), "]]".to_string());
+        let uri = url("/app/config.js");
+        store.set_start_symbol(uri.clone(), "{<".to_string());
+        store.set_end_symbol(uri, ">}".to_string());
+        assert_eq!(store.resolved(), ("{<".to_string(), ">}".to_string()));
+    }
+
+    #[test]
+    fn partial_js_detected_falls_back_for_missing_side() {
+        // start のみ JS 検出、end は config フォールバック
+        let store = InterpolateStore::new();
+        store.set_config_fallback("[[".to_string(), "]]".to_string());
+        let uri = url("/app/config.js");
+        store.set_start_symbol(uri, "{<".to_string());
+        // end_symbol は未設定
+        assert_eq!(store.resolved(), ("{<".to_string(), "]]".to_string()));
+    }
+
+    #[test]
+    fn clear_document_removes_entry() {
+        let store = InterpolateStore::new();
+        let uri = url("/app/config.js");
+        store.set_start_symbol(uri.clone(), "{<".to_string());
+        store.set_end_symbol(uri.clone(), ">}".to_string());
+        assert_eq!(store.resolved(), ("{<".to_string(), ">}".to_string()));
+
+        store.clear_document(&uri);
+        // 検出値が消えたのでデフォルトに戻る
+        assert_eq!(store.resolved(), ("{{".to_string(), "}}".to_string()));
+    }
+
+    #[test]
+    fn multiple_uris_first_in_uri_order_wins() {
+        // 同じシンボルを複数 JS が宣言した場合、URI 順で最初に出るものを採用 (決定的)
+        let store = InterpolateStore::new();
+        // /a.js が後、/b.js が先になるよう URI を選ぶ
+        store.set_start_symbol(url("/b.js"), "B<".to_string());
+        store.set_start_symbol(url("/a.js"), "A<".to_string());
+        // /a.js が URI sort で先 → A< が採用
+        assert_eq!(store.resolved().0, "A<".to_string());
+    }
+
+    #[test]
+    fn split_across_uris_each_contributes() {
+        // 1 URI が start のみ、別 URI が end のみ宣言したケース
+        let store = InterpolateStore::new();
+        store.set_start_symbol(url("/a.js"), "<%".to_string());
+        store.set_end_symbol(url("/b.js"), "%>".to_string());
+        assert_eq!(store.resolved(), ("<%".to_string(), "%>".to_string()));
+    }
+}

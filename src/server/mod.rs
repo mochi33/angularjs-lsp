@@ -1198,14 +1198,21 @@ impl LanguageServer for Backend {
                 let config = AjsConfig::load_from_dir(&path);
                 cache_enabled = config.cache;
 
-                self.html_analyzer
-                    .set_interpolate_config(config.interpolate.clone());
+                // ajsconfig.json の `interpolate` 設定はフォールバック扱いになった
+                // (主要な解決経路は JS 中の `$interpolateProvider.startSymbol/endSymbol`)。
+                // 互換のために値を Index::interpolate に登録しておく。
+                self.index.interpolate.set_config_fallback(
+                    config.interpolate.start_symbol.clone(),
+                    config.interpolate.end_symbol.clone(),
+                );
                 *self.diagnostics_config.write().await = config.diagnostics.clone();
                 self.client
                     .log_message(
                         MessageType::INFO,
                         format!(
-                            "Interpolate symbols: {} ... {}",
+                            "Interpolate fallback (ajsconfig.json): {} ... {} \
+                             — JS source `$interpolateProvider.startSymbol/endSymbol` \
+                             が検出されればそちらを優先",
                             config.interpolate.start_symbol, config.interpolate.end_symbol
                         ),
                     )
