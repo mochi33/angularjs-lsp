@@ -246,14 +246,32 @@ impl DefinitionStore {
 
     /// 指定 URI から参照されているシンボル名集合を取得
     /// (HTML 埋め込みスクリプトが書き込んだ参照を URI 単位で逆引きするのに使う)
-    pub fn get_reference_names_for_uri(&self, uri: &Url) -> std::collections::HashSet<String> {
-        let mut names = std::collections::HashSet::new();
+    pub fn get_reference_names_for_uri(&self, uri: &Url) -> HashSet<String> {
+        let mut names = HashSet::new();
         for entry in self.references.iter() {
             if entry.value().iter().any(|r| &r.uri == uri) {
                 names.insert(entry.key().clone());
             }
         }
         names
+    }
+
+    /// 指定 URI に定義があるシンボル名集合を取得
+    /// (HTML 埋め込みスクリプトの定義を URI 単位で逆引きするのに使う。
+    ///  semantic_tokens_refresh の発火判定に利用)
+    pub fn get_definition_names_for_uri(&self, uri: &Url) -> HashSet<String> {
+        let Some(names) = self.document_symbols.get(uri) else {
+            return HashSet::new();
+        };
+        let mut result = HashSet::new();
+        for name in names.value() {
+            if let Some(entry) = self.definitions.get(name) {
+                if entry.value().iter().any(|s| &s.uri == uri) {
+                    result.insert(name.clone());
+                }
+            }
+        }
+        result
     }
 
     pub fn clear_document(&self, uri: &Url) {
@@ -513,6 +531,66 @@ mod tests {
     }
 
     #[test]
+    fn get_definition_names_for_uri_returns_only_definitions_in_uri() {
+        let store = DefinitionStore::new();
+        let uri_a = Url::parse("file:///a.html").unwrap();
+        let uri_b = Url::parse("file:///b.js").unwrap();
+
+        // uri_a に 2 件、uri_b に 1 件の定義
+        store.add_definition(make_definition("Ctrl.$scope.foo", &uri_a));
+        store.add_definition(make_definition("Ctrl.$scope.bar", &uri_a));
+        store.add_definition(make_definition("Ctrl.$scope.baz", &uri_b));
+
+        let names = store.get_definition_names_for_uri(&uri_a);
+        let mut names_vec: Vec<String> = names.into_iter().collect();
+        names_vec.sort();
+        assert_eq!(
+            names_vec,
+            vec!["Ctrl.$scope.bar".to_string(), "Ctrl.$scope.foo".to_string()],
+            "uri_a に定義されたシンボルだけ返るべき"
+        );
+    }
+
+    #[test]
+    fn get_definition_names_for_uri_excludes_reference_only() {
+        // document_symbols は定義+参照の和集合だが、本ヘルパーは
+        // 「実際に definitions エントリでこの URI を持つ」名前だけ返す
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        // 定義は無いが参照だけ登録 (例: ユーザがタイポ中の参照名)
+        store.add_reference(make_reference("Ctrl.$scope.unknown", &uri));
+        // 通常の定義 + 参照
+        store.add_definition(make_definition("Ctrl.$scope.foo", &uri));
+        store.add_reference(make_reference("Ctrl.$scope.foo", &uri));
+
+        let names = store.get_definition_names_for_uri(&uri);
+        assert!(names.contains("Ctrl.$scope.foo"));
+        assert!(
+            !names.contains("Ctrl.$scope.unknown"),
+            "参照のみのシンボルは除外すべき"
+        );
+        assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn get_definition_names_for_uri_returns_empty_for_unknown() {
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+        assert!(store.get_definition_names_for_uri(&uri).is_empty());
+    }
+
+    #[test]
+    fn get_definition_names_for_uri_drops_after_clear_document() {
+        // clear_document 後は空になることを確認 (HTML 編集サイクルを模す)
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        store.add_definition(make_definition("Ctrl.$scope.foo", &uri));
+        assert_eq!(store.get_definition_names_for_uri(&uri).len(), 1);
+
+        store.clear_document(&uri);
+        assert!(store.get_definition_names_for_uri(&uri).is_empty());
     fn for_each_reference_visits_all_refs() {
         let store = DefinitionStore::new();
         let uri_a = Url::parse("file:///a.js").unwrap();

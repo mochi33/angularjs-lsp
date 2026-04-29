@@ -99,6 +99,143 @@ fn property_path_leaf(property_path: &str) -> &str {
     }
 }
 
+/// HTML 編集の影響範囲を判断するためのスナップショット。
+///
+/// `before != after` を確認するだけで、診断・semanticTokens/refresh・codeLens/refresh
+/// が必要かをまとめて判定できる。各フィールドは「他ファイルの診断/トークン/lens に
+/// 影響し得る cross-file dependency」を網羅する:
+///
+/// - `html_props`: HTML テンプレ scope 参照 (例: `{{vm.foo}}`) の property leaf 名
+///   集合。JS ファイルの `unused_scope_variables` 診断に影響
+/// - `embedded_refs`: 埋め込みスクリプトが参照しているシンボル名集合。JS の
+///   "他JSから参照あり" 判定 (= unused 警告) に影響
+/// - `embedded_defs`: 埋め込みスクリプトが定義しているシンボル名集合。
+///   他 HTML のセマンティックトークン解決と code lens (controller jump) に影響
+/// - `ng_includes`: ng-include の template_path 集合。子 HTML の
+///   "Included by" code lens、controller 継承解決に影響
+/// - `ng_controllers`: ng-controller スコープの (controller_name, alias) 集合。
+///   JS 側 controller の "Used in templates" code lens に影響
+/// - `embedded_template_bindings`: 埋め込みスクリプトの $routeProvider 等の
+///   binding 集合。バインド先 HTML の lens に影響
+/// - `embedded_component_template_urls`: 埋め込みスクリプトの component templateUrl
+///   集合。テンプレ HTML の lens に影響
+#[derive(Debug, PartialEq, Eq)]
+struct HtmlChangeSnapshot {
+    html_props: HashSet<String>,
+    embedded_refs: HashSet<String>,
+    embedded_defs: HashSet<String>,
+    ng_includes: HashSet<String>,
+    ng_controllers: HashSet<(String, Option<String>)>,
+    embedded_template_bindings: HashSet<(String, String, &'static str)>,
+    embedded_component_template_urls: HashSet<(String, Option<String>, String)>,
+}
+
+impl HtmlChangeSnapshot {
+    fn capture(index: &Index, uri: &Url) -> Self {
+        let html_props = index
+            .html
+            .get_html_scope_references(uri)
+            .iter()
+            .map(|r| property_path_leaf(&r.property_path).to_string())
+            .collect();
+        let embedded_refs = index.definitions.get_reference_names_for_uri(uri);
+        let embedded_defs = index.definitions.get_definition_names_for_uri(uri);
+        let ng_includes = index
+            .templates
+            .get_ng_includes_in_file(uri)
+            .into_iter()
+            .map(|(_line, path, _resolved)| path)
+            .collect();
+        let ng_controllers = index
+            .controllers
+            .get_all_html_controller_scopes(uri)
+            .into_iter()
+            .map(|s| (s.controller_name, s.alias))
+            .collect();
+        let embedded_template_bindings = index
+            .templates
+            .get_template_bindings_for_js_file(uri)
+            .into_iter()
+            .map(|b| (b.template_path, b.controller_name, b.source.label()))
+            .collect();
+        let embedded_component_template_urls = index
+            .components
+            .get_component_template_urls(uri)
+            .into_iter()
+            .map(|c| (c.template_path, c.controller_name, c.controller_as))
+            .collect();
+
+        Self {
+            html_props,
+            embedded_refs,
+            embedded_defs,
+            ng_includes,
+            ng_controllers,
+            embedded_template_bindings,
+            embedded_component_template_urls,
+        }
+    }
+
+    /// 他ファイルの semanticTokens / codeLens に影響し得る変化があるか
+    /// (`html_props` と `embedded_refs` は当該 HTML の診断/トークンにしか
+    /// 影響しないため除外する。それらは LSP クライアント側の didChange 後
+    /// 自動再要求でカバー、または `collect_affected_js_uris` で個別 publish)
+    fn cross_file_lens_state_changed(&self, other: &Self) -> bool {
+        self.embedded_defs != other.embedded_defs
+            || self.ng_includes != other.ng_includes
+            || self.ng_controllers != other.ng_controllers
+            || self.embedded_template_bindings != other.embedded_template_bindings
+            || self.embedded_component_template_urls != other.embedded_component_template_urls
+    }
+}
+
+/// JS 編集の影響範囲を判断するためのスナップショット。
+///
+/// `code_lens` の cross-file dep:
+/// - `symbols`: defined controller / scope property 等。HTML の ng-controller
+///   からの jump-to-definition lens に影響
+/// - `template_bindings`: $routeProvider / $stateProvider / $uibModal 等の
+///   templateUrl + controller binding。バインド先 HTML の lens に影響
+/// - `component_template_urls`: component templateUrl。テンプレ HTML の
+///   lens に影響
+#[derive(Debug, PartialEq, Eq)]
+struct JsChangeSnapshot {
+    symbols: HashSet<String>,
+    template_bindings: HashSet<(String, String, &'static str)>,
+    component_template_urls: HashSet<(String, Option<String>, String)>,
+}
+
+impl JsChangeSnapshot {
+    fn capture(index: &Index, uri: &Url) -> Self {
+        let symbols = index.definitions.get_definition_names_for_uri(uri);
+        let template_bindings = index
+            .templates
+            .get_template_bindings_for_js_file(uri)
+            .into_iter()
+            .map(|b| (b.template_path, b.controller_name, b.source.label()))
+            .collect();
+        let component_template_urls = index
+            .components
+            .get_component_template_urls(uri)
+            .into_iter()
+            .map(|c| (c.template_path, c.controller_name, c.controller_as))
+            .collect();
+
+        Self {
+            symbols,
+            template_bindings,
+            component_template_urls,
+        }
+    }
+
+    /// 他ファイルの semanticTokens / codeLens に影響し得る変化があるか
+    fn cross_file_lens_state_changed(&self, other: &Self) -> bool {
+        self.symbols != other.symbols
+            || self.template_bindings != other.template_bindings
+            || self.component_template_urls != other.component_template_urls
+    }
+}
+
 /// HTML ファイル更新後、その変更で診断結果が変わり得る開いている JS ファイルの
 /// URI 集合を返す。
 ///
@@ -289,13 +426,12 @@ impl Backend {
 
                 // Run CPU-intensive analysis on the blocking thread pool
                 //
-                // 戻り値: Some((before_html_props, after_html_props,
-                //               before_embedded_refs, after_embedded_refs))
-                //   - 解析が走らなかった場合は None
-                //   - HTML スコープ参照の property leaf 名集合 (before/after) と
-                //     埋め込みスクリプトが書き込んだ参照シンボル名集合 (before/after)
-                //     を返す。これら和集合に対し、定義名がマッチする開いている JS
-                //     だけ再診断する (collect_affected_js_uris)
+                // 戻り値: Some((before_snapshot, after_snapshot))
+                //   解析前後の HtmlChangeSnapshot ペアを返す。各種 cross-file
+                //   dependency (HTML scope refs / 埋め込み defs/refs / ng-include /
+                //   ng-controller / 埋め込み template_bindings / component templateUrl)
+                //   をまとめて捕捉し、ピンポイント診断と refresh signals の発行判定に
+                //   利用する。
                 let analysis_result = tokio::task::spawn_blocking(move || {
                     let latest_text = match bl_documents.get(&bl_uri) {
                         Some(doc) => doc.value().clone(),
@@ -303,14 +439,7 @@ impl Backend {
                     };
 
                     // before スナップショット: 解析後に clear されてしまうので先に取得
-                    let before_html_props: HashSet<String> = bl_index
-                        .html
-                        .get_html_scope_references(&bl_uri)
-                        .iter()
-                        .map(|r| property_path_leaf(&r.property_path).to_string())
-                        .collect();
-                    let before_embedded_refs =
-                        bl_index.definitions.get_reference_names_for_uri(&bl_uri);
+                    let before = HtmlChangeSnapshot::capture(&bl_index, &bl_uri);
 
                     let scripts = bl_html_analyzer
                         .analyze_document_and_extract_scripts(&bl_uri, &latest_text);
@@ -340,33 +469,15 @@ impl Backend {
                     }
 
                     // after スナップショット
-                    let after_html_props: HashSet<String> = bl_index
-                        .html
-                        .get_html_scope_references(&bl_uri)
-                        .iter()
-                        .map(|r| property_path_leaf(&r.property_path).to_string())
-                        .collect();
-                    let after_embedded_refs =
-                        bl_index.definitions.get_reference_names_for_uri(&bl_uri);
+                    let after = HtmlChangeSnapshot::capture(&bl_index, &bl_uri);
 
-                    Some((
-                        before_html_props,
-                        after_html_props,
-                        before_embedded_refs,
-                        after_embedded_refs,
-                    ))
+                    Some((before, after))
                 })
                 .await
                 .ok()
                 .flatten();
 
-                if let Some((
-                    before_html_props,
-                    after_html_props,
-                    before_embedded_refs,
-                    after_embedded_refs,
-                )) = analysis_result
-                {
+                if let Some((before, after)) = analysis_result {
                     publish_html_diagnostics(&client, &index, &diagnostics_config, &uri).await;
 
                     // この HTML 変更で診断結果が変わり得る開いている JS だけ
@@ -374,17 +485,24 @@ impl Backend {
                     let affected_js = collect_affected_js_uris(
                         &index,
                         &documents,
-                        &before_html_props,
-                        &after_html_props,
-                        &before_embedded_refs,
-                        &after_embedded_refs,
+                        &before.html_props,
+                        &after.html_props,
+                        &before.embedded_refs,
+                        &after.embedded_refs,
                     );
                     for js_uri in affected_js {
                         publish_js_diagnostics(&client, &index, &diagnostics_config, &js_uri).await;
                     }
 
-                    let _ = client.semantic_tokens_refresh().await;
-                    let _ = client.code_lens_refresh().await;
+                    // semantic_tokens_refresh / code_lens_refresh はどちらも workspace
+                    // 全 applicable ファイルに再要求が走る重い操作。cross-file dep の
+                    // 状態変化が無ければスキップする。HTML 自身のスコープ参照変化
+                    // (`{{vm.foo}}` 追加など) は当該 HTML のトークン/lens にしか影響
+                    // せず、それは LSP クライアントが didChange 後に自動再要求する。
+                    if before.cross_file_lens_state_changed(&after) {
+                        let _ = client.semantic_tokens_refresh().await;
+                        let _ = client.code_lens_refresh().await;
+                    }
                 }
             });
         } else if is_js_file(&uri) {
@@ -416,52 +534,53 @@ impl Backend {
                 let bl_documents = Arc::clone(&documents);
                 let bl_index = Arc::clone(&index);
 
-                // 戻り値: Some((before_symbols, after_symbols))
-                //   before_symbols: 解析前にこの JS が定義していたシンボル名集合
-                //   after_symbols : 解析後に同じく定義しているシンボル名集合
-                //   この2つの和集合に名前一致する HTML 参照を持つ HTML ファイルだけ
-                //   診断を再発行する (削除/追加/置換いずれもカバー)
+                // 戻り値: Some((before_snapshot, after_snapshot))
+                //   解析前後の JsChangeSnapshot ペア。defined symbols /
+                //   template_bindings / component templateUrl の cross-file dep を
+                //   全部捕捉する。
                 let analysis_result = tokio::task::spawn_blocking(move || {
                     let latest_text = match bl_documents.get(&bl_uri) {
                         Some(doc) => doc.value().clone(),
                         None => return None,
                     };
 
-                    let before_symbols: HashSet<String> = bl_index
-                        .definitions
-                        .get_definitions_for_uri(&bl_uri)
-                        .into_iter()
-                        .map(|s| s.name)
-                        .collect();
+                    let before = JsChangeSnapshot::capture(&bl_index, &bl_uri);
 
                     bl_analyzer.analyze_document(&bl_uri, &latest_text);
 
-                    let after_symbols: HashSet<String> = bl_index
-                        .definitions
-                        .get_definitions_for_uri(&bl_uri)
-                        .into_iter()
-                        .map(|s| s.name)
-                        .collect();
+                    let after = JsChangeSnapshot::capture(&bl_index, &bl_uri);
 
-                    Some((before_symbols, after_symbols))
+                    Some((before, after))
                 })
                 .await
                 .ok()
                 .flatten();
 
-                if let Some((before_symbols, after_symbols)) = analysis_result {
+                if let Some((before, after)) = analysis_result {
                     publish_js_diagnostics(&client, &index, &diagnostics_config, &uri).await;
 
                     // この JS の変更で診断結果が変わり得る HTML ファイルを特定して
                     // ピンポイントに再発行する
-                    let affected_html =
-                        collect_affected_html_uris(&index, &documents, &uri, &before_symbols, &after_symbols);
+                    let affected_html = collect_affected_html_uris(
+                        &index,
+                        &documents,
+                        &uri,
+                        &before.symbols,
+                        &after.symbols,
+                    );
                     for html_uri in affected_html {
                         publish_html_diagnostics(&client, &index, &diagnostics_config, &html_uri).await;
                     }
 
-                    let _ = client.semantic_tokens_refresh().await;
-                    let _ = client.code_lens_refresh().await;
+                    // semantic_tokens_refresh / code_lens_refresh はどちらも workspace
+                    // 全 applicable ファイルに再要求が走る重い操作。cross-file dep の
+                    // 状態変化が無ければスキップする (シンボル / template_bindings /
+                    // component templateUrl のいずれも変わっていなければ、他ファイルの
+                    // トークン解決と lens 内容は変わらない)。
+                    if before.cross_file_lens_state_changed(&after) {
+                        let _ = client.semantic_tokens_refresh().await;
+                        let _ = client.code_lens_refresh().await;
+                    }
                 }
             });
         }
@@ -2192,5 +2311,272 @@ mod collect_affected_js_uris_tests {
         // 実際には server 内 spawn_blocking 内で get_reference_names_for_uri と組み合わせて
         // before/after を構築する。テストでは入力集合を直接渡して挙動を検証している。
         let _ = add_embedded_script_reference; // ヘルパー未使用警告抑制
+    }
+}
+
+#[cfg(test)]
+mod change_snapshot_tests {
+    use super::*;
+    use crate::model::{
+        BindingSource, ComponentTemplateUrl, HtmlControllerScope, NgIncludeBinding, Span,
+        SymbolBuilder, SymbolKind, TemplateBinding,
+    };
+
+    fn html(path: &str) -> Url {
+        Url::parse(&format!("file://{}", path)).unwrap()
+    }
+    fn js(path: &str) -> Url {
+        Url::parse(&format!("file://{}", path)).unwrap()
+    }
+
+    fn add_definition(index: &Index, name: &str, uri: &Url) {
+        let span = Span::new(0, 0, 0, name.len() as u32);
+        let symbol = SymbolBuilder::new(name.to_string(), SymbolKind::Controller, uri.clone())
+            .definition_span(span)
+            .name_span(span)
+            .build();
+        index.definitions.add_definition(symbol);
+    }
+
+    fn add_template_binding(
+        index: &Index,
+        binding_uri: &Url,
+        template_path: &str,
+        controller_name: &str,
+        source: BindingSource,
+    ) {
+        index.templates.add_template_binding(TemplateBinding {
+            template_path: template_path.to_string(),
+            controller_name: controller_name.to_string(),
+            source,
+            binding_uri: binding_uri.clone(),
+            binding_line: 0,
+        });
+    }
+
+    fn add_component_template_url(
+        index: &Index,
+        uri: &Url,
+        template_path: &str,
+        controller_name: Option<&str>,
+        controller_as: &str,
+    ) {
+        index.components.add_component_template_url(ComponentTemplateUrl {
+            uri: uri.clone(),
+            template_path: template_path.to_string(),
+            line: 0,
+            col: 0,
+            controller_name: controller_name.map(String::from),
+            controller_as: controller_as.to_string(),
+        });
+    }
+
+    fn add_ng_controller_scope(index: &Index, uri: &Url, name: &str, alias: Option<&str>) {
+        index.controllers.add_html_controller_scope(HtmlControllerScope {
+            controller_name: name.to_string(),
+            alias: alias.map(String::from),
+            uri: uri.clone(),
+            start_line: 0,
+            end_line: 100,
+        });
+    }
+
+    fn add_ng_include(index: &Index, parent: &Url, template_path: &str) {
+        index.templates.add_ng_include_binding(NgIncludeBinding {
+            parent_uri: parent.clone(),
+            template_path: template_path.to_string(),
+            resolved_filename: template_path.to_string(),
+            line: 0,
+            inherited_controllers: Vec::new(),
+            inherited_local_variables: Vec::new(),
+            inherited_form_bindings: Vec::new(),
+        });
+    }
+
+    // -------------------- HtmlChangeSnapshot --------------------
+
+    #[test]
+    fn html_snapshot_empty_state_is_equal() {
+        let index = Index::new();
+        let uri = html("/app/page.html");
+        let s1 = HtmlChangeSnapshot::capture(&index, &uri);
+        let s2 = HtmlChangeSnapshot::capture(&index, &uri);
+        assert_eq!(s1, s2);
+        assert!(!s1.cross_file_lens_state_changed(&s2));
+    }
+
+    #[test]
+    fn html_snapshot_detects_embedded_def_change() {
+        let index = Index::new();
+        let uri = html("/app/page.html");
+        let before = HtmlChangeSnapshot::capture(&index, &uri);
+
+        // 埋め込みスクリプトが新たに controller を定義
+        add_definition(&index, "MyCtrl", &uri);
+        let after = HtmlChangeSnapshot::capture(&index, &uri);
+
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
+    }
+
+    #[test]
+    fn html_snapshot_detects_ng_include_change() {
+        let index = Index::new();
+        let uri = html("/app/page.html");
+        let before = HtmlChangeSnapshot::capture(&index, &uri);
+
+        add_ng_include(&index, &uri, "child.html");
+        let after = HtmlChangeSnapshot::capture(&index, &uri);
+
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
+    }
+
+    #[test]
+    fn html_snapshot_detects_ng_controller_change() {
+        let index = Index::new();
+        let uri = html("/app/page.html");
+        let before = HtmlChangeSnapshot::capture(&index, &uri);
+
+        add_ng_controller_scope(&index, &uri, "MyCtrl", Some("vm"));
+        let after = HtmlChangeSnapshot::capture(&index, &uri);
+
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
+    }
+
+    #[test]
+    fn html_snapshot_detects_template_binding_change() {
+        let index = Index::new();
+        let uri = html("/app/page.html");
+        let before = HtmlChangeSnapshot::capture(&index, &uri);
+
+        // 埋め込みスクリプトに $routeProvider.when を追加
+        add_template_binding(&index, &uri, "foo.html", "FooCtrl", BindingSource::RouteProvider);
+        let after = HtmlChangeSnapshot::capture(&index, &uri);
+
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
+    }
+
+    #[test]
+    fn html_snapshot_detects_component_template_url_change() {
+        let index = Index::new();
+        let uri = html("/app/page.html");
+        let before = HtmlChangeSnapshot::capture(&index, &uri);
+
+        add_component_template_url(&index, &uri, "foo.html", Some("FooCtrl"), "$ctrl");
+        let after = HtmlChangeSnapshot::capture(&index, &uri);
+
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
+    }
+
+    #[test]
+    fn html_snapshot_html_props_change_does_not_trigger_lens_refresh() {
+        // html_props (テンプレ scope ref) は当該 HTML のトークンにしか影響しないので、
+        // cross_file_lens_state_changed は false を返さねばならない
+        let mut a = HtmlChangeSnapshot {
+            html_props: HashSet::new(),
+            embedded_refs: HashSet::new(),
+            embedded_defs: HashSet::new(),
+            ng_includes: HashSet::new(),
+            ng_controllers: HashSet::new(),
+            embedded_template_bindings: HashSet::new(),
+            embedded_component_template_urls: HashSet::new(),
+        };
+        let b = HtmlChangeSnapshot {
+            html_props: HashSet::from(["foo".to_string()]),
+            embedded_refs: HashSet::new(),
+            embedded_defs: HashSet::new(),
+            ng_includes: HashSet::new(),
+            ng_controllers: HashSet::new(),
+            embedded_template_bindings: HashSet::new(),
+            embedded_component_template_urls: HashSet::new(),
+        };
+        assert_ne!(a, b);
+        assert!(
+            !a.cross_file_lens_state_changed(&b),
+            "html_props 差分は他ファイル lens に影響しないので false"
+        );
+
+        // embedded_refs も同様 (診断にしか影響しない)
+        a.embedded_refs.insert("Bar".to_string());
+        assert!(
+            !a.cross_file_lens_state_changed(&b),
+            "embedded_refs 差分も他ファイル lens に影響しない"
+        );
+    }
+
+    // -------------------- JsChangeSnapshot --------------------
+
+    #[test]
+    fn js_snapshot_empty_state_is_equal() {
+        let index = Index::new();
+        let uri = js("/app/ctrl.js");
+        let s1 = JsChangeSnapshot::capture(&index, &uri);
+        let s2 = JsChangeSnapshot::capture(&index, &uri);
+        assert_eq!(s1, s2);
+        assert!(!s1.cross_file_lens_state_changed(&s2));
+    }
+
+    #[test]
+    fn js_snapshot_detects_symbol_change() {
+        let index = Index::new();
+        let uri = js("/app/ctrl.js");
+        let before = JsChangeSnapshot::capture(&index, &uri);
+
+        add_definition(&index, "MyCtrl", &uri);
+        let after = JsChangeSnapshot::capture(&index, &uri);
+
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
+    }
+
+    #[test]
+    fn js_snapshot_detects_template_binding_change() {
+        let index = Index::new();
+        let uri = js("/app/routes.js");
+        let before = JsChangeSnapshot::capture(&index, &uri);
+
+        add_template_binding(&index, &uri, "foo.html", "FooCtrl", BindingSource::RouteProvider);
+        let after = JsChangeSnapshot::capture(&index, &uri);
+
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
+    }
+
+    #[test]
+    fn js_snapshot_detects_component_template_url_change() {
+        let index = Index::new();
+        let uri = js("/app/components.js");
+        let before = JsChangeSnapshot::capture(&index, &uri);
+
+        add_component_template_url(&index, &uri, "foo.html", Some("FooCtrl"), "$ctrl");
+        let after = JsChangeSnapshot::capture(&index, &uri);
+
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
+    }
+
+    #[test]
+    fn js_snapshot_detects_template_url_value_change_with_same_controller() {
+        // controller 名が同じでも templateUrl が変わったら lens 変更必要
+        // (例: $routeProvider.when({ templateUrl: 'foo.html' → 'bar.html', controller: 'FooCtrl' }))
+        let index = Index::new();
+        let uri = js("/app/routes.js");
+        add_template_binding(&index, &uri, "foo.html", "FooCtrl", BindingSource::RouteProvider);
+        let before = JsChangeSnapshot::capture(&index, &uri);
+
+        // 一旦クリア (実際の挙動を模す: clear + re-add)
+        index.definitions.clear_document(&uri);
+        // template_bindings を直接書き換える代わりに、別キーで追加し signature 違いを作る
+        // (実コードでは clear_template_bindings 相当の処理が走るが、ここでは新規追加で十分)
+        add_template_binding(&index, &uri, "bar.html", "FooCtrl", BindingSource::RouteProvider);
+        let after = JsChangeSnapshot::capture(&index, &uri);
+
+        // before ⊂ after だが集合は異なる → 差分検知
+        assert_ne!(before, after);
+        assert!(before.cross_file_lens_state_changed(&after));
     }
 }
