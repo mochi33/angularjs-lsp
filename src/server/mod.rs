@@ -186,13 +186,14 @@ fn collect_affected_html_uris(
     let mut affected: HashSet<Url> = HashSet::new();
 
     // 1. シンボル名参照を持つ HTML
+    //    全件 Vec clone を避けるため for_each_reference で借用イテレート
     let candidate_names: HashSet<&String> = before_symbols.union(after_symbols).collect();
     for name in candidate_names {
-        for reference in index.definitions.get_references(name) {
+        index.definitions.for_each_reference(name, |reference| {
             if is_html_file(&reference.uri) && documents.contains_key(&reference.uri) {
-                affected.insert(reference.uri);
+                affected.insert(reference.uri.clone());
             }
-        }
+        });
     }
 
     // 2. この JS で宣言されている template binding のテンプレート

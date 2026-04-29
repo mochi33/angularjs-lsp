@@ -82,6 +82,33 @@ impl DefinitionStore {
             .unwrap_or_default()
     }
 
+    /// 指定シンボル名の参照を借用イテレートする (Vec 全件 clone を回避)
+    ///
+    /// 注意: 内部で DashMap shard の read lock を保持するため、`f` 内で同じ
+    /// `DefinitionStore` を変更するメソッド (add_reference / clear_document など)
+    /// を呼ばないこと。デッドロックする可能性がある。
+    pub fn for_each_reference<F: FnMut(&SymbolReference)>(&self, name: &str, mut f: F) {
+        if let Some(refs) = self.references.get(name) {
+            for r in refs.value().iter() {
+                f(r);
+            }
+        }
+    }
+
+    /// 指定シンボル名の参照のうち述語にマッチするものがあるか (短絡評価)
+    ///
+    /// 注意: `for_each_reference` と同じくデッドロック注意。
+    pub fn any_reference<F: FnMut(&SymbolReference) -> bool>(&self, name: &str, mut f: F) -> bool {
+        if let Some(refs) = self.references.get(name) {
+            for r in refs.value().iter() {
+                if f(r) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn get_all_definitions(&self) -> Vec<Symbol> {
         self.definitions
             .iter()
@@ -483,5 +510,91 @@ mod tests {
 
         // 一方で definitions 側には 2 件残っている
         assert_eq!(store.get_definitions("Ctrl.$scope.x").len(), 2);
+    }
+
+    #[test]
+    fn for_each_reference_visits_all_refs() {
+        let store = DefinitionStore::new();
+        let uri_a = Url::parse("file:///a.js").unwrap();
+        let uri_b = Url::parse("file:///b.js").unwrap();
+
+        store.add_reference(make_reference("Ctrl.$scope.x", &uri_a));
+        store.add_reference(SymbolReference {
+            name: "Ctrl.$scope.x".to_string(),
+            uri: uri_b.clone(),
+            span: Span::new(1, 0, 1, 1),
+        });
+
+        let mut visited: Vec<Url> = Vec::new();
+        store.for_each_reference("Ctrl.$scope.x", |r| {
+            visited.push(r.uri.clone());
+        });
+        visited.sort();
+        let mut expected = vec![uri_a, uri_b];
+        expected.sort();
+        assert_eq!(visited, expected);
+    }
+
+    #[test]
+    fn for_each_reference_does_nothing_for_unknown_name() {
+        let store = DefinitionStore::new();
+        let mut count = 0;
+        store.for_each_reference("does.not.exist", |_| count += 1);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn any_reference_returns_true_when_predicate_matches() {
+        let store = DefinitionStore::new();
+        let uri_a = Url::parse("file:///a.js").unwrap();
+        let uri_b = Url::parse("file:///b.js").unwrap();
+
+        store.add_reference(make_reference("Ctrl.$scope.x", &uri_a));
+        store.add_reference(SymbolReference {
+            name: "Ctrl.$scope.x".to_string(),
+            uri: uri_b.clone(),
+            span: Span::new(1, 0, 1, 1),
+        });
+
+        assert!(store.any_reference("Ctrl.$scope.x", |r| r.uri == uri_b));
+    }
+
+    #[test]
+    fn any_reference_returns_false_when_no_match() {
+        let store = DefinitionStore::new();
+        let uri_a = Url::parse("file:///a.js").unwrap();
+        let uri_other = Url::parse("file:///other.js").unwrap();
+
+        store.add_reference(make_reference("Ctrl.$scope.x", &uri_a));
+        assert!(!store.any_reference("Ctrl.$scope.x", |r| r.uri == uri_other));
+    }
+
+    #[test]
+    fn any_reference_short_circuits_on_first_match() {
+        // 述語が複数件にマッチし得る状況で、最初の一致で停止していること
+        let store = DefinitionStore::new();
+        let uri = make_uri();
+
+        for line in 0..5u32 {
+            store.add_reference(SymbolReference {
+                name: "Ctrl.$scope.x".to_string(),
+                uri: uri.clone(),
+                span: Span::new(line, 0, line, 1),
+            });
+        }
+
+        let mut visits = 0;
+        let result = store.any_reference("Ctrl.$scope.x", |_| {
+            visits += 1;
+            true
+        });
+        assert!(result);
+        assert_eq!(visits, 1, "述語が true を返した時点で停止すべき");
+    }
+
+    #[test]
+    fn any_reference_returns_false_for_unknown_name() {
+        let store = DefinitionStore::new();
+        assert!(!store.any_reference("does.not.exist", |_| true));
     }
 }

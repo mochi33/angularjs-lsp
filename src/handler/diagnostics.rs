@@ -91,8 +91,11 @@ impl DiagnosticsHandler {
                 self.index.is_scope_variable_referenced(&symbol.name);
 
             // 他のJSファイル（他のコントローラー）からの参照があるかチェック
-            let js_refs = self.index.definitions.get_references(&symbol.name);
-            let is_referenced_in_other_js = js_refs.iter().any(|r| r.uri != *uri);
+            // any_reference で短絡評価し、Vec 全件 clone を回避
+            let is_referenced_in_other_js = self
+                .index
+                .definitions
+                .any_reference(&symbol.name, |r| r.uri != *uri);
 
             debug!(
                 "check_unused_scope_variables: symbol='{}', property='{}', html_ref={}, other_js_ref={}",
@@ -105,7 +108,10 @@ impl DiagnosticsHandler {
             }
 
             // 同一ファイル内での参照があるかチェック
-            let is_referenced_in_same_js = js_refs.iter().any(|r| r.uri == *uri);
+            let is_referenced_in_same_js = self
+                .index
+                .definitions
+                .any_reference(&symbol.name, |r| r.uri == *uri);
 
             // 警告メッセージを分岐: 完全に未参照か、同一ファイル内でのみ参照されているか
             let message = if is_referenced_in_same_js {
