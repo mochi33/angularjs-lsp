@@ -2883,3 +2883,76 @@ angular.module('app', [])
         names
     );
 }
+
+#[test]
+fn test_controller_prefix_completion_excludes_scope_methods() {
+    // controller 名をプレフィックスにした補完 (HTML 内で controller の this.X を
+    // 拾うため `complete_with_context(Some("CtrlName"), ...)` を呼ぶ経路) で
+    // `$scope.X` が "$scope.X" というラベルで Method として混入してはいけない。
+    //
+    // バグ前は `MyCtrl.$scope.update` も name が `MyCtrl.` で始まるため
+    // strip_prefix されて `$scope.update` (Method) として返ってきていた。
+    use angularjs_lsp::handler::CompletionHandler;
+    use tower_lsp::lsp_types::CompletionResponse;
+
+    let js = r#"
+angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
+    var vm = this;
+    vm.refresh = function() {};
+    $scope.update = function() {};
+}]);
+"#;
+    let index = analyze_js(js);
+    let handler = CompletionHandler::new(index);
+
+    let resp = handler
+        .complete_with_context(Some("MyCtrl"), None, &[])
+        .expect("controller prefix で補完応答が返るべき");
+    let labels: Vec<String> = match resp {
+        CompletionResponse::Array(items) => items.into_iter().map(|i| i.label).collect(),
+        _ => panic!("Array response 期待"),
+    };
+
+    assert!(
+        labels.iter().any(|l| l == "refresh"),
+        "this.refresh は controller プレフィックス補完に含まれるべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("$scope.")),
+        "$scope.X は controller プレフィックス補完に混入してはいけない (labels: {:?})",
+        labels
+    );
+}
+
+#[test]
+fn test_html_completion_does_not_duplicate_scope_method_with_dollar_scope_label() {
+    // HTML 内の {{ }} 補完で `$scope.update = function() {}` を定義した場合、
+    // `update` (Function) のみが候補に出るべきで、`$scope.update` (Method) が
+    // 並んで出てはいけない。
+    use angularjs_lsp::handler::CompletionHandler;
+
+    let js = r#"
+angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
+    $scope.update = function() {};
+}]);
+"#;
+    let html = r#"<div ng-controller="MyCtrl">{{ }}</div>"#;
+    let index = analyze_html(js, html);
+    let handler = CompletionHandler::new(index);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let items = handler.complete_in_html_angular_context(&html_uri, 0);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.contains(&"update"),
+        "HTML 補完に 'update' が含まれるべき (labels: {:?})",
+        labels
+    );
+    assert!(
+        !labels.contains(&"$scope.update"),
+        "HTML 補完に '$scope.update' という重複候補が含まれてはいけない (labels: {:?})",
+        labels
+    );
+}
