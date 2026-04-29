@@ -163,11 +163,6 @@ Create an `ajsconfig.json` file in your project root to customize the language s
 }
 ```
 
-> **Note**: Interpolation delimiters (`{{` / `}}`) are **not** configured here.
-> The language server detects them from `$interpolateProvider.startSymbol(...)` /
-> `.endSymbol(...)` calls in your AngularJS source. See
-> [Interpolation symbols](#interpolation-symbols) for details.
-
 ### Options
 
 | Option | Type | Default | Description |
@@ -202,30 +197,6 @@ By default, the following patterns are excluded:
   "exclude": ["**/test/**", "**/spec/**", "**/*.spec.js", "**/*.test.js"]
 }
 ```
-
-### Interpolation symbols
-
-The language server resolves AngularJS interpolation delimiters from your JS source by
-detecting `$interpolateProvider.startSymbol(...)` / `.endSymbol(...)` calls.
-This matches AngularJS's actual runtime behavior, so there is no separate LSP config to keep in sync.
-
-```js
-angular.module('app', [])
-  .config(['$interpolateProvider', function($interpolateProvider) {
-    $interpolateProvider.startSymbol('[[');
-    $interpolateProvider.endSymbol(']]');
-  }]);
-```
-
-The following invocation patterns are all recognized:
-
-- Implicit DI: `function($interpolateProvider) { $interpolateProvider.startSymbol('[[') }`
-- Array-style DI with rename: `['$interpolateProvider', function(ip) { ip.startSymbol('[[') }]`
-- Chained calls: `.startSymbol('[[').endSymbol(']]')`
-
-`start` and `end` are resolved independently, so projects that customize only one side
-(e.g., `startSymbol('[[')` while keeping `}}` as the end) still work correctly.
-If neither call is found, the AngularJS default `{{` / `}}` is used.
 
 **Disable diagnostics or change severity:**
 ```json

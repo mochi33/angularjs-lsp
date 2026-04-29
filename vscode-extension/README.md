@@ -60,11 +60,6 @@ Create an `ajsconfig.json` file in your project root to customize behavior:
 }
 ```
 
-> **Note**: Interpolation delimiters (`{{` / `}}`) are **not** configured here.
-> They are detected from `$interpolateProvider.startSymbol(...)` /
-> `.endSymbol(...)` calls in your AngularJS source.
-> See [Interpolation symbols](#interpolation-symbols) below.
-
 ### Options
 
 | Option | Type | Default | Description |
@@ -83,20 +78,6 @@ By default, the following patterns are excluded:
 - `**/dist/**`
 - `**/build/**`
 - `**/.*/**` (hidden files/directories)
-
-### Interpolation symbols
-
-The language server detects `{{ }}` (or your custom delimiters) from `$interpolateProvider`
-calls in your AngularJS source — no LSP-specific config is needed. Implicit DI, array-style
-DI rename, and chained calls are all recognized:
-
-```js
-angular.module('app').config(['$interpolateProvider', function(ip) {
-  ip.startSymbol('[[').endSymbol(']]');
-}]);
-```
-
-If no such call is found, the AngularJS default `{{` / `}}` is used.
 
 ## Commands
 
