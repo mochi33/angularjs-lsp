@@ -3,7 +3,7 @@ use tower_lsp::lsp_types::Url;
 
 use crate::model::{
     HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable, HtmlLocalVariableReference,
-    HtmlNgModelTarget, HtmlScopeReference,
+    HtmlNgModelTarget, HtmlScopeReference, HtmlUiSrefReference,
 };
 
 /// HTMLスコープ参照・ローカル変数・フォーム・ディレクティブの管理ストア
@@ -23,6 +23,9 @@ pub struct HtmlStore {
     /// ng-model がバインドする箇所があれば暗黙的に scope に存在するとみなす
     /// (診断の false positive 抑制用)
     ng_model_targets: DashMap<Url, Vec<HtmlNgModelTarget>>,
+    /// HTML 内の ui-router `ui-sref="state"` 参照 (URI -> Vec<HtmlUiSrefReference>)
+    /// state 名 → state 定義へのジャンプ・ホバー解決に使う
+    ui_sref_references: DashMap<Url, Vec<HtmlUiSrefReference>>,
 }
 
 impl HtmlStore {
@@ -34,6 +37,7 @@ impl HtmlStore {
             html_form_bindings: DashMap::new(),
             html_directive_references: DashMap::new(),
             ng_model_targets: DashMap::new(),
+            ui_sref_references: DashMap::new(),
         }
     }
 
@@ -423,6 +427,60 @@ impl HtmlStore {
             .collect()
     }
 
+    // ========== ui-sref ==========
+
+    pub fn add_ui_sref_reference(&self, reference: HtmlUiSrefReference) {
+        let uri = reference.uri.clone();
+        self.ui_sref_references
+            .entry(uri)
+            .or_default()
+            .push(reference);
+    }
+
+    pub fn find_ui_sref_reference_at(
+        &self,
+        uri: &Url,
+        line: u32,
+        col: u32,
+    ) -> Option<HtmlUiSrefReference> {
+        if let Some(refs) = self.ui_sref_references.get(uri) {
+            for r in refs.iter() {
+                if r.span().contains(line, col) {
+                    return Some(r.clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_ui_sref_references_for_uri(&self, uri: &Url) -> Vec<HtmlUiSrefReference> {
+        self.ui_sref_references
+            .get(uri)
+            .map(|v| v.value().clone())
+            .unwrap_or_default()
+    }
+
+    /// 指定 state 名にマッチする全 ui-sref 参照を返す
+    pub fn get_ui_sref_references_by_state(&self, state_name: &str) -> Vec<HtmlUiSrefReference> {
+        let mut result = Vec::new();
+        for entry in self.ui_sref_references.iter() {
+            for r in entry.value().iter() {
+                if r.state_name == state_name {
+                    result.push(r.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// 全 ui-sref 参照を取得 (キャッシュ用)
+    pub fn get_all_ui_sref_references_for_cache(&self) -> Vec<HtmlUiSrefReference> {
+        self.ui_sref_references
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
     // ========== クリア ==========
 
     /// HTML参照情報のみをクリア（Pass 3で収集する情報）
@@ -434,6 +492,7 @@ impl HtmlStore {
         }
         self.html_directive_references.remove(uri);
         self.ng_model_targets.remove(uri);
+        self.ui_sref_references.remove(uri);
     }
 
     pub fn clear_document(&self, uri: &Url) {
@@ -445,6 +504,7 @@ impl HtmlStore {
         self.html_form_bindings.remove(uri);
         self.html_directive_references.remove(uri);
         self.ng_model_targets.remove(uri);
+        self.ui_sref_references.remove(uri);
     }
 
     pub fn clear_all(&self) {
@@ -454,6 +514,7 @@ impl HtmlStore {
         self.html_form_bindings.clear();
         self.html_directive_references.clear();
         self.ng_model_targets.clear();
+        self.ui_sref_references.clear();
     }
 }
 
