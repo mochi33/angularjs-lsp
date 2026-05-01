@@ -161,6 +161,34 @@ pub enum DirectiveUsageType {
     Attribute,
 }
 
+/// `ng-model="X"` のターゲットとなるスコープパス。
+///
+/// AngularJS では `ng-model` は **書き込み可能なスコープパス** を取り、ディレクティブが
+/// 実行時に対象 \$scope のプロパティを生成・更新する。すなわち
+/// `<input ng-model="currentPage">` を書けば controller 側で
+/// `$scope.currentPage = ...` を明示的に書かなくても \$scope にプロパティが
+/// 生まれる。LSP の診断ではこのケースを controller 側の明示的定義と同等に扱う
+/// ための **暗黙的定義** (implicit definition) のレコードとして使う。
+///
+/// 同名の明示的 `$scope.X = ...` 定義が controller にある場合は、そちらが
+/// canonical な定義として優先される。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HtmlNgModelTarget {
+    /// `ng-model` の値そのもの (例: "currentPage", "vm.currentPage", "user.profile.name")
+    pub property_path: String,
+    pub uri: Url,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
+impl HtmlNgModelTarget {
+    pub fn span(&self) -> Span {
+        Span::new(self.start_line, self.start_col, self.end_line, self.end_col)
+    }
+}
+
 /// HTML内のカスタムディレクティブ参照
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HtmlDirectiveReference {

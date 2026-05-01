@@ -4,7 +4,7 @@ use tower_lsp::lsp_types::Url;
 use tree_sitter::Node;
 
 use super::directives::is_directive_attribute;
-use crate::model::HtmlScopeReference;
+use crate::model::{HtmlNgModelTarget, HtmlScopeReference};
 
 use super::HtmlAngularJsAnalyzer;
 
@@ -67,6 +67,23 @@ impl HtmlAngularJsAnalyzer {
                             // 属性値全体をAngular式として解析
                             let property_paths = self.parse_angular_expression(value, &attr_name);
                             self.register_scope_references(uri, value, &property_paths, value_start_line as u32, value_start_col);
+
+                            // ng-model="X" の値は \$scope への書き込みを行うので、
+                            // 暗黙的な scope property 定義として記録する
+                            // (controller 側で `$scope.X = ...` を書かなくても診断で
+                            //  「未定義」と判定されないようにするため)
+                            if attr_name == "ng-model" || attr_name == "data-ng-model" {
+                                let target = HtmlNgModelTarget {
+                                    property_path: value.to_string(),
+                                    uri: uri.clone(),
+                                    start_line: value_start_line as u32,
+                                    start_col: value_start_col,
+                                    end_line: value_start_line as u32,
+                                    end_col: value_start_col
+                                        + value.chars().map(|c| c.len_utf16()).sum::<usize>() as u32,
+                                };
+                                self.index.html.add_ng_model_target(target);
+                            }
                         } else {
                             // 非ディレクティブ属性: インターポレーションのみを抽出
                             self.extract_interpolation_references_from_attribute(value, value_node, source, uri);

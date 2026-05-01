@@ -2982,6 +2982,150 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
 }
 
 #[test]
+fn test_ng_model_implicit_scope_def_suppresses_diagnostic_bare() {
+    // controller で `$scope.currentPage` を明示的に定義していなくても、
+    // `ng-model="currentPage"` があれば AngularJS が \$scope.currentPage を
+    // 自動生成するため、診断で「未定義」警告を出してはいけない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    // $scope.currentPage は明示的に書かない
+    $scope.totalItems = 100;
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage" total-items="totalItems"></uib-pagination>
+    <p>Page: {{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'currentPage'"),
+            "ng-model='currentPage' があるので暗黙的に scope に定義されるとみなし、\
+             '{{{{ currentPage }}}}' に対して診断を出してはいけない (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_ng_model_implicit_scope_def_with_alias() {
+    // `ng-model="vm.currentPage"` のように alias.property 形式でも、
+    // `vm` が controller alias に解決できれば暗黙的 def として扱う。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    $scope.totalItems = 100;
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl as vm">
+    <uib-pagination ng-model="vm.currentPage" total-items="vm.totalItems"></uib-pagination>
+    <p>Page: {{ vm.currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'currentPage'"),
+            "ng-model='vm.currentPage' があるので暗黙的に scope に定義される \
+             (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_explicit_scope_def_takes_precedence_over_ng_model_implicit() {
+    // controller 側で `$scope.currentPage = 1` と明示的に定義していれば、
+    // ng-model の有無にかかわらず警告は出ない (現状の挙動を保証)。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    $scope.currentPage = 1;
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage"></uib-pagination>
+    <p>{{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("'currentPage'")),
+        "明示的定義があるので診断は出ないべき (msgs: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_ng_model_implicit_def_does_not_cross_controllers() {
+    // CtrlA に ng-model="x"、CtrlB に scope ref `{{ x }}` のように
+    // 別 controller scope だと暗黙的 def が漏れて適用されてはいけない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', [])
+    .controller('CtrlA', ['$scope', function($scope) {}])
+    .controller('CtrlB', ['$scope', function($scope) {}]);
+"#;
+    let html = r#"
+<div ng-controller="CtrlA">
+    <input ng-model="x" />
+</div>
+<div ng-controller="CtrlB">
+    <p>{{ x }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    let has_x_warning = diagnostics
+        .iter()
+        .any(|d| d.message.contains("'x'") && d.message.contains("not defined"));
+    assert!(
+        has_x_warning,
+        "別 controller scope の ng-model は暗黙的 def に流用されてはいけない \
+         (CtrlB の '{{{{ x }}}}' に対する警告が出るべき)。\
+         diagnostics: {:?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_html_completion_does_not_duplicate_scope_method_with_dollar_scope_label() {
     // HTML 内の {{ }} 補完で `$scope.update = function() {}` を定義した場合、
     // `update` (Function) のみが候補に出るべきで、`$scope.update` (Method) が
