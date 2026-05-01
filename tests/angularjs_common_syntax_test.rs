@@ -2981,6 +2981,267 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
     );
 }
 
+// ====================================================================
+// PR #41: literal value directives (ng-message / ng-switch-when / ng-pattern / ng-src)
+// ====================================================================
+
+#[test]
+fn test_ng_message_value_is_not_treated_as_scope_reference() {
+    // `ng-message="required"` の値は AngularJS の検証キー名 (validation key) であり
+    // スコープ参照ではない。Angular 式として解析すると `required` を $scope の
+    // プロパティとして登録してしまい、診断で「未定義」警告が誤検出される。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('FormCtrl', ['$scope', function($scope) {
+    $scope.user = {};
+}]);
+"#;
+    let html = r#"
+<div ng-controller="FormCtrl">
+    <form name="myForm">
+        <input ng-model="user.name" required />
+        <div ng-messages="myForm.user.$error">
+            <div ng-message="required">Required</div>
+            <div ng-message="minlength">Too short</div>
+        </div>
+        <ng-messages-include src="error-messages.html"></ng-messages-include>
+    </form>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // ng-message の値はスコープ参照として登録されないこと
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        !names.contains(&"required"),
+        "ng-message=\"required\" の値はスコープ参照として登録されてはいけない (refs: {:?})",
+        names
+    );
+    assert!(
+        !names.contains(&"minlength"),
+        "ng-message=\"minlength\" の値はスコープ参照として登録されてはいけない (refs: {:?})",
+        names
+    );
+
+    // 診断にも「Property required is not defined」が出ないこと
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    for d_msg in &messages {
+        assert!(
+            !d_msg.contains("'required'") && !d_msg.contains("'minlength'"),
+            "ng-message の値に対して診断が出てはいけない (diagnostic: {})",
+            d_msg
+        );
+    }
+}
+
+#[test]
+fn test_ng_messages_value_is_still_treated_as_expression() {
+    // `ng-messages="myForm.field.$error"` (複数形) の方は **式**。
+    // ng-message (単数) との対比で挙動が分かれることを保証。
+    let js = r#"
+angular.module('app', []).controller('FormCtrl', ['$scope', function($scope) {
+    $scope.myForm = {};
+}]);
+"#;
+    let html = r#"
+<div ng-controller="FormCtrl">
+    <div ng-messages="myForm.field.$error"></div>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("myForm")),
+        "ng-messages の値は式として解析され myForm... が登録されるべき (refs: {:?})",
+        names
+    );
+}
+
+#[test]
+fn test_ng_switch_when_value_is_not_treated_as_scope_reference() {
+    // `ng-switch-when="red"` の値は ng-switch の評価結果と string match される
+    // case ラベルでありスコープ参照ではない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('PaletteCtrl', ['$scope', function($scope) {
+    $scope.color = 'red';
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaletteCtrl" ng-switch="color">
+    <div ng-switch-when="red">Red</div>
+    <div ng-switch-when="blue">Blue</div>
+    <div ng-switch-when="green">Green</div>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    for case_label in &["red", "blue", "green"] {
+        assert!(
+            !names.contains(case_label),
+            "ng-switch-when=\"{}\" の値はスコープ参照として登録されてはいけない (refs: {:?})",
+            case_label,
+            names
+        );
+    }
+    // ng-switch="color" の方は引き続き式として解析される
+    assert!(
+        names.contains(&"color"),
+        "ng-switch の値は式として解析され color が登録されるべき (refs: {:?})",
+        names
+    );
+
+    // 診断にも case ラベルに対する false positive が出ないこと
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    for d in &diagnostics {
+        for case_label in &["red", "blue", "green"] {
+            assert!(
+                !d.message.contains(&format!("'{}'", case_label)),
+                "ng-switch-when の値 '{}' に対して診断が出てはいけない (diagnostic: {})",
+                case_label,
+                d.message
+            );
+        }
+    }
+}
+
+#[test]
+fn test_ng_pattern_value_is_not_treated_as_scope_reference() {
+    // `ng-pattern="/^\d+$/"` のような正規表現リテラルは scope 参照ではなく、
+    // インライン正規表現として AngularJS が `$eval` する。tree-sitter-javascript
+    // が regex literal を解釈するので false positive は出にくいが、念のため
+    // 文字列フォーム `ng-pattern="^[a-z]+$"` のようなパターンも literal として
+    // 扱い scope ref にしない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('FormCtrl', ['$scope', function($scope) {
+    $scope.username = '';
+}]);
+"#;
+    // 文字列形式の pattern (一見 identifier 風に見える単語が含まれる例)
+    let html = r#"
+<div ng-controller="FormCtrl">
+    <input ng-model="username" ng-pattern="alphaPattern" />
+    <input ng-model="username" ng-pattern="/^[a-z]+$/" />
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // ng-pattern の値はスコープ参照として登録されない
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        !names.contains(&"alphaPattern"),
+        "ng-pattern=\"alphaPattern\" の値はスコープ参照として登録されてはいけない (refs: {:?})",
+        names
+    );
+
+    // 診断にも出ない
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'alphaPattern'"),
+            "ng-pattern の値に対して診断が出てはいけない (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_ng_src_value_is_not_treated_as_bare_scope_reference() {
+    // `ng-src="vm.imageUrl"` (bare expression として書く) でも、AngularJS は
+    // 補間テンプレートとしてのみ評価するため scope 参照には展開されない。
+    // bare 形式は誤用なので scope ref として登録しない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('GalleryCtrl', ['$scope', function($scope) {
+    $scope.imageUrl = '/path/to/image.png';
+}]);
+"#;
+    let html = r#"
+<div ng-controller="GalleryCtrl">
+    <img ng-src="bareExpression" />
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        !names.contains(&"bareExpression"),
+        "ng-src=\"bareExpression\" は scope 参照として登録されてはいけない (refs: {:?})",
+        names
+    );
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'bareExpression'"),
+            "ng-src の bare 値に対して診断が出てはいけない (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_ng_src_interpolation_is_still_extracted() {
+    // `ng-src="{{vm.imageUrl}}"` のように補間が含まれる場合は、補間内の
+    // `vm.imageUrl` は scope 参照として登録される (interpolation-only branch を
+    // 通るため)。これが現状の挙動を保つ regression check。
+    let js = r#"
+angular.module('app', []).controller('GalleryCtrl', ['$scope', function($scope) {
+    $scope.imageUrl = '/path/to/image.png';
+}]);
+"#;
+    let html = r#"
+<div ng-controller="GalleryCtrl">
+    <img ng-src="{{ imageUrl }}" />
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        names.contains(&"imageUrl"),
+        "ng-src 内の {{{{ imageUrl }}}} 補間は scope 参照として登録されるべき (refs: {:?})",
+        names
+    );
+}
+
+// ====================================================================
+// PR #42: ng-model implicit \$scope definition
+// (diagnostic suppression + goto-definition / hover fallback)
+// ====================================================================
+
 #[test]
 fn test_ng_model_implicit_scope_def_suppresses_diagnostic_bare() {
     // controller で `$scope.currentPage` を明示的に定義していなくても、
@@ -3151,20 +3412,13 @@ angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scop
     let index = analyze_html(js, html);
     let html_uri = Url::parse("file:///test.html").unwrap();
 
-    // `{{ currentPage }}` の `currentPage` 上で goto definition
-    // line=3 (0-indexed), col 範囲 to "currentPage" inside `{{ }}`
-    // HTML:
-    //   line 0: ""
-    //   line 1: <div ng-controller="...">
-    //   line 2:     <uib-pagination ng-model="currentPage"></uib-pagination>
-    //   line 3:     <p>{{ currentPage }}</p>
     let handler = DefinitionHandler::new(Arc::clone(&index));
     let params = GotoDefinitionParams {
         text_document_position_params: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier {
                 uri: html_uri.clone(),
             },
-            // 行 3, "currentPage" の中 (col 12 あたり)
+            // 行 3, "currentPage" の中 (col 14 あたり)
             position: Position { line: 3, character: 14 },
         },
         work_done_progress_params: WorkDoneProgressParams::default(),

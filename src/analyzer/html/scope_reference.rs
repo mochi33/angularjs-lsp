@@ -3,7 +3,7 @@
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Node;
 
-use super::directives::is_directive_attribute;
+use super::directives::{is_directive_attribute, is_literal_value_directive};
 use crate::model::{HtmlNgModelTarget, HtmlScopeReference};
 
 use super::HtmlAngularJsAnalyzer;
@@ -62,9 +62,12 @@ impl HtmlAngularJsAnalyzer {
                             &attr_name,
                             element_tag_name.as_deref(),
                             &self.index,
-                        ) {
+                        ) && !is_literal_value_directive(&attr_name)
+                        {
                             // ngディレクティブ または custom directive / component binding:
                             // 属性値全体をAngular式として解析
+                            // (ただし `ng-message` / `ng-messages-include` のような
+                            //  リテラル文字列扱いのディレクティブは除外)
                             let property_paths = self.parse_angular_expression(value, &attr_name);
                             self.register_scope_references(uri, value, &property_paths, value_start_line as u32, value_start_col);
 
@@ -85,7 +88,9 @@ impl HtmlAngularJsAnalyzer {
                                 self.index.html.add_ng_model_target(target);
                             }
                         } else {
-                            // 非ディレクティブ属性: インターポレーションのみを抽出
+                            // 非ディレクティブ属性 または リテラル値ディレクティブ:
+                            // インターポレーションのみを抽出 (例: `ng-message="{{key}}"` のように
+                            //   稀にインターポレーションが含まれる可能性に備える)
                             self.extract_interpolation_references_from_attribute(value, value_node, source, uri);
                         }
                     }
