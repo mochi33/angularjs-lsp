@@ -156,7 +156,28 @@ impl Index {
         controller_name: &str,
         property: &str,
     ) -> bool {
-        for target in self.html.get_ng_model_targets_for_uri(uri) {
+        self.find_ng_model_implicit_def_target(uri, controller_name, property)
+            .is_some()
+    }
+
+    /// `<input ng-model="X">` の暗黙的 scope 定義がある場合、その ng-model
+    /// ターゲット (位置情報付き) を返す。`has_ng_model_implicit_def` の
+    /// 「位置を返す」版で、goto-definition / hover の最終フォールバックに使う。
+    ///
+    /// 複数マッチがある場合は **より早い位置 (line, col 順)** に出現するものを
+    /// 返す (決定的)。
+    pub fn find_ng_model_implicit_def_target(
+        &self,
+        uri: &Url,
+        controller_name: &str,
+        property: &str,
+    ) -> Option<crate::model::HtmlNgModelTarget> {
+        let mut targets = self.html.get_ng_model_targets_for_uri(uri);
+        targets.sort_by(|a, b| {
+            (a.start_line, a.start_col).cmp(&(b.start_line, b.start_col))
+        });
+
+        for target in targets {
             let target_property = ng_model_target_tail(&target.property_path);
             if target_property != property {
                 continue;
@@ -180,10 +201,10 @@ impl Index {
             };
 
             if target_controllers.iter().any(|c| c == controller_name) {
-                return true;
+                return Some(target);
             }
         }
-        false
+        None
     }
 
     /// HTMLファイルに対応するコントローラー名を解決

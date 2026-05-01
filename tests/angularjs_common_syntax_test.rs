@@ -3126,6 +3126,171 @@ angular.module('app', [])
 }
 
 #[test]
+fn test_goto_definition_falls_back_to_ng_model_target() {
+    // controller で明示的に \$scope.X を定義していない場合、`{{ X }}` への
+    // goto definition は ng-model="X" の位置に飛ぶべき (旧来は None で
+    // カーソルがその場に留まる挙動だった)。
+    use angularjs_lsp::handler::DefinitionHandler;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        GotoDefinitionParams, GotoDefinitionResponse, PartialResultParams, Position,
+        TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    // currentPage は明示的に書かない
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage"></uib-pagination>
+    <p>{{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // `{{ currentPage }}` の `currentPage` 上で goto definition
+    // line=3 (0-indexed), col 範囲 to "currentPage" inside `{{ }}`
+    // HTML:
+    //   line 0: ""
+    //   line 1: <div ng-controller="...">
+    //   line 2:     <uib-pagination ng-model="currentPage"></uib-pagination>
+    //   line 3:     <p>{{ currentPage }}</p>
+    let handler = DefinitionHandler::new(Arc::clone(&index));
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: html_uri.clone(),
+            },
+            // 行 3, "currentPage" の中 (col 12 あたり)
+            position: Position { line: 3, character: 14 },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let response = handler
+        .goto_definition(params)
+        .expect("ng-model 経由で definition が返るべき");
+
+    let location = match response {
+        GotoDefinitionResponse::Scalar(loc) => loc,
+        GotoDefinitionResponse::Array(locs) => locs.into_iter().next().expect("at least one"),
+        GotoDefinitionResponse::Link(_) => panic!("unexpected Link response"),
+    };
+
+    assert_eq!(location.uri, html_uri, "definition は同じ HTML 内");
+    // ng-model="currentPage" の値の位置 (line 2)
+    assert_eq!(
+        location.range.start.line, 2,
+        "ng-model の位置 (line 2) に飛ぶべき, 実際 = {:?}",
+        location.range
+    );
+}
+
+#[test]
+fn test_explicit_def_takes_precedence_in_goto_definition() {
+    // 明示的に \$scope.X が controller にあれば、ng-model でなく controller の
+    // 位置にジャンプする (canonical 定義は明示的なほう)。
+    use angularjs_lsp::handler::DefinitionHandler;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        GotoDefinitionParams, GotoDefinitionResponse, PartialResultParams, Position,
+        TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    $scope.currentPage = 1;
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage"></uib-pagination>
+    <p>{{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let js_uri = Url::parse("file:///test.js").unwrap();
+
+    let handler = DefinitionHandler::new(Arc::clone(&index));
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: html_uri.clone(),
+            },
+            position: Position { line: 3, character: 14 },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let response = handler.goto_definition(params).expect("definition 返る");
+
+    let location = match response {
+        GotoDefinitionResponse::Scalar(loc) => loc,
+        GotoDefinitionResponse::Array(locs) => locs.into_iter().next().expect("at least one"),
+        GotoDefinitionResponse::Link(_) => panic!("unexpected Link"),
+    };
+
+    assert_eq!(
+        location.uri, js_uri,
+        "明示的定義のある JS ファイルにジャンプすべき"
+    );
+}
+
+#[test]
+fn test_hover_falls_back_to_ng_model_target() {
+    // controller で明示的に \$scope.X を定義していない場合でも、`{{ X }}` への
+    // hover で ng-model="X" を definition source として情報表示する。
+    use angularjs_lsp::handler::HoverHandler;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        HoverContents, HoverParams, Position, TextDocumentIdentifier,
+        TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage"></uib-pagination>
+    <p>{{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let handler = HoverHandler::new(Arc::clone(&index));
+    let params = HoverParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: html_uri.clone(),
+            },
+            position: Position { line: 3, character: 14 },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+    let hover = handler.hover(params).expect("hover が返るべき");
+    let value = match hover.contents {
+        HoverContents::Markup(m) => m.value,
+        _ => panic!("expected Markup hover"),
+    };
+    assert!(
+        value.contains("ng-model"),
+        "hover に ng-model 経由の暗黙定義であることが示されるべき (value: {})",
+        value
+    );
+    assert!(
+        value.contains("currentPage"),
+        "hover に property 名 currentPage が含まれるべき (value: {})",
+        value
+    );
+}
+
+#[test]
 fn test_html_completion_does_not_duplicate_scope_method_with_dollar_scope_label() {
     // HTML 内の {{ }} 補完で `$scope.update = function() {}` を定義した場合、
     // `update` (Function) のみが候補に出るべきで、`$scope.update` (Method) が
