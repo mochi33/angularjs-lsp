@@ -3119,6 +3119,121 @@ angular.module('app', []).controller('PaletteCtrl', ['$scope', function($scope) 
 }
 
 #[test]
+fn test_ng_pattern_value_is_not_treated_as_scope_reference() {
+    // `ng-pattern="/^\d+$/"` のような正規表現リテラルは scope 参照ではなく、
+    // インライン正規表現として AngularJS が `$eval` する。tree-sitter-javascript
+    // が regex literal を解釈するので false positive は出にくいが、念のため
+    // 文字列フォーム `ng-pattern="^[a-z]+$"` のようなパターンも literal として
+    // 扱い scope ref にしない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('FormCtrl', ['$scope', function($scope) {
+    $scope.username = '';
+}]);
+"#;
+    // 文字列形式の pattern (一見 identifier 風に見える単語が含まれる例)
+    let html = r#"
+<div ng-controller="FormCtrl">
+    <input ng-model="username" ng-pattern="alphaPattern" />
+    <input ng-model="username" ng-pattern="/^[a-z]+$/" />
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // ng-pattern の値はスコープ参照として登録されない
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        !names.contains(&"alphaPattern"),
+        "ng-pattern=\"alphaPattern\" の値はスコープ参照として登録されてはいけない (refs: {:?})",
+        names
+    );
+
+    // 診断にも出ない
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'alphaPattern'"),
+            "ng-pattern の値に対して診断が出てはいけない (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_ng_src_value_is_not_treated_as_bare_scope_reference() {
+    // `ng-src="vm.imageUrl"` (bare expression として書く) でも、AngularJS は
+    // 補間テンプレートとしてのみ評価するため scope 参照には展開されない。
+    // bare 形式は誤用なので scope ref として登録しない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('GalleryCtrl', ['$scope', function($scope) {
+    $scope.imageUrl = '/path/to/image.png';
+}]);
+"#;
+    let html = r#"
+<div ng-controller="GalleryCtrl">
+    <img ng-src="bareExpression" />
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        !names.contains(&"bareExpression"),
+        "ng-src=\"bareExpression\" は scope 参照として登録されてはいけない (refs: {:?})",
+        names
+    );
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'bareExpression'"),
+            "ng-src の bare 値に対して診断が出てはいけない (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_ng_src_interpolation_is_still_extracted() {
+    // `ng-src="{{vm.imageUrl}}"` のように補間が含まれる場合は、補間内の
+    // `vm.imageUrl` は scope 参照として登録される (interpolation-only branch を
+    // 通るため)。これが現状の挙動を保つ regression check。
+    let js = r#"
+angular.module('app', []).controller('GalleryCtrl', ['$scope', function($scope) {
+    $scope.imageUrl = '/path/to/image.png';
+}]);
+"#;
+    let html = r#"
+<div ng-controller="GalleryCtrl">
+    <img ng-src="{{ imageUrl }}" />
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        names.contains(&"imageUrl"),
+        "ng-src 内の {{{{ imageUrl }}}} 補間は scope 参照として登録されるべき (refs: {:?})",
+        names
+    );
+}
+
+#[test]
 fn test_html_completion_does_not_duplicate_scope_method_with_dollar_scope_label() {
     // HTML 内の {{ }} 補完で `$scope.update = function() {}` を定義した場合、
     // `update` (Function) のみが候補に出るべきで、`$scope.update` (Method) が

@@ -94,24 +94,38 @@ pub fn is_ng_directive(attr_name: &str) -> bool {
     NG_DIRECTIVE_SET.contains(attr_name)
 }
 
-/// 値が **Angular 式ではなくリテラル文字列** として解釈されるディレクティブ集合。
+/// 値が **Angular 式ではなくリテラル文字列 / 正規表現 / 補間テンプレート**
+/// として解釈されるディレクティブ集合。
 ///
-/// これらはディレクティブ自体は AngularJS が認識するが、属性値はスコープ参照では
-/// なく単なる文字列キー / URL として扱われる:
+/// これらはディレクティブ自体は AngularJS が認識するが、属性値はスコープ参照
+/// として解析するべきではない:
+///
+/// **literal string match 系:**
 /// - `ng-message="required"` — `$error.required` の検証キー名
 /// - `ng-messages-include="error-messages.html"` — テンプレート URL
 /// - `ng-switch-when="red"` — `ng-switch` の値との string match (case ラベル)
 ///
-/// これらに対して値を Angular 式として解析すると、`$scope.required` / `$scope.red`
-/// 等のような false positive な scope reference が登録され、診断で「未定義」警告
-/// が出てしまう。
+/// **regex literal 系:**
+/// - `ng-pattern="/^\d+$/"` — 値は正規表現リテラルまたは正規表現文字列。
+///   AngularJS が `$eval` の結果を `RegExp` として使う。一般的な使用は
+///   インライン正規表現で scope 変数参照ではない
+///
+/// **interpolation-only template 系:**
+/// - `ng-src="{{vm.imageUrl}}"` — 値は補間テンプレート (`{{}}` を含む文字列)。
+///   AngularJS は補間後の文字列を src 属性に設定する。bare expression として
+///   `ng-src="vm.imageUrl"` と書いても展開されないので、補間のみ抽出すれば足りる
 ///
 /// 参考: AngularJS source (`ngSwitchWhenDirective`) は `attrs.ngSwitchWhen` を
 /// `$eval` せず literal として `ctrl.cases['!' + value]` のキーに使っている。
 static LITERAL_VALUE_DIRECTIVE_SET: phf::Set<&'static str> = phf_set! {
+    // literal string match
     "ng-message", "data-ng-message",
     "ng-messages-include", "data-ng-messages-include",
     "ng-switch-when", "data-ng-switch-when",
+    // regex literal
+    "ng-pattern", "data-ng-pattern",
+    // interpolation-only template
+    "ng-src", "data-ng-src",
 };
 
 /// 属性値が Angular 式ではなくリテラル文字列として解釈されるディレクティブか判定
