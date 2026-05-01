@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::*;
 use crate::index::Index;
 use crate::model::{
     DirectiveUsageType, HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable,
-    HtmlLocalVariableSource,
+    HtmlLocalVariableSource, HtmlNgModelTarget,
 };
 use crate::util::is_html_file;
 
@@ -156,7 +156,55 @@ impl HoverHandler {
             }
         }
 
+        // 6. ng-model 経由の暗黙的定義を最終フォールバック
+        // (controller 側で明示的に書いていなくても、HTML 上の ng-model が
+        //  \$scope に property を生成するため、その情報を表示する)
+        for controller_name in &controllers {
+            if let Some(target) = self.index.find_ng_model_implicit_def_target(
+                uri,
+                controller_name,
+                &property_path,
+            ) {
+                return self.build_hover_for_ng_model_target(&target, controller_name);
+            }
+        }
+
         None
+    }
+
+    /// ng-model 暗黙的定義用のホバー情報を構築
+    fn build_hover_for_ng_model_target(
+        &self,
+        target: &HtmlNgModelTarget,
+        controller_name: &str,
+    ) -> Option<Hover> {
+        let file_name = target
+            .uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| target.uri.to_string());
+
+        let content = format!(
+            "**{}** (*ng-model implicit `$scope` property*)\n\n\
+            Bound via `ng-model` (`$scope` of `{}`).\n\n\
+            Defined at: `{}:{}`\n\n\
+            ---\n\n\
+            AngularJS auto-creates this property on `$scope` when the binding fires. \
+            For clarity, consider initializing it explicitly in the controller.",
+            target.property_path,
+            controller_name,
+            file_name,
+            target.start_line + 1,
+        );
+
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: None,
+        })
     }
 
     /// シンボル名からホバー情報を構築

@@ -340,8 +340,29 @@ impl DefinitionHandler {
             return Some(GotoDefinitionResponse::Array(locations));
         }
 
+        // 7. ng-model 経由の暗黙的 scope 定義を最終フォールバック
+        // (controller 側で明示的に \$scope.X = ... を書いていなくても、
+        //  HTML 上に <input ng-model="X"> があれば AngularJS が自動的に
+        //  \$scope.X を生成するため、その ng-model 位置を definition と扱う)
+        for controller_name in &controllers {
+            if let Some(target) = self.index.find_ng_model_implicit_def_target(
+                uri,
+                controller_name,
+                &property_path,
+            ) {
+                debug!(
+                    "goto_definition_from_html: '{}' resolved via ng-model implicit def at {}:{}",
+                    property_path, target.start_line, target.start_col
+                );
+                return Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target.uri.clone(),
+                    range: target.span().to_lsp_range(),
+                }));
+            }
+        }
+
         debug!(
-            "goto_definition_from_html: no definitions found in any controller or $rootScope"
+            "goto_definition_from_html: no definitions found in any controller, $rootScope, or ng-model"
         );
         None
     }

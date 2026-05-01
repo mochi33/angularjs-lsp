@@ -2981,6 +2981,10 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
     );
 }
 
+// ====================================================================
+// PR #41: literal value directives (ng-message / ng-switch-when / ng-pattern / ng-src)
+// ====================================================================
+
 #[test]
 fn test_ng_message_value_is_not_treated_as_scope_reference() {
     // `ng-message="required"` の値は AngularJS の検証キー名 (validation key) であり
@@ -3230,6 +3234,313 @@ angular.module('app', []).controller('GalleryCtrl', ['$scope', function($scope) 
         names.contains(&"imageUrl"),
         "ng-src 内の {{{{ imageUrl }}}} 補間は scope 参照として登録されるべき (refs: {:?})",
         names
+    );
+}
+
+// ====================================================================
+// PR #42: ng-model implicit \$scope definition
+// (diagnostic suppression + goto-definition / hover fallback)
+// ====================================================================
+
+#[test]
+fn test_ng_model_implicit_scope_def_suppresses_diagnostic_bare() {
+    // controller で `$scope.currentPage` を明示的に定義していなくても、
+    // `ng-model="currentPage"` があれば AngularJS が \$scope.currentPage を
+    // 自動生成するため、診断で「未定義」警告を出してはいけない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    // $scope.currentPage は明示的に書かない
+    $scope.totalItems = 100;
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage" total-items="totalItems"></uib-pagination>
+    <p>Page: {{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'currentPage'"),
+            "ng-model='currentPage' があるので暗黙的に scope に定義されるとみなし、\
+             '{{{{ currentPage }}}}' に対して診断を出してはいけない (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_ng_model_implicit_scope_def_with_alias() {
+    // `ng-model="vm.currentPage"` のように alias.property 形式でも、
+    // `vm` が controller alias に解決できれば暗黙的 def として扱う。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    $scope.totalItems = 100;
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl as vm">
+    <uib-pagination ng-model="vm.currentPage" total-items="vm.totalItems"></uib-pagination>
+    <p>Page: {{ vm.currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'currentPage'"),
+            "ng-model='vm.currentPage' があるので暗黙的に scope に定義される \
+             (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_explicit_scope_def_takes_precedence_over_ng_model_implicit() {
+    // controller 側で `$scope.currentPage = 1` と明示的に定義していれば、
+    // ng-model の有無にかかわらず警告は出ない (現状の挙動を保証)。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    $scope.currentPage = 1;
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage"></uib-pagination>
+    <p>{{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("'currentPage'")),
+        "明示的定義があるので診断は出ないべき (msgs: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_ng_model_implicit_def_does_not_cross_controllers() {
+    // CtrlA に ng-model="x"、CtrlB に scope ref `{{ x }}` のように
+    // 別 controller scope だと暗黙的 def が漏れて適用されてはいけない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', [])
+    .controller('CtrlA', ['$scope', function($scope) {}])
+    .controller('CtrlB', ['$scope', function($scope) {}]);
+"#;
+    let html = r#"
+<div ng-controller="CtrlA">
+    <input ng-model="x" />
+</div>
+<div ng-controller="CtrlB">
+    <p>{{ x }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    let has_x_warning = diagnostics
+        .iter()
+        .any(|d| d.message.contains("'x'") && d.message.contains("not defined"));
+    assert!(
+        has_x_warning,
+        "別 controller scope の ng-model は暗黙的 def に流用されてはいけない \
+         (CtrlB の '{{{{ x }}}}' に対する警告が出るべき)。\
+         diagnostics: {:?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_goto_definition_falls_back_to_ng_model_target() {
+    // controller で明示的に \$scope.X を定義していない場合、`{{ X }}` への
+    // goto definition は ng-model="X" の位置に飛ぶべき (旧来は None で
+    // カーソルがその場に留まる挙動だった)。
+    use angularjs_lsp::handler::DefinitionHandler;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        GotoDefinitionParams, GotoDefinitionResponse, PartialResultParams, Position,
+        TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    // currentPage は明示的に書かない
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage"></uib-pagination>
+    <p>{{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let handler = DefinitionHandler::new(Arc::clone(&index));
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: html_uri.clone(),
+            },
+            // 行 3, "currentPage" の中 (col 14 あたり)
+            position: Position { line: 3, character: 14 },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let response = handler
+        .goto_definition(params)
+        .expect("ng-model 経由で definition が返るべき");
+
+    let location = match response {
+        GotoDefinitionResponse::Scalar(loc) => loc,
+        GotoDefinitionResponse::Array(locs) => locs.into_iter().next().expect("at least one"),
+        GotoDefinitionResponse::Link(_) => panic!("unexpected Link response"),
+    };
+
+    assert_eq!(location.uri, html_uri, "definition は同じ HTML 内");
+    // ng-model="currentPage" の値の位置 (line 2)
+    assert_eq!(
+        location.range.start.line, 2,
+        "ng-model の位置 (line 2) に飛ぶべき, 実際 = {:?}",
+        location.range
+    );
+}
+
+#[test]
+fn test_explicit_def_takes_precedence_in_goto_definition() {
+    // 明示的に \$scope.X が controller にあれば、ng-model でなく controller の
+    // 位置にジャンプする (canonical 定義は明示的なほう)。
+    use angularjs_lsp::handler::DefinitionHandler;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        GotoDefinitionParams, GotoDefinitionResponse, PartialResultParams, Position,
+        TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {
+    $scope.currentPage = 1;
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage"></uib-pagination>
+    <p>{{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let js_uri = Url::parse("file:///test.js").unwrap();
+
+    let handler = DefinitionHandler::new(Arc::clone(&index));
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: html_uri.clone(),
+            },
+            position: Position { line: 3, character: 14 },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let response = handler.goto_definition(params).expect("definition 返る");
+
+    let location = match response {
+        GotoDefinitionResponse::Scalar(loc) => loc,
+        GotoDefinitionResponse::Array(locs) => locs.into_iter().next().expect("at least one"),
+        GotoDefinitionResponse::Link(_) => panic!("unexpected Link"),
+    };
+
+    assert_eq!(
+        location.uri, js_uri,
+        "明示的定義のある JS ファイルにジャンプすべき"
+    );
+}
+
+#[test]
+fn test_hover_falls_back_to_ng_model_target() {
+    // controller で明示的に \$scope.X を定義していない場合でも、`{{ X }}` への
+    // hover で ng-model="X" を definition source として情報表示する。
+    use angularjs_lsp::handler::HoverHandler;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        HoverContents, HoverParams, Position, TextDocumentIdentifier,
+        TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let js = r#"
+angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scope) {}]);
+"#;
+    let html = r#"
+<div ng-controller="PaginationCtrl">
+    <uib-pagination ng-model="currentPage"></uib-pagination>
+    <p>{{ currentPage }}</p>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let handler = HoverHandler::new(Arc::clone(&index));
+    let params = HoverParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: html_uri.clone(),
+            },
+            position: Position { line: 3, character: 14 },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+    let hover = handler.hover(params).expect("hover が返るべき");
+    let value = match hover.contents {
+        HoverContents::Markup(m) => m.value,
+        _ => panic!("expected Markup hover"),
+    };
+    assert!(
+        value.contains("ng-model"),
+        "hover に ng-model 経由の暗黙定義であることが示されるべき (value: {})",
+        value
+    );
+    assert!(
+        value.contains("currentPage"),
+        "hover に property 名 currentPage が含まれるべき (value: {})",
+        value
     );
 }
 

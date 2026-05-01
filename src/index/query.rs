@@ -134,6 +134,79 @@ impl Index {
         !self.get_html_references_for_symbol(symbol_name).is_empty()
     }
 
+    /// `<input ng-model="X">` のような暗黙的 scope 定義が存在するかをチェックする。
+    ///
+    /// `ng-model` ディレクティブは AngularJS が \$scope にプロパティを書き込むので、
+    /// controller 側で明示的に `$scope.X = ...` を書かなくても \$scope に X が
+    /// 存在する。このメソッドはそれを検出し、診断の false positive を抑制する。
+    ///
+    /// マッチ条件:
+    /// 1. 同じ URI 内に `ng-model` のターゲット があること
+    /// 2. その ng-model ターゲットの property tail が `property` と一致すること
+    ///    (例: `ng-model="vm.currentPage"` の tail "currentPage" は
+    ///     `{{ currentPage }}` の property "currentPage" にマッチ)
+    /// 3. ng-model の位置で resolve される controller のいずれかが
+    ///    `controller_name` と一致すること
+    ///
+    /// **明示的な `$scope.X` 定義がある場合はそちらが優先**される (本メソッドは
+    /// 明示的定義が見つからなかった時のフォールバックとして使う想定)。
+    pub fn has_ng_model_implicit_def(
+        &self,
+        uri: &Url,
+        controller_name: &str,
+        property: &str,
+    ) -> bool {
+        self.find_ng_model_implicit_def_target(uri, controller_name, property)
+            .is_some()
+    }
+
+    /// `<input ng-model="X">` の暗黙的 scope 定義がある場合、その ng-model
+    /// ターゲット (位置情報付き) を返す。`has_ng_model_implicit_def` の
+    /// 「位置を返す」版で、goto-definition / hover の最終フォールバックに使う。
+    ///
+    /// 複数マッチがある場合は **より早い位置 (line, col 順)** に出現するものを
+    /// 返す (決定的)。
+    pub fn find_ng_model_implicit_def_target(
+        &self,
+        uri: &Url,
+        controller_name: &str,
+        property: &str,
+    ) -> Option<crate::model::HtmlNgModelTarget> {
+        let mut targets = self.html.get_ng_model_targets_for_uri(uri);
+        targets.sort_by(|a, b| {
+            (a.start_line, a.start_col).cmp(&(b.start_line, b.start_col))
+        });
+
+        for target in targets {
+            let target_property = ng_model_target_tail(&target.property_path);
+            if target_property != property {
+                continue;
+            }
+
+            // ng-model 位置での resolved controllers を取得して、要求された
+            // controller_name と一致するものがあるか確認
+            let target_controllers = if let Some(alias) =
+                ng_model_target_alias(&target.property_path)
+            {
+                if let Some(ctrl) =
+                    self.resolve_controller_by_alias(uri, target.start_line, alias)
+                {
+                    vec![ctrl]
+                } else {
+                    // alias unresolved: バインドはアクティブな controller の \$scope への書き込みと解釈
+                    self.resolve_controllers_for_html(uri, target.start_line)
+                }
+            } else {
+                self.resolve_controllers_for_html(uri, target.start_line)
+            };
+
+            if target_controllers.iter().any(|c| c == controller_name) {
+                return Some(target);
+            }
+        }
+        None
+    }
+
     /// HTMLファイルに対応するコントローラー名を解決
     pub fn resolve_controller_for_html(&self, uri: &Url, line: u32) -> Option<String> {
         if let Some(controller) = self.controllers.get_html_controller_at(uri, line) {
@@ -381,5 +454,42 @@ impl Index {
             return None;
         }
         Some((controller_name.to_string(), method_name.to_string()))
+    }
+}
+
+/// `ng-model` ターゲットの property_path から末尾のプロパティ名を抜き出す。
+/// 例:
+/// - `"currentPage"` → `"currentPage"`
+/// - `"vm.currentPage"` → `"currentPage"`
+/// - `"user.profile.name"` → `"name"` (depth が 2 以上の場合は最深部)
+fn ng_model_target_tail(property_path: &str) -> &str {
+    match property_path.rfind('.') {
+        Some(idx) => &property_path[idx + 1..],
+        None => property_path,
+    }
+}
+
+/// `ng-model` ターゲットの property_path から先頭の alias 候補を返す。
+/// `"."` を含まない場合は `None`。
+fn ng_model_target_alias(property_path: &str) -> Option<&str> {
+    property_path.find('.').map(|idx| &property_path[..idx])
+}
+
+#[cfg(test)]
+mod ng_model_target_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn tail_returns_last_segment() {
+        assert_eq!(ng_model_target_tail("currentPage"), "currentPage");
+        assert_eq!(ng_model_target_tail("vm.currentPage"), "currentPage");
+        assert_eq!(ng_model_target_tail("user.profile.name"), "name");
+    }
+
+    #[test]
+    fn alias_returns_first_segment_or_none() {
+        assert_eq!(ng_model_target_alias("currentPage"), None);
+        assert_eq!(ng_model_target_alias("vm.currentPage"), Some("vm"));
+        assert_eq!(ng_model_target_alias("user.profile.name"), Some("user"));
     }
 }

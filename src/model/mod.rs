@@ -11,7 +11,7 @@ pub use builder::SymbolBuilder;
 pub use export::{ExportInfo, ExportedComponentObject};
 pub use html::{
     DirectiveUsageType, HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable,
-    HtmlLocalVariableReference, HtmlLocalVariableSource, HtmlScopeReference,
+    HtmlLocalVariableReference, HtmlLocalVariableSource, HtmlNgModelTarget, HtmlScopeReference,
     InheritedFormBinding, InheritedLocalVariable,
 };
 pub use inheritance::{NgIncludeBinding, NgViewBinding};

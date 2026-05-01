@@ -3,7 +3,7 @@ use tower_lsp::lsp_types::Url;
 
 use crate::model::{
     HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable, HtmlLocalVariableReference,
-    HtmlScopeReference,
+    HtmlNgModelTarget, HtmlScopeReference,
 };
 
 /// HTMLスコープ参照・ローカル変数・フォーム・ディレクティブの管理ストア
@@ -18,6 +18,11 @@ pub struct HtmlStore {
     html_form_bindings: DashMap<Url, Vec<HtmlFormBinding>>,
     /// HTML内のカスタムディレクティブ参照（URI -> Vec<HtmlDirectiveReference>）
     html_directive_references: DashMap<Url, Vec<HtmlDirectiveReference>>,
+    /// HTML内の `ng-model="X"` ターゲット (URI -> Vec<HtmlNgModelTarget>)
+    /// controller 側で明示的に \$scope に書かれていないプロパティでも、
+    /// ng-model がバインドする箇所があれば暗黙的に scope に存在するとみなす
+    /// (診断の false positive 抑制用)
+    ng_model_targets: DashMap<Url, Vec<HtmlNgModelTarget>>,
 }
 
 impl HtmlStore {
@@ -28,6 +33,7 @@ impl HtmlStore {
             html_local_variable_references: DashMap::new(),
             html_form_bindings: DashMap::new(),
             html_directive_references: DashMap::new(),
+            ng_model_targets: DashMap::new(),
         }
     }
 
@@ -392,6 +398,31 @@ impl HtmlStore {
             .collect()
     }
 
+    // ========== ng-model ターゲット ==========
+
+    pub fn add_ng_model_target(&self, target: HtmlNgModelTarget) {
+        let uri = target.uri.clone();
+        self.ng_model_targets
+            .entry(uri)
+            .or_default()
+            .push(target);
+    }
+
+    pub fn get_ng_model_targets_for_uri(&self, uri: &Url) -> Vec<HtmlNgModelTarget> {
+        self.ng_model_targets
+            .get(uri)
+            .map(|v| v.value().clone())
+            .unwrap_or_default()
+    }
+
+    /// 全 ng-model ターゲットを取得 (キャッシュ用)
+    pub fn get_all_ng_model_targets_for_cache(&self) -> Vec<HtmlNgModelTarget> {
+        self.ng_model_targets
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
     // ========== クリア ==========
 
     /// HTML参照情報のみをクリア（Pass 3で収集する情報）
@@ -402,6 +433,7 @@ impl HtmlStore {
             entry.value_mut().retain(|r| &r.uri != uri);
         }
         self.html_directive_references.remove(uri);
+        self.ng_model_targets.remove(uri);
     }
 
     pub fn clear_document(&self, uri: &Url) {
@@ -412,6 +444,7 @@ impl HtmlStore {
         }
         self.html_form_bindings.remove(uri);
         self.html_directive_references.remove(uri);
+        self.ng_model_targets.remove(uri);
     }
 
     pub fn clear_all(&self) {
@@ -420,6 +453,7 @@ impl HtmlStore {
         self.html_local_variable_references.clear();
         self.html_form_bindings.clear();
         self.html_directive_references.clear();
+        self.ng_model_targets.clear();
     }
 }
 

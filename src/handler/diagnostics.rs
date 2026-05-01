@@ -245,6 +245,13 @@ impl DiagnosticsHandler {
                         continue;
                     }
 
+                    // ng-model="vm.foo" のような暗黙的 \$scope 書き込みでも
+                    // 定義済みとして扱う (controller 側で `$scope.foo = ...` を
+                    // 書かなくても AngularJS が \$scope に property を作るため)
+                    if self.index.has_ng_model_implicit_def(uri, &controller_name, property) {
+                        continue;
+                    }
+
                     // 定義が見つからない場合は警告
                     diagnostics.push(Diagnostic {
                         range: Range {
@@ -319,6 +326,18 @@ impl DiagnosticsHandler {
                         .is_empty()
                 {
                     found = true;
+                }
+
+                // ng-model 経由の暗黙的 \$scope 書き込みもチェック
+                // (アクティブな controller のいずれかに ng-model のターゲットが
+                //  あれば定義済みとみなす)
+                if !found {
+                    for ctrl in &controllers {
+                        if self.index.has_ng_model_implicit_def(uri, ctrl, property) {
+                            found = true;
+                            break;
+                        }
+                    }
                 }
 
                 // コントローラーのJS定義が存在する場合のみ警告
