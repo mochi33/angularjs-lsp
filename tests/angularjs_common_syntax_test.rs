@@ -2982,6 +2982,88 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
 }
 
 #[test]
+fn test_ng_message_value_is_not_treated_as_scope_reference() {
+    // `ng-message="required"` の値は AngularJS の検証キー名 (validation key) であり
+    // スコープ参照ではない。Angular 式として解析すると `required` を $scope の
+    // プロパティとして登録してしまい、診断で「未定義」警告が誤検出される。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('FormCtrl', ['$scope', function($scope) {
+    $scope.user = {};
+}]);
+"#;
+    let html = r#"
+<div ng-controller="FormCtrl">
+    <form name="myForm">
+        <input ng-model="user.name" required />
+        <div ng-messages="myForm.user.$error">
+            <div ng-message="required">Required</div>
+            <div ng-message="minlength">Too short</div>
+        </div>
+        <ng-messages-include src="error-messages.html"></ng-messages-include>
+    </form>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // ng-message の値はスコープ参照として登録されないこと
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        !names.contains(&"required"),
+        "ng-message=\"required\" の値はスコープ参照として登録されてはいけない (refs: {:?})",
+        names
+    );
+    assert!(
+        !names.contains(&"minlength"),
+        "ng-message=\"minlength\" の値はスコープ参照として登録されてはいけない (refs: {:?})",
+        names
+    );
+
+    // 診断にも「Property required is not defined」が出ないこと
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    for d_msg in &messages {
+        assert!(
+            !d_msg.contains("'required'") && !d_msg.contains("'minlength'"),
+            "ng-message の値に対して診断が出てはいけない (diagnostic: {})",
+            d_msg
+        );
+    }
+}
+
+#[test]
+fn test_ng_messages_value_is_still_treated_as_expression() {
+    // `ng-messages="myForm.field.$error"` (複数形) の方は **式**。
+    // ng-message (単数) との対比で挙動が分かれることを保証。
+    let js = r#"
+angular.module('app', []).controller('FormCtrl', ['$scope', function($scope) {
+    $scope.myForm = {};
+}]);
+"#;
+    let html = r#"
+<div ng-controller="FormCtrl">
+    <div ng-messages="myForm.field.$error"></div>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("myForm")),
+        "ng-messages の値は式として解析され myForm... が登録されるべき (refs: {:?})",
+        names
+    );
+}
+
+#[test]
 fn test_html_completion_does_not_duplicate_scope_method_with_dollar_scope_label() {
     // HTML 内の {{ }} 補完で `$scope.update = function() {}` を定義した場合、
     // `update` (Function) のみが候補に出るべきで、`$scope.update` (Method) が

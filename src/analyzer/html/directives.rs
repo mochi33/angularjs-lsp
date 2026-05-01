@@ -94,6 +94,25 @@ pub fn is_ng_directive(attr_name: &str) -> bool {
     NG_DIRECTIVE_SET.contains(attr_name)
 }
 
+/// 値が **Angular 式ではなくリテラル文字列** として解釈されるディレクティブ集合。
+///
+/// これらはディレクティブ自体は AngularJS が認識するが、属性値はスコープ参照では
+/// なく単なる文字列キー / URL として扱われる:
+/// - `ng-message="required"` — `$error.required` の検証キー名
+/// - `ng-messages-include="error-messages.html"` — テンプレート URL
+///
+/// これらに対して値を Angular 式として解析すると、`$scope.required` 等のような
+/// false positive な scope reference が登録され、診断で「未定義」警告が出てしまう。
+static LITERAL_VALUE_DIRECTIVE_SET: phf::Set<&'static str> = phf_set! {
+    "ng-message", "data-ng-message",
+    "ng-messages-include", "data-ng-messages-include",
+};
+
+/// 属性値が Angular 式ではなくリテラル文字列として解釈されるディレクティブか判定
+pub fn is_literal_value_directive(attr_name: &str) -> bool {
+    LITERAL_VALUE_DIRECTIVE_SET.contains(attr_name)
+}
+
 /// 属性値を Angular 式として解析すべきか判定する。
 ///
 /// 以下のいずれかに当てはまる場合 `true` を返す:
