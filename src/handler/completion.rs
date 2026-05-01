@@ -573,6 +573,7 @@ impl CompletionHandler {
             SymbolKind::FormBinding => CompletionItemKind::VARIABLE,
             SymbolKind::ExportedComponent => CompletionItemKind::CLASS,
             SymbolKind::ComponentBinding => CompletionItemKind::PROPERTY,
+            SymbolKind::UiRouterState => CompletionItemKind::EVENT,
         }
     }
 }

@@ -62,7 +62,13 @@ $stateProvider.state('layout', {
 });
 ```
 
-**未対応**: `resolve: { ... }` の依存注入、`ui-sref` / `ui-view` HTML 属性、`$state.go()` / `$state.transitionTo()` JS 参照、dot-notation 親子 state の階層追跡。
+追加対応:
+- `$stateProvider.state('home', ...)` で state 名が `SymbolKind::UiRouterState` として登録される
+- `$state.go('home')` / `$state.transitionTo('home')` の state 名参照を追跡 (DI rename も対応)
+- `ui-sref="home"` / `ui-sref="home({id: 1})"` / `ui-sref="users.detail"` の state 名参照を追跡
+- ui-sref → state 定義への goto-definition / hover, find-references で HTML/JS 横断列挙
+
+**未対応**: `resolve: { ... }` の依存注入、`ui-view` named view 属性、ui-router の相対 state 参照 (`.`, `^`, `^.foo`)、`ui-state="..."` 動的 state 名属性、dot-notation 親子 state の階層追跡。
 
 ---
 

@@ -31,6 +31,8 @@ pub enum SymbolKind {
     ExportedComponent,
     /// コンポーネントのbindingsプロパティ（'<', '=', '@', '&'）
     ComponentBinding,
+    /// ui-router の state ($stateProvider.state('name', ...) で登録される名前)
+    UiRouterState,
 }
 
 impl SymbolKind {
@@ -54,6 +56,7 @@ impl SymbolKind {
             SymbolKind::FormBinding => "form binding",
             SymbolKind::ExportedComponent => "exported component",
             SymbolKind::ComponentBinding => "component binding",
+            SymbolKind::UiRouterState => "ui-router state",
         }
     }
 
@@ -77,6 +80,7 @@ impl SymbolKind {
             SymbolKind::FormBinding => lsp_types::SymbolKind::VARIABLE,
             SymbolKind::ExportedComponent => lsp_types::SymbolKind::CLASS,
             SymbolKind::ComponentBinding => lsp_types::SymbolKind::PROPERTY,
+            SymbolKind::UiRouterState => lsp_types::SymbolKind::EVENT,
         }
     }
 }

@@ -12,7 +12,7 @@ pub use export::{ExportInfo, ExportedComponentObject};
 pub use html::{
     DirectiveUsageType, HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable,
     HtmlLocalVariableReference, HtmlLocalVariableSource, HtmlNgModelTarget, HtmlScopeReference,
-    InheritedFormBinding, InheritedLocalVariable,
+    HtmlUiSrefReference, InheritedFormBinding, InheritedLocalVariable,
 };
 pub use inheritance::{NgIncludeBinding, NgViewBinding};
 pub use scope::{ControllerScope, HtmlControllerScope};
