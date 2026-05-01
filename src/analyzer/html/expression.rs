@@ -1,6 +1,6 @@
 //! Angular式のパースとコンテキスト判定
 
-use super::directives::is_directive_attribute;
+use super::directives::{is_directive_attribute, is_literal_value_directive};
 use super::HtmlAngularJsAnalyzer;
 
 use tree_sitter::{Parser, Tree};
@@ -226,7 +226,11 @@ impl HtmlAngularJsAnalyzer {
                 let before_eq = &before_cursor[..eq_idx];
                 if let Some(attr_name) = Self::extract_attr_name(before_eq) {
                     let elem = Self::extract_element_name_before(before_eq);
-                    if is_directive_attribute(attr_name, elem, &self.index) {
+                    // ng-message / ng-messages-include は値が文字列リテラルなので
+                    // AngularJS スコープ補完の対象外
+                    if is_directive_attribute(attr_name, elem, &self.index)
+                        && !is_literal_value_directive(attr_name)
+                    {
                         return true;
                     }
                 }
@@ -242,7 +246,9 @@ impl HtmlAngularJsAnalyzer {
                 let before_eq = &before_cursor[..eq_idx];
                 if let Some(attr_name) = Self::extract_attr_name(before_eq) {
                     let elem = Self::extract_element_name_before(before_eq);
-                    if is_directive_attribute(attr_name, elem, &self.index) {
+                    if is_directive_attribute(attr_name, elem, &self.index)
+                        && !is_literal_value_directive(attr_name)
+                    {
                         return true;
                     }
                 }
