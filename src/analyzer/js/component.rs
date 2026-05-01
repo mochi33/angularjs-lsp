@@ -308,17 +308,10 @@ impl AngularJsAnalyzer {
         if let (Some(name), Some(value_node)) =
             (controller_name.as_ref(), controller_string_value_node)
         {
-            let start = value_node.start_position();
-            let end = value_node.end_position();
             let reference = SymbolReference {
                 name: name.clone(),
                 uri: uri.clone(),
-                span: Span::new(
-                    self.offset_line(start.row as u32),
-                    start.column as u32,
-                    self.offset_line(end.row as u32),
-                    end.column as u32,
-                ),
+                span: self.span_of(value_node),
             };
             self.index.definitions.add_reference(reference);
         }
@@ -481,17 +474,10 @@ impl AngularJsAnalyzer {
                             // controller: 'ControllerName' パターンは参照登録のみ
                             if value.kind() == "string" {
                                 let controller_name = self.extract_string_value(value, source);
-                                let start = value.start_position();
-                                let end = value.end_position();
                                 let reference = SymbolReference {
                                     name: controller_name,
                                     uri: uri.clone(),
-                                    span: Span::new(
-                                        self.offset_line(start.row as u32),
-                                        start.column as u32,
-                                        self.offset_line(end.row as u32),
-                                        end.column as u32,
-                                    ),
+                                    span: self.span_of(value),
                                 };
                                 self.index.definitions.add_reference(reference);
                             } else {
@@ -550,14 +536,7 @@ impl AngularJsAnalyzer {
             if let Some(name_arg) = args.named_child(0) {
                 if name_arg.kind() == "string" {
                     let state_name = self.extract_string_value(name_arg, source);
-                    let start = name_arg.start_position();
-                    let end = name_arg.end_position();
-                    let span = Span::new(
-                        self.offset_line(start.row as u32),
-                        start.column as u32,
-                        self.offset_line(end.row as u32),
-                        end.column as u32,
-                    );
+                    let span = self.span_of(name_arg);
 
                     let symbol = SymbolBuilder::new(
                         state_name,
@@ -631,17 +610,10 @@ impl AngularJsAnalyzer {
             return;
         }
         let state_name = self.extract_string_value(first_arg, source);
-        let start = first_arg.start_position();
-        let end = first_arg.end_position();
         self.index.definitions.add_reference(SymbolReference {
             name: state_name,
             uri: uri.clone(),
-            span: Span::new(
-                self.offset_line(start.row as u32),
-                start.column as u32,
-                self.offset_line(end.row as u32),
-                end.column as u32,
-            ),
+            span: self.span_of(first_arg),
         });
     }
 
@@ -666,17 +638,10 @@ impl AngularJsAnalyzer {
                             // controller: 'ControllerName' パターンは参照登録のみ
                             if value.kind() == "string" {
                                 let controller_name = self.extract_string_value(value, source);
-                                let start = value.start_position();
-                                let end = value.end_position();
                                 let reference = SymbolReference {
                                     name: controller_name,
                                     uri: uri.clone(),
-                                    span: Span::new(
-                                        self.offset_line(start.row as u32),
-                                        start.column as u32,
-                                        self.offset_line(end.row as u32),
-                                        end.column as u32,
-                                    ),
+                                    span: self.span_of(value),
                                 };
                                 self.index.definitions.add_reference(reference);
                             } else {
@@ -777,19 +742,12 @@ impl AngularJsAnalyzer {
             if let Some(first_arg) = args.named_child(0) {
                 if first_arg.kind() == "string" {
                     let name = self.extract_string_value(first_arg, source);
-                    let start = first_arg.start_position();
-                    let end = first_arg.end_position();
 
                     // 現在のモジュール名をコンテキストに設定
                     ctx.set_current_module(name.clone());
 
-                    let docs = self.extract_jsdoc_for_line(start.row, source);
-                    let span = Span::new(
-                        self.offset_line(start.row as u32),
-                        start.column as u32,
-                        self.offset_line(end.row as u32),
-                        end.column as u32,
-                    );
+                    let docs = self.extract_jsdoc_for_line(first_arg.start_position().row, source);
+                    let span = self.span_of(first_arg);
 
                     let mut builder = SymbolBuilder::new(name.clone(), SymbolKind::Module, uri.clone())
                         .definition_span(span)
@@ -1283,19 +1241,12 @@ impl AngularJsAnalyzer {
                         None
                     };
 
-                    let start = key.start_position();
-                    let end = key.end_position();
 
                     // ControllerName.bindingName として登録
                     let full_name = format!("{}.{}", controller_name, binding_name);
                     let docs = binding_type.map(|t| format!("Component binding: {}", t));
 
-                    let span = Span::new(
-                        self.offset_line(start.row as u32),
-                        start.column as u32,
-                        self.offset_line(end.row as u32),
-                        end.column as u32,
-                    );
+                    let span = self.span_of(key);
 
                     let mut builder = SymbolBuilder::new(full_name, SymbolKind::ComponentBinding, uri.clone())
                         .definition_span(span)

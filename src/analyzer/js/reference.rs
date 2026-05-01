@@ -3,7 +3,7 @@ use tree_sitter::Node;
 
 use super::context::AnalyzerContext;
 use super::AngularJsAnalyzer;
-use crate::model::{Span, SymbolReference};
+use crate::model::SymbolReference;
 
 /// Utility: check if name is a common JavaScript keyword
 pub(super) fn is_common_keyword(name: &str) -> bool {
@@ -64,18 +64,11 @@ impl AngularJsAnalyzer {
                         let full_name = format!("{}.{}", obj_name, method_name);
 
                         if self.index.definitions.has_definition(&full_name) {
-                            let start = property.start_position();
-                            let end = property.end_position();
 
                             let reference = SymbolReference {
                                 name: full_name,
                                 uri: uri.clone(),
-                                span: Span::new(
-                                    self.offset_line(start.row as u32),
-                                    start.column as u32,
-                                    self.offset_line(end.row as u32),
-                                    end.column as u32,
-                                ),
+                                span: self.span_of(property),
                             };
 
                             self.index.definitions.add_reference(reference);
@@ -113,18 +106,11 @@ impl AngularJsAnalyzer {
                 let full_name = format!("{}.{}", obj_name, prop_name);
 
                 if self.index.definitions.has_definition(&full_name) {
-                    let start = property.start_position();
-                    let end = property.end_position();
 
                     let reference = SymbolReference {
                         name: full_name,
                         uri: uri.clone(),
-                        span: Span::new(
-                            self.offset_line(start.row as u32),
-                            start.column as u32,
-                            self.offset_line(end.row as u32),
-                            end.column as u32,
-                        ),
+                        span: self.span_of(property),
                     };
 
                     self.index.definitions.add_reference(reference);
@@ -153,18 +139,11 @@ impl AngularJsAnalyzer {
                 return;
             }
 
-            let start = node.start_position();
-            let end = node.end_position();
 
             let reference = SymbolReference {
                 name,
                 uri: uri.clone(),
-                span: Span::new(
-                    self.offset_line(start.row as u32),
-                    start.column as u32,
-                    self.offset_line(end.row as u32),
-                    end.column as u32,
-                ),
+                span: self.span_of(node),
             };
 
             self.index.definitions.add_reference(reference);

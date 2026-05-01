@@ -18,6 +18,7 @@ use tower_lsp::lsp_types::Url;
 use tree_sitter::{Node, Tree};
 
 use crate::index::Index;
+use crate::model::Span;
 use context::AnalyzerContext;
 use parser::JsParser;
 
@@ -183,6 +184,35 @@ impl AngularJsAnalyzer {
     /// 行番号にオフセットを加算
     pub(super) fn offset_line(&self, line: u32) -> u32 {
         line + self.line_offset.load(Ordering::Relaxed)
+    }
+
+    /// tree-sitter `Node` の開始～終了位置から `Span` を作る。
+    ///
+    /// `line_offset` が適用されるので、HTML 内 `<script>` の JS 解析でも
+    /// HTML 全体の行番号系で正しい Span が返る。
+    pub(super) fn span_of(&self, node: Node) -> Span {
+        let start = node.start_position();
+        let end = node.end_position();
+        Span::new(
+            self.offset_line(start.row as u32),
+            start.column as u32,
+            self.offset_line(end.row as u32),
+            end.column as u32,
+        )
+    }
+
+    /// `start` ノードの開始位置から `end` ノードの終了位置までを `Span` にする。
+    ///
+    /// 関数本体全体を span にしたい (`{` から `}`) ような場合に使う。
+    pub(super) fn span_between(&self, start: Node, end: Node) -> Span {
+        let s = start.start_position();
+        let e = end.end_position();
+        Span::new(
+            self.offset_line(s.row as u32),
+            s.column as u32,
+            self.offset_line(e.row as u32),
+            e.column as u32,
+        )
     }
 
     /// ASTノードからソーステキストを取得する
