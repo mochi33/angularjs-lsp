@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::*;
 use crate::index::Index;
 use crate::model::{
     DirectiveUsageType, HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable,
-    HtmlLocalVariableSource, HtmlNgModelTarget,
+    HtmlLocalVariableSource, HtmlNgModelTarget, SymbolKind,
 };
 use crate::util::is_html_file;
 
@@ -38,6 +38,22 @@ impl HoverHandler {
 
     /// HTMLファイルからのホバー
     fn hover_from_html(&self, uri: &Url, position: Position) -> Option<Hover> {
+        // 0. ui-router の `ui-sref="state"` を最優先でチェック
+        if let Some(ui_sref) = self
+            .index
+            .html
+            .find_ui_sref_reference_at(uri, position.line, position.character)
+        {
+            let definitions = self.index.definitions.get_definitions(&ui_sref.state_name);
+            let state_def = definitions
+                .into_iter()
+                .find(|d| d.kind == SymbolKind::UiRouterState);
+            if let Some(def) = state_def {
+                return self.build_hover_for_symbol(&def.name);
+            }
+            return None;
+        }
+
         // 1. まずローカル変数をチェック（定義位置にカーソルがある場合）
         if let Some(local_var_def) = self.index.html.find_html_local_variable_definition_at(
             uri,

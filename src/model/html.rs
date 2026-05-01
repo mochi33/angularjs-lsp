@@ -207,3 +207,24 @@ impl HtmlDirectiveReference {
         Span::new(self.start_line, self.start_col, self.end_line, self.end_col)
     }
 }
+
+/// `ui-sref="home"` / `ui-sref="home.detail({id: 1})"` などで参照される
+/// ui-router state 名と、それが属性値として書かれているHTML上の位置範囲を表す。
+///
+/// `state_name` は `(` の前までを切り出した state 名のみ。
+/// `start_*` / `end_*` はその state 名部分の位置 (引数部分は含まない)。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HtmlUiSrefReference {
+    pub state_name: String,
+    pub uri: Url,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
+impl HtmlUiSrefReference {
+    pub fn span(&self) -> Span {
+        Span::new(self.start_line, self.start_col, self.end_line, self.end_col)
+    }
+}

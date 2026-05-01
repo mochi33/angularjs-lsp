@@ -51,7 +51,16 @@ impl ReferencesHandler {
         position: Position,
         include_declaration: bool,
     ) -> Option<Vec<Location>> {
-        // 0. まずカスタムディレクティブ参照をチェック
+        // 0. ui-router の `ui-sref="state"` 参照を最優先でチェック
+        if let Some(ui_sref) = self
+            .index
+            .html
+            .find_ui_sref_reference_at(uri, position.line, position.character)
+        {
+            return self.collect_state_references(&ui_sref.state_name, include_declaration);
+        }
+
+        // 0b. カスタムディレクティブ参照をチェック
         if let Some(directive_ref) = self.index.html.find_html_directive_reference_at(
             uri,
             position.line,
@@ -232,6 +241,39 @@ impl ReferencesHandler {
         }
 
         None
+    }
+
+    /// ui-router state 名の定義 (UiRouterState kind) と全参照を収集
+    fn collect_state_references(
+        &self,
+        state_name: &str,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let mut locations = Vec::new();
+
+        if include_declaration {
+            for def in self.index.definitions.get_definitions(state_name) {
+                if def.kind == SymbolKind::UiRouterState {
+                    locations.push(Location {
+                        uri: def.uri.clone(),
+                        range: def.definition_span.to_lsp_range(),
+                    });
+                }
+            }
+        }
+
+        for reference in self.index.definitions.get_references(state_name) {
+            locations.push(Location {
+                uri: reference.uri.clone(),
+                range: reference.span.to_lsp_range(),
+            });
+        }
+
+        if locations.is_empty() {
+            None
+        } else {
+            Some(locations)
+        }
     }
 
     /// シンボル名から定義と参照を収集

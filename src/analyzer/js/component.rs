@@ -85,6 +85,14 @@ impl AngularJsAnalyzer {
                                 self.extract_state_provider_di(node, source, uri, ctx);
                             }
                         }
+                        "go" | "transitionTo" => {
+                            // `$state.go('home')` / `$state.transitionTo('home')` の
+                            // 第1引数 (state 名) を参照として登録する。
+                            // `$state` であることを厳密に判定して誤検知を避ける。
+                            if self.is_state_service_receiver(callee, source, ctx) {
+                                self.extract_state_navigation_reference(node, source, uri);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -523,7 +531,7 @@ impl AngularJsAnalyzer {
         }
     }
 
-    /// `$stateProvider.state()` (ui-router) のcontrollerプロパティからDIスコープを抽出する
+    /// `$stateProvider.state()` (ui-router) の state 定義と controller DI スコープを抽出する
     ///
     /// 認識パターン:
     /// ```javascript
@@ -533,8 +541,36 @@ impl AngularJsAnalyzer {
     ///     controller: 'HomeController'
     /// })
     /// ```
+    ///
+    /// 第1引数の文字列を `SymbolKind::UiRouterState` として登録し、
+    /// `ui-sref="home"` や `$state.go('home')` からのジャンプを可能にする。
     fn extract_state_provider_di(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if let Some(args) = node.child_by_field_name("arguments") {
+            // state('name', ...) の第1引数は state 名 (文字列リテラル)
+            if let Some(name_arg) = args.named_child(0) {
+                if name_arg.kind() == "string" {
+                    let state_name = self.extract_string_value(name_arg, source);
+                    let start = name_arg.start_position();
+                    let end = name_arg.end_position();
+                    let span = Span::new(
+                        self.offset_line(start.row as u32),
+                        start.column as u32,
+                        self.offset_line(end.row as u32),
+                        end.column as u32,
+                    );
+
+                    let symbol = SymbolBuilder::new(
+                        state_name,
+                        SymbolKind::UiRouterState,
+                        uri.clone(),
+                    )
+                    .definition_span(span)
+                    .name_span(span)
+                    .build();
+                    self.index.definitions.add_definition(symbol);
+                }
+            }
+
             // state('name', {config}) の設定オブジェクトは第2引数
             if let Some(config_obj) = args.named_child(1) {
                 if config_obj.kind() == "object" {
@@ -542,6 +578,71 @@ impl AngularJsAnalyzer {
                 }
             }
         }
+    }
+
+    /// `$state.go('home')` / `$state.transitionTo('home')` のレシーバが
+    /// `$state` (またはそれに DI されたローカル変数) かを判定する。
+    ///
+    /// `is_provider_receiver` と異なり `state` 単体は許容しない (一般変数名と紛らわしいため)。
+    /// `$state` を直接含む形式 (`$state`, `this.$state` など) のみ true。
+    fn is_state_service_receiver(
+        &self,
+        callee: Node,
+        source: &str,
+        ctx: &AnalyzerContext,
+    ) -> bool {
+        let object = match callee.child_by_field_name("object") {
+            Some(o) => o,
+            None => return false,
+        };
+        let root = Self::unwrap_chain_receiver(object);
+        let root_text = self.node_text(root, source);
+
+        // 1. `$state` を含むレシーバ
+        if root_text == "$state" || root_text.ends_with(".$state") {
+            return true;
+        }
+
+        // 2. 単純識別子なら DI 経由でリネームされたケースをチェック
+        if root.kind() == "identifier" {
+            let line = self.offset_line(callee.start_position().row as u32);
+            if let Some(service) = ctx.resolve_di_param(&root_text, line) {
+                return service == "$state";
+            }
+        }
+
+        false
+    }
+
+    /// `$state.go('home')` / `$state.transitionTo('home')` の第1引数 (state 名) を
+    /// `SymbolReference` として登録する。
+    ///
+    /// 文字列リテラル以外 (動的式) は state 名を解決できないので無視する。
+    fn extract_state_navigation_reference(&self, node: Node, source: &str, uri: &Url) {
+        let args = match node.child_by_field_name("arguments") {
+            Some(a) => a,
+            None => return,
+        };
+        let first_arg = match args.named_child(0) {
+            Some(a) => a,
+            None => return,
+        };
+        if first_arg.kind() != "string" {
+            return;
+        }
+        let state_name = self.extract_string_value(first_arg, source);
+        let start = first_arg.start_position();
+        let end = first_arg.end_position();
+        self.index.definitions.add_reference(SymbolReference {
+            name: state_name,
+            uri: uri.clone(),
+            span: Span::new(
+                self.offset_line(start.row as u32),
+                start.column as u32,
+                self.offset_line(end.row as u32),
+                end.column as u32,
+            ),
+        });
     }
 
     /// $stateProvider.state() の設定オブジェクトからcontrollerプロパティを探し、DIスコープを抽出する

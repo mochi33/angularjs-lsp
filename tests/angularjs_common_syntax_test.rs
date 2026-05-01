@@ -1727,6 +1727,204 @@ angular.module('app', []).config(['$stateProvider', function($stateProvider) {
 }
 
 #[test]
+fn test_state_provider_registers_state_name_definition() {
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', {
+        url: '/home',
+        templateUrl: 'views/home.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_definition(&index, "home", SymbolKind::UiRouterState),
+        "$stateProvider.state('home', ...) で 'home' が UiRouterState として登録されるべき");
+}
+
+#[test]
+fn test_state_provider_dot_notation_state_name() {
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('users.detail', {
+        url: '/:id',
+        templateUrl: 'views/user-detail.html'
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_definition(&index, "users.detail", SymbolKind::UiRouterState),
+        "dot-notation の state 名 'users.detail' が UiRouterState として登録されるべき");
+}
+
+#[test]
+fn test_state_go_registers_reference() {
+    let source = r#"
+angular.module('app', [])
+    .config(['$stateProvider', function($stateProvider) {
+        $stateProvider.state('home', { url: '/home' });
+    }])
+    .controller('NavCtrl', ['$state', function($state) {
+        $state.go('home');
+    }]);
+"#;
+    let index = analyze_js(source);
+    let refs = index.definitions.get_references("home");
+    assert!(refs.iter().any(|r| r.uri.path() == "/test.js"),
+        "$state.go('home') で 'home' への参照が登録されるべき");
+}
+
+#[test]
+fn test_state_transition_to_registers_reference() {
+    let source = r#"
+angular.module('app', [])
+    .config(['$stateProvider', function($stateProvider) {
+        $stateProvider.state('about', { url: '/about' });
+    }])
+    .controller('NavCtrl', ['$state', function($state) {
+        $state.transitionTo('about');
+    }]);
+"#;
+    let index = analyze_js(source);
+    let refs = index.definitions.get_references("about");
+    assert_eq!(refs.len(), 1, "$state.transitionTo('about') で参照が登録されるべき");
+}
+
+#[test]
+fn test_state_go_via_di_renamed_param() {
+    // 配列 DI で $state を別名 (s) に rename しても認識されるべき
+    let source = r#"
+angular.module('app', [])
+    .controller('NavCtrl', ['$state', function(s) {
+        s.go('home');
+    }]);
+"#;
+    let index = analyze_js(source);
+    let refs = index.definitions.get_references("home");
+    assert!(!refs.is_empty(),
+        "DI 経由で rename された $state 経由でも 'home' への参照が登録されるべき");
+}
+
+#[test]
+fn test_state_go_on_unrelated_object_ignored() {
+    // $state ではない `state` 変数の .go() は無視されるべき
+    let source = r#"
+function unrelated() {
+    var state = { go: function() {} };
+    state.go('home');
+}
+"#;
+    let index = analyze_js(source);
+    let refs = index.definitions.get_references("home");
+    assert!(refs.is_empty(),
+        "$state でないオブジェクトの .go() は state 名参照として登録されないべき");
+}
+
+#[test]
+fn test_ui_sref_registers_html_reference() {
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', { url: '/home' });
+}]);
+"#;
+    let html = r#"<a ui-sref="home">Home</a>"#;
+    let index = analyze_html(js, html);
+
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let refs = index.html.get_ui_sref_references_for_uri(&html_uri);
+    assert_eq!(refs.len(), 1, "ui-sref='home' が HtmlUiSrefReference として登録されるべき");
+    assert_eq!(refs[0].state_name, "home");
+}
+
+#[test]
+fn test_ui_sref_with_params_strips_args() {
+    // ui-sref="home({id: 1})" の state 名は "home" のみ
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', { url: '/home/:id' });
+}]);
+"#;
+    let html = r#"<a ui-sref="home({id: 1})">Home</a>"#;
+    let index = analyze_html(js, html);
+
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let refs = index.html.get_ui_sref_references_for_uri(&html_uri);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].state_name, "home",
+        "ui-sref='home({{id: 1}})' から引数を除いた state 名 'home' が抽出されるべき");
+}
+
+#[test]
+fn test_ui_sref_dot_notation() {
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('users.detail', { url: '/:id' });
+}]);
+"#;
+    let html = r#"<a ui-sref="users.detail">User</a>"#;
+    let index = analyze_html(js, html);
+
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let refs = index.html.get_ui_sref_references_for_uri(&html_uri);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].state_name, "users.detail");
+}
+
+#[test]
+fn test_ui_sref_relative_refs_skipped() {
+    // 相対参照 '.' / '^' / '^.foo' は state 名を解決できないので登録しない
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('parent', {});
+}]);
+"#;
+    let html = r#"
+<a ui-sref="^">Up</a>
+<a ui-sref=".">Reload</a>
+<a ui-sref="^.sibling">Sibling</a>
+"#;
+    let index = analyze_html(js, html);
+
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let refs = index.html.get_ui_sref_references_for_uri(&html_uri);
+    assert!(refs.is_empty(),
+        "相対参照 ui-sref ('.', '^', '^.foo') は登録されないべき");
+}
+
+#[test]
+fn test_ui_sref_registers_symbol_reference_for_find_references() {
+    // ui-sref は find-references インフラ用に SymbolReference も登録する
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', {});
+}]);
+"#;
+    let html = r#"<a ui-sref="home">Home</a>"#;
+    let index = analyze_html(js, html);
+
+    let refs = index.definitions.get_references("home");
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    assert!(refs.iter().any(|r| r.uri == html_uri),
+        "ui-sref='home' が SymbolReference としても登録されるべき");
+}
+
+#[test]
+fn test_ui_sref_active_attribute_not_treated_as_state_ref() {
+    // ui-sref-active の値は CSS class なので state 名参照としては扱わない
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', {});
+}]);
+"#;
+    let html = r#"<a ui-sref="home" ui-sref-active="active">Home</a>"#;
+    let index = analyze_html(js, html);
+
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let refs = index.html.get_ui_sref_references_for_uri(&html_uri);
+    assert_eq!(refs.len(), 1, "ui-sref のみが登録され、ui-sref-active='active' は無視されるべき");
+    assert_eq!(refs[0].state_name, "home");
+}
+
+#[test]
 fn test_state_provider_top_level_and_named_views_coexist() {
     // 親 state に templateUrl/controller がありつつ views も持つケース
     // (両方とも binding として登録される)
@@ -3655,6 +3853,93 @@ angular.module('app', []).controller('PaginationCtrl', ['$scope', function($scop
         "hover に property 名 currentPage が含まれるべき (value: {})",
         value
     );
+}
+
+#[test]
+fn test_goto_definition_from_ui_sref_to_state_definition() {
+    // HTML 上の `ui-sref="home"` の "home" にカーソルがあれば、
+    // JS 上の `$stateProvider.state('home', ...)` にジャンプすべき。
+    use angularjs_lsp::handler::DefinitionHandler;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        GotoDefinitionParams, GotoDefinitionResponse, PartialResultParams, Position,
+        TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', { url: '/home' });
+}]);
+"#;
+    let html = r#"<a ui-sref="home">Home</a>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+    let js_uri = Url::parse("file:///test.js").unwrap();
+
+    let handler = DefinitionHandler::new(Arc::clone(&index));
+    // ui-sref="home" の値の "home" にカーソル
+    // <a ui-sref="home">Home</a>
+    //  0123456789012345
+    //             ^ col 12 (h)
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: html_uri.clone(),
+            },
+            position: Position { line: 0, character: 13 },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let response = handler
+        .goto_definition(params)
+        .expect("ui-sref から state 定義へジャンプすべき");
+
+    let location = match response {
+        GotoDefinitionResponse::Scalar(loc) => loc,
+        GotoDefinitionResponse::Array(locs) => locs.into_iter().next().expect("at least one"),
+        GotoDefinitionResponse::Link(_) => panic!("unexpected Link"),
+    };
+
+    assert_eq!(location.uri, js_uri,
+        "ui-sref のジャンプ先は JS の state 定義ファイルであるべき");
+}
+
+#[test]
+fn test_hover_on_ui_sref_returns_state_definition_info() {
+    use angularjs_lsp::handler::HoverHandler;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        HoverContents, HoverParams, Position, TextDocumentIdentifier,
+        TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', { url: '/home' });
+}]);
+"#;
+    let html = r#"<a ui-sref="home">Home</a>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let handler = HoverHandler::new(Arc::clone(&index));
+    let params = HoverParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: html_uri },
+            position: Position { line: 0, character: 13 },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+    let hover = handler.hover(params).expect("ui-sref の hover が返るべき");
+    let value = match hover.contents {
+        HoverContents::Markup(m) => m.value,
+        _ => panic!("expected Markup hover"),
+    };
+    assert!(value.contains("home"),
+        "hover に state 名 'home' が含まれるべき (value: {})", value);
+    assert!(value.contains("ui-router state"),
+        "hover に kind 'ui-router state' が含まれるべき (value: {})", value);
 }
 
 #[test]

@@ -63,7 +63,33 @@ impl DefinitionHandler {
         position: Position,
         source: Option<&str>,
     ) -> Option<GotoDefinitionResponse> {
-        // 0. まずカスタムディレクティブ/コンポーネント参照をチェック
+        // 0. ui-router の `ui-sref="state"` 参照を最優先でチェック
+        if let Some(ui_sref) = self
+            .index
+            .html
+            .find_ui_sref_reference_at(uri, position.line, position.character)
+        {
+            let definitions = self.index.definitions.get_definitions(&ui_sref.state_name);
+            let state_defs: Vec<_> = definitions
+                .into_iter()
+                .filter(|d| d.kind == SymbolKind::UiRouterState)
+                .collect();
+            if !state_defs.is_empty() {
+                let locations: Vec<Location> = state_defs
+                    .into_iter()
+                    .map(|def| Location {
+                        uri: def.uri.clone(),
+                        range: def.name_span.to_lsp_range(),
+                    })
+                    .collect();
+                return Some(GotoDefinitionResponse::Array(locations));
+            }
+            // state 定義が見つからなくても、他のシンボルとして解決すべきではない
+            // (ui-sref の値は state 名なので、controller 名等として解決すると誤動作する)
+            return None;
+        }
+
+        // 0b. まずカスタムディレクティブ/コンポーネント参照をチェック
         if let Some(directive_ref) =
             self.index
                 .html
