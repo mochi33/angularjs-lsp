@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use super::context::{AnalyzerContext, DiInfo};
 use super::AngularJsAnalyzer;
-use crate::model::{ControllerScope, Span, SymbolReference};
+use crate::model::{ControllerScope, SymbolReference};
 
 impl AngularJsAnalyzer {
     /// ES6 classノードからconstructorメソッドを取得する
@@ -132,18 +132,11 @@ impl AngularJsAnalyzer {
                 if child.kind() == "string" {
                     let dep_name = self.extract_string_value(child, source);
                     if !dep_name.starts_with('$') {
-                        let start = child.start_position();
-                        let end = child.end_position();
 
                         let reference = SymbolReference {
                             name: dep_name,
                             uri: uri.clone(),
-                            span: Span::new(
-                                self.offset_line(start.row as u32),
-                                start.column as u32,
-                                self.offset_line(end.row as u32),
-                                end.column as u32,
-                            ),
+                            span: self.span_of(child),
                         };
 
                         self.index.definitions.add_reference(reference);
@@ -168,18 +161,11 @@ impl AngularJsAnalyzer {
                 if child.kind() == "string" {
                     let dep_name = self.extract_string_value(child, source);
                     if !dep_name.starts_with('$') {
-                        let start = child.start_position();
-                        let end = child.end_position();
 
                         let reference = SymbolReference {
                             name: dep_name,
                             uri: uri.clone(),
-                            span: Span::new(
-                                self.offset_line(start.row as u32),
-                                start.column as u32,
-                                self.offset_line(end.row as u32),
-                                end.column as u32,
-                            ),
+                            span: self.span_of(child),
                         };
 
                         self.index.definitions.add_reference(reference);

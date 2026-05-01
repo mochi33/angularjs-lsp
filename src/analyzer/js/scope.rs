@@ -44,18 +44,11 @@ impl AngularJsAnalyzer {
                             // 既に定義済みの場合は参照として登録
                             if ctx.defined_scope_properties.contains_key(&full_name) {
                                 // 代入の左辺も参照としてカウント
-                                let start = property.start_position();
-                                let end = property.end_position();
 
                                 let reference = SymbolReference {
                                     name: full_name,
                                     uri: uri.clone(),
-                                    span: Span::new(
-                                        self.offset_line(start.row as u32),
-                                        start.column as u32,
-                                        self.offset_line(end.row as u32),
-                                        end.column as u32,
-                                    ),
+                                    span: self.span_of(property),
                                 };
 
                                 self.index.definitions.add_reference(reference);
@@ -164,19 +157,12 @@ impl AngularJsAnalyzer {
                     // シンボル名を生成
                     let full_name = format!("{}.$scope.{}", controller_name, prop_name);
 
-                    let start = property.start_position();
-                    let end = property.end_position();
 
                     // 定義がなくても参照として登録（非同期処理内での定義など）
                     let reference = SymbolReference {
                         name: full_name,
                         uri: uri.clone(),
-                        span: Span::new(
-                            self.offset_line(start.row as u32),
-                            start.column as u32,
-                            self.offset_line(end.row as u32),
-                            end.column as u32,
-                        ),
+                        span: self.span_of(property),
                     };
 
                     self.index.definitions.add_reference(reference);
@@ -223,18 +209,11 @@ impl AngularJsAnalyzer {
                             // 既に定義済みの場合は参照として登録
                             if ctx.defined_root_scope_properties.contains_key(&full_name) {
                                 // 代入の左辺も参照としてカウント
-                                let start = property.start_position();
-                                let end = property.end_position();
 
                                 let reference = SymbolReference {
                                     name: full_name,
                                     uri: uri.clone(),
-                                    span: Span::new(
-                                        self.offset_line(start.row as u32),
-                                        start.column as u32,
-                                        self.offset_line(end.row as u32),
-                                        end.column as u32,
-                                    ),
+                                    span: self.span_of(property),
                                 };
 
                                 self.index.definitions.add_reference(reference);
@@ -343,19 +322,12 @@ impl AngularJsAnalyzer {
                     // シンボル名を生成
                     let full_name = format!("{}.$rootScope.{}", module_name, prop_name);
 
-                    let start = property.start_position();
-                    let end = property.end_position();
 
                     // 定義がなくても参照として登録（非同期処理内での定義など）
                     let reference = SymbolReference {
                         name: full_name,
                         uri: uri.clone(),
-                        span: Span::new(
-                            self.offset_line(start.row as u32),
-                            start.column as u32,
-                            self.offset_line(end.row as u32),
-                            end.column as u32,
-                        ),
+                        span: self.span_of(property),
                     };
 
                     self.index.definitions.add_reference(reference);
