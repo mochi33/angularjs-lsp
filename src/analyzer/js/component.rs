@@ -546,6 +546,9 @@ impl AngularJsAnalyzer {
 
     /// $stateProvider.state() の設定オブジェクトからcontrollerプロパティを探し、DIスコープを抽出する
     /// また、controller と templateUrl の組み合わせでテンプレートバインディングも登録する
+    ///
+    /// `views: { 'main': {...}, 'sidebar': {...} }` (ui-router の名前付きビュー) も
+    /// 各ビュー設定を再帰的に処理する。
     fn extract_controller_di_from_state_config(&self, obj_node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         // テンプレートバインディング用にcontrollerとtemplateUrlを収集（StateProviderソース）
         self.extract_template_binding_from_object(obj_node, source, uri, BindingSource::StateProvider);
@@ -606,6 +609,28 @@ impl AngularJsAnalyzer {
                                 }
                             }
                         }
+                    } else if key_name == "views" {
+                        // ui-router 名前付きビュー: views: { 'main': {...}, 'sidebar': {...} }
+                        // 各ビュー設定は state 設定と同じ controller / templateUrl 構造を持つ
+                        if let Some(views_obj) = child.child_by_field_name("value") {
+                            if views_obj.kind() == "object" {
+                                self.extract_state_views(views_obj, source, uri, ctx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `views: { 'name': { controller, templateUrl, ... }, ... }` の各ビュー設定を処理する
+    fn extract_state_views(&self, views_obj: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
+        let mut cursor = views_obj.walk();
+        for child in views_obj.children(&mut cursor) {
+            if child.kind() == "pair" {
+                if let Some(value) = child.child_by_field_name("value") {
+                    if value.kind() == "object" {
+                        self.extract_controller_di_from_state_config(value, source, uri, ctx);
                     }
                 }
             }
