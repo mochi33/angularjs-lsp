@@ -47,22 +47,22 @@ angular.module('app', []).factory('UserResource', ['$resource', function($resour
 
 ---
 
-### 4. `$stateProvider.state()` (ui-router) のコントローラー参照が追跡されない
+### ~~4. `$stateProvider.state()` (ui-router) のコントローラー参照が追跡されない~~ (対応済み)
 
-`$routeProvider.when()` は対応済みだが、ui-router の `$stateProvider.state()` は未対応。
+`$stateProvider.state()` の `controller` / `templateUrl` の抽出、チェーン記法、配列 DI でリネームされた
+レシーバ、トップレベル呼び出し、インライン controller 関数、`views: { ... }` 名前付きビュー
+すべて対応済み。
 
 ```javascript
-angular.module('app', []).config(['$stateProvider', function($stateProvider) {
-    $stateProvider
-        .state('home', {
-            url: '/home',
-            templateUrl: 'views/home.html',
-            controller: 'HomeController'   // 参照として追跡されない
-        });
-}]);
+$stateProvider.state('layout', {
+    views: {
+        'main':    { templateUrl: 'main.html',    controller: 'MainController' },     // ✓ 参照登録
+        'sidebar': { templateUrl: 'sidebar.html', controller: 'SidebarController' }   // ✓ 参照登録
+    }
+});
 ```
 
-**対応案**: `$stateProvider.state()` の第2引数オブジェクトから `controller` と `templateUrl` を抽出し、テンプレートバインディングとして登録する。
+**未対応**: `resolve: { ... }` の依存注入、`ui-sref` / `ui-view` HTML 属性、`$state.go()` / `$state.transitionTo()` JS 参照、dot-notation 親子 state の階層追跡。
 
 ---
 

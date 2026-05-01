@@ -1643,6 +1643,119 @@ angular.module('app', []).config(['$stateProvider', function($stateProvider) {
         "3つのテンプレートバインディングが登録されるべき");
 }
 
+#[test]
+fn test_state_provider_named_views_controller_references() {
+    // ui-router 名前付きビュー: views: { 'name': { controller, templateUrl } }
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('layout', {
+        url: '/layout',
+        views: {
+            'main': {
+                templateUrl: 'views/main.html',
+                controller: 'MainViewController'
+            },
+            'sidebar': {
+                templateUrl: 'views/sidebar.html',
+                controller: 'SidebarController'
+            }
+        }
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_reference(&index, "MainViewController"),
+        "named view 'main' の controller 参照が認識されるべき");
+    assert!(has_reference(&index, "SidebarController"),
+        "named view 'sidebar' の controller 参照が認識されるべき");
+}
+
+#[test]
+fn test_state_provider_named_views_template_bindings() {
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('dashboard', {
+        url: '/dashboard',
+        views: {
+            'header': {
+                templateUrl: 'views/header.html',
+                controller: 'HeaderController'
+            },
+            'content': {
+                templateUrl: 'views/content.html',
+                controller: 'ContentController'
+            }
+        }
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    let bindings = index.templates.get_all_template_bindings();
+    let has_header = bindings.iter().any(|b|
+        b.template_path.contains("header.html") && b.controller_name == "HeaderController"
+    );
+    let has_content = bindings.iter().any(|b|
+        b.template_path.contains("content.html") && b.controller_name == "ContentController"
+    );
+    assert!(has_header,
+        "named view 'header' のテンプレートバインディングが登録されるべき");
+    assert!(has_content,
+        "named view 'content' のテンプレートバインディングが登録されるべき");
+}
+
+#[test]
+fn test_state_provider_named_views_inline_controller() {
+    // 名前付きビュー内のインライン controller の DI スコープが認識される
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('split', {
+        url: '/split',
+        views: {
+            'top': {
+                templateUrl: 'views/top.html',
+                controller: ['$scope', function($scope) {
+                    $scope.topItem = 1;
+                }]
+            }
+        }
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_definition(&index, "state.$scope.topItem", SymbolKind::ScopeProperty),
+        "named view 内のインライン controller の $scope プロパティが認識されるべき");
+}
+
+#[test]
+fn test_state_provider_top_level_and_named_views_coexist() {
+    // 親 state に templateUrl/controller がありつつ views も持つケース
+    // (両方とも binding として登録される)
+    let source = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('parent', {
+        url: '/parent',
+        templateUrl: 'views/parent.html',
+        controller: 'ParentController',
+        views: {
+            'child': {
+                templateUrl: 'views/child.html',
+                controller: 'ChildController'
+            }
+        }
+    });
+}]);
+"#;
+    let index = analyze_js(source);
+    assert!(has_reference(&index, "ParentController"),
+        "親 state の controller 参照が認識されるべき");
+    assert!(has_reference(&index, "ChildController"),
+        "named view 内の controller 参照も認識されるべき");
+
+    let bindings = index.templates.get_all_template_bindings();
+    assert_eq!(bindings.len(), 2,
+        "親と named view の両方のテンプレートバインディングが登録されるべき");
+}
+
 // ============================================================
 // workspace/symbol テスト
 // ============================================================
