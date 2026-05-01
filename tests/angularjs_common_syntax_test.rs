@@ -3064,6 +3064,61 @@ angular.module('app', []).controller('FormCtrl', ['$scope', function($scope) {
 }
 
 #[test]
+fn test_ng_switch_when_value_is_not_treated_as_scope_reference() {
+    // `ng-switch-when="red"` の値は ng-switch の評価結果と string match される
+    // case ラベルでありスコープ参照ではない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('PaletteCtrl', ['$scope', function($scope) {
+    $scope.color = 'red';
+}]);
+"#;
+    let html = r#"
+<div ng-controller="PaletteCtrl" ng-switch="color">
+    <div ng-switch-when="red">Red</div>
+    <div ng-switch-when="blue">Blue</div>
+    <div ng-switch-when="green">Green</div>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let scope_refs = index.html.get_html_scope_references(&html_uri);
+    let names: Vec<&str> = scope_refs.iter().map(|r| r.property_path.as_str()).collect();
+    for case_label in &["red", "blue", "green"] {
+        assert!(
+            !names.contains(case_label),
+            "ng-switch-when=\"{}\" の値はスコープ参照として登録されてはいけない (refs: {:?})",
+            case_label,
+            names
+        );
+    }
+    // ng-switch="color" の方は引き続き式として解析される
+    assert!(
+        names.contains(&"color"),
+        "ng-switch の値は式として解析され color が登録されるべき (refs: {:?})",
+        names
+    );
+
+    // 診断にも case ラベルに対する false positive が出ないこと
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    for d in &diagnostics {
+        for case_label in &["red", "blue", "green"] {
+            assert!(
+                !d.message.contains(&format!("'{}'", case_label)),
+                "ng-switch-when の値 '{}' に対して診断が出てはいけない (diagnostic: {})",
+                case_label,
+                d.message
+            );
+        }
+    }
+}
+
+#[test]
 fn test_html_completion_does_not_duplicate_scope_method_with_dollar_scope_label() {
     // HTML 内の {{ }} 補完で `$scope.update = function() {}` を定義した場合、
     // `update` (Function) のみが候補に出るべきで、`$scope.update` (Method) が

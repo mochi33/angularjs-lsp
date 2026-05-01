@@ -100,12 +100,18 @@ pub fn is_ng_directive(attr_name: &str) -> bool {
 /// なく単なる文字列キー / URL として扱われる:
 /// - `ng-message="required"` — `$error.required` の検証キー名
 /// - `ng-messages-include="error-messages.html"` — テンプレート URL
+/// - `ng-switch-when="red"` — `ng-switch` の値との string match (case ラベル)
 ///
-/// これらに対して値を Angular 式として解析すると、`$scope.required` 等のような
-/// false positive な scope reference が登録され、診断で「未定義」警告が出てしまう。
+/// これらに対して値を Angular 式として解析すると、`$scope.required` / `$scope.red`
+/// 等のような false positive な scope reference が登録され、診断で「未定義」警告
+/// が出てしまう。
+///
+/// 参考: AngularJS source (`ngSwitchWhenDirective`) は `attrs.ngSwitchWhen` を
+/// `$eval` せず literal として `ctrl.cases['!' + value]` のキーに使っている。
 static LITERAL_VALUE_DIRECTIVE_SET: phf::Set<&'static str> = phf_set! {
     "ng-message", "data-ng-message",
     "ng-messages-include", "data-ng-messages-include",
+    "ng-switch-when", "data-ng-switch-when",
 };
 
 /// 属性値が Angular 式ではなくリテラル文字列として解釈されるディレクティブか判定
