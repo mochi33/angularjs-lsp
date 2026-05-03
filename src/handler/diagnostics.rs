@@ -5,6 +5,7 @@ use tracing::debug;
 
 use crate::config::DiagnosticsConfig;
 use crate::index::Index;
+use crate::model::{DirectiveUsageType, SymbolKind};
 
 /// 診断ハンドラー
 pub struct DiagnosticsHandler {
@@ -19,13 +20,28 @@ impl DiagnosticsHandler {
 
     /// 重要度文字列をDiagnosticSeverityに変換
     fn parse_severity(&self) -> DiagnosticSeverity {
-        match self.config.severity.to_lowercase().as_str() {
+        Self::severity_from_str(&self.config.severity)
+    }
+
+    /// 任意の severity 文字列を DiagnosticSeverity に変換
+    fn severity_from_str(s: &str) -> DiagnosticSeverity {
+        match s.to_lowercase().as_str() {
             "error" => DiagnosticSeverity::ERROR,
             "warning" => DiagnosticSeverity::WARNING,
             "hint" => DiagnosticSeverity::HINT,
             "information" | "info" => DiagnosticSeverity::INFORMATION,
             _ => DiagnosticSeverity::WARNING,
         }
+    }
+
+    /// 未登録 directive / component 用の severity
+    /// `unknown_directive_severity` が指定されていればそれを、なければ `severity` を使う
+    fn parse_unknown_directive_severity(&self) -> DiagnosticSeverity {
+        self.config
+            .unknown_directive_severity
+            .as_deref()
+            .map(Self::severity_from_str)
+            .unwrap_or_else(|| self.parse_severity())
     }
 
     /// HTMLファイルの診断を実行
@@ -41,6 +57,11 @@ impl DiagnosticsHandler {
 
         // ローカル変数参照のチェック
         diagnostics.extend(self.check_local_variable_references(uri));
+
+        // 未登録 directive / component のチェック
+        if self.config.unknown_directive_references {
+            diagnostics.extend(self.check_unknown_directive_references(uri));
+        }
 
         diagnostics
     }
@@ -367,6 +388,70 @@ impl DiagnosticsHandler {
                     });
                 }
             }
+        }
+
+        diagnostics
+    }
+
+    /// 未登録 directive / component 参照のチェック
+    ///
+    /// HTML 内で要素 (`<my-cmp>`) や属性 (`<div my-directive>`) として使われている
+    /// カスタムディレクティブが workspace 内のどこにも `.directive(...)` /
+    /// `.component(...)` で登録されていない場合に警告を出す。
+    ///
+    /// false positive 抑制:
+    /// - 標準 HTML 属性 (class, id, ...) や標準 HTML 要素 (div, span, ...) は
+    ///   `directive_reference.rs` の登録時点で除外済み
+    /// - `ng-` プレフィックス組み込みディレクティブも登録時点で除外済み
+    /// - `data-` プレフィックスは正規化済み (登録側)
+    fn check_unknown_directive_references(&self, uri: &Url) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let severity = self.parse_unknown_directive_severity();
+
+        let references = self.index.html.get_all_directive_references_for_uri(uri);
+
+        for reference in references {
+            // workspace 内に Directive または Component の定義があるかチェック
+            let defs = self
+                .index
+                .definitions
+                .get_definitions(&reference.directive_name);
+            let registered = defs
+                .iter()
+                .any(|s| s.kind == SymbolKind::Directive || s.kind == SymbolKind::Component);
+
+            if registered {
+                continue;
+            }
+
+            let (kind_label, suggestion) = match reference.usage_type {
+                DirectiveUsageType::Element => ("component or directive", "component"),
+                DirectiveUsageType::Attribute => ("directive", "directive"),
+            };
+
+            diagnostics.push(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: reference.start_line,
+                        character: reference.start_col,
+                    },
+                    end: Position {
+                        line: reference.end_line,
+                        character: reference.end_col,
+                    },
+                },
+                severity: Some(severity),
+                code: None,
+                code_description: None,
+                source: Some("angularjs-lsp".to_string()),
+                message: format!(
+                    "Unknown {} '{}' is not registered with .{}(...) anywhere in the workspace",
+                    kind_label, reference.directive_name, suggestion
+                ),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
         }
 
         diagnostics

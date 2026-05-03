@@ -40,6 +40,16 @@ pub struct DiagnosticsConfig {
     /// 未使用スコープ変数の警告を有効にする（デフォルト: true）
     #[serde(default = "default_true")]
     pub unused_scope_variables: bool,
+    /// 未登録 directive / component 参照の警告を有効にする（デフォルト: true）
+    #[serde(default = "default_true")]
+    pub unknown_directive_references: bool,
+    /// 未登録 directive / component の重要度
+    /// "error", "warning", "hint", "information"（デフォルト: "warning"）
+    ///
+    /// `severity` (汎用) と独立に設定したい場合に使う。指定しない場合は
+    /// `severity` と同じ値を使う（=後方互換）。
+    #[serde(default)]
+    pub unknown_directive_severity: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -56,6 +66,8 @@ impl Default for DiagnosticsConfig {
             enabled: default_true(),
             severity: default_severity(),
             unused_scope_variables: default_true(),
+            unknown_directive_references: default_true(),
+            unknown_directive_severity: None,
         }
     }
 }
@@ -158,5 +170,23 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.severity, "warning");
         assert!(config.unused_scope_variables);
+        assert!(config.unknown_directive_references);
+        assert!(config.unknown_directive_severity.is_none());
+    }
+
+    #[test]
+    fn test_diagnostics_unknown_directive_override() {
+        let json = r#"{
+            "diagnostics": {
+                "unknown_directive_references": false,
+                "unknown_directive_severity": "error"
+            }
+        }"#;
+        let config: AjsConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.diagnostics.unknown_directive_references);
+        assert_eq!(
+            config.diagnostics.unknown_directive_severity.as_deref(),
+            Some("error")
+        );
     }
 }
