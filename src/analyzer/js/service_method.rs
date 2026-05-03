@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use super::context::LocalVarLocation;
 use super::AngularJsAnalyzer;
-use crate::model::{Span, SymbolBuilder, SymbolKind};
+use crate::model::{SymbolBuilder, SymbolKind};
 
 impl AngularJsAnalyzer {
     /// サービス/ファクトリーの実装関数からメソッドを抽出する
@@ -83,9 +83,6 @@ impl AngularJsAnalyzer {
                             continue;
                         }
 
-                        let start = name_node.start_position();
-                        let end = name_node.end_position();
-
                         // JSDocを抽出
                         let docs = self.extract_jsdoc_for_line(child.start_position().row, source);
 
@@ -94,12 +91,7 @@ impl AngularJsAnalyzer {
                             .and_then(|params| self.extract_params_from_node(params, source));
 
                         let full_name = format!("{}.{}", service_name, method_name);
-                        let span = Span::new(
-                            self.offset_line(start.row as u32),
-                            start.column as u32,
-                            self.offset_line(end.row as u32),
-                            end.column as u32,
-                        );
+                        let span = self.span_of(name_node);
 
                         let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                             .definition_span(span)
@@ -187,16 +179,8 @@ impl AngularJsAnalyzer {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let func_name = self.node_text(name_node, source);
                 // 関数名ではなく関数宣言全体の位置を記録する
-                let start = node.start_position();
-                let end = node.end_position();
-
                 func_decls.insert(func_name, LocalVarLocation {
-                    span: Span::new(
-                        self.offset_line(start.row as u32),
-                        start.column as u32,
-                        self.offset_line(end.row as u32),
-                        end.column as u32,
-                    ),
+                    span: self.span_of(node),
                 });
             }
         }
@@ -261,16 +245,8 @@ impl AngularJsAnalyzer {
                                     || value_node.kind() == "arrow_function"
                                 {
                                     let var_name = self.node_text(name_node, source);
-                                    let start = value_node.start_position();
-                                    let end = value_node.end_position();
-
                                     local_vars.insert(var_name, LocalVarLocation {
-                                        span: Span::new(
-                                            self.offset_line(start.row as u32),
-                                            start.column as u32,
-                                            self.offset_line(end.row as u32),
-                                            end.column as u32,
-                                        ),
+                                        span: self.span_of(value_node),
                                     });
                                 }
                             }
@@ -380,8 +356,6 @@ impl AngularJsAnalyzer {
                     if self.node_text(object, source) == returned_var {
                         if let Some(property) = left.child_by_field_name("property") {
                             let method_name = self.node_text(property, source);
-                            let start = property.start_position();
-                            let end = property.end_position();
 
                             let docs = self.extract_jsdoc_for_line(assign_node.start_position().row, source);
 
@@ -391,12 +365,7 @@ impl AngularJsAnalyzer {
                                 .and_then(|right| self.extract_function_params(right, source));
 
                             let full_name = format!("{}.{}", service_name, method_name);
-                            let span = Span::new(
-                                self.offset_line(start.row as u32),
-                                start.column as u32,
-                                self.offset_line(end.row as u32),
-                                end.column as u32,
-                            );
+                            let span = self.span_of(property);
 
                             let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                                 .definition_span(span)
@@ -436,8 +405,6 @@ impl AngularJsAnalyzer {
                     if obj_text == "this" || this_aliases.contains(&obj_text) {
                         if let Some(property) = left.child_by_field_name("property") {
                             let method_name = self.node_text(property, source);
-                            let start = property.start_position();
-                            let end = property.end_position();
 
                             // 代入文の行からJSDocを探す
                             let docs = self.extract_jsdoc_for_line(assign_node.start_position().row, source);
@@ -448,12 +415,7 @@ impl AngularJsAnalyzer {
                                 .and_then(|right| self.extract_function_params(right, source));
 
                             let full_name = format!("{}.{}", service_name, method_name);
-                            let span = Span::new(
-                                self.offset_line(start.row as u32),
-                                start.column as u32,
-                                self.offset_line(end.row as u32),
-                                end.column as u32,
-                            );
+                            let span = self.span_of(property);
 
                             let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                                 .definition_span(span)
@@ -506,30 +468,16 @@ impl AngularJsAnalyzer {
                             let method_name = self.node_text(key, source);
                             let full_name = format!("{}.{}", service_name, method_name);
                             // シンボル名の位置はキーの位置
-                            let name_start = key.start_position();
-                            let name_end = key.end_position();
-                            let name_span = Span::new(
-                                self.offset_line(name_start.row as u32),
-                                name_start.column as u32,
-                                self.offset_line(name_end.row as u32),
-                                name_end.column as u32,
-                            );
+                            let name_span = self.span_of(key);
 
                             match value.kind() {
                                 // 直接関数定義: login: function() {}
                                 "function_expression" | "arrow_function" => {
-                                    let start = key.start_position();
-                                    let end = key.end_position();
                                     // pairノードの行からJSDocを探す
                                     let docs = self.extract_jsdoc_for_line(child.start_position().row, source);
                                     // パラメータを抽出
                                     let parameters = self.extract_function_params(value, source);
-                                    let def_span = Span::new(
-                                        self.offset_line(start.row as u32),
-                                        start.column as u32,
-                                        self.offset_line(end.row as u32),
-                                        end.column as u32,
-                                    );
+                                    let def_span = self.span_of(key);
 
                                     let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                                         .definition_span(def_span)
@@ -563,15 +511,8 @@ impl AngularJsAnalyzer {
                                         self.index.definitions.add_definition(builder.build());
                                     } else {
                                         // ローカル変数が見つからない場合はキーの位置を使用
-                                        let start = key.start_position();
-                                        let end = key.end_position();
                                         let docs = self.extract_jsdoc_for_line(child.start_position().row, source);
-                                        let def_span = Span::new(
-                                            self.offset_line(start.row as u32),
-                                            start.column as u32,
-                                            self.offset_line(end.row as u32),
-                                            end.column as u32,
-                                        );
+                                        let def_span = self.span_of(key);
 
                                         let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                                             .definition_span(def_span)
@@ -594,14 +535,7 @@ impl AngularJsAnalyzer {
                     let method_name = self.node_text(child, source);
                     let full_name = format!("{}.{}", service_name, method_name);
                     // シンボル名の位置はshorthandプロパティの位置
-                    let name_start = child.start_position();
-                    let name_end = child.end_position();
-                    let name_span = Span::new(
-                        self.offset_line(name_start.row as u32),
-                        name_start.column as u32,
-                        self.offset_line(name_end.row as u32),
-                        name_end.column as u32,
-                    );
+                    let name_span = self.span_of(child);
 
                     // ローカル変数の定義位置があればそれを使用
                     if let Some(loc) = local_vars.get(&method_name) {
@@ -618,15 +552,8 @@ impl AngularJsAnalyzer {
 
                         self.index.definitions.add_definition(builder.build());
                     } else {
-                        let start = child.start_position();
-                        let end = child.end_position();
-                        let docs = self.extract_jsdoc_for_line(start.row, source);
-                        let def_span = Span::new(
-                            self.offset_line(start.row as u32),
-                            start.column as u32,
-                            self.offset_line(end.row as u32),
-                            end.column as u32,
-                        );
+                        let docs = self.extract_jsdoc_for_line(child.start_position().row, source);
+                        let def_span = self.span_of(child);
 
                         let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                             .definition_span(def_span)
@@ -799,8 +726,6 @@ impl AngularJsAnalyzer {
                     if is_this_or_alias {
                         if let Some(property) = left.child_by_field_name("property") {
                             let method_name = self.node_text(property, source);
-                            let start = property.start_position();
-                            let end = property.end_position();
 
                             let docs = self.extract_jsdoc_for_line(assign_node.start_position().row, source);
 
@@ -810,12 +735,7 @@ impl AngularJsAnalyzer {
                                 .and_then(|right| self.extract_function_params(right, source));
 
                             let full_name = format!("{}.{}", controller_name, method_name);
-                            let span = Span::new(
-                                self.offset_line(start.row as u32),
-                                start.column as u32,
-                                self.offset_line(end.row as u32),
-                                end.column as u32,
-                            );
+                            let span = self.span_of(property);
 
                             let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                                 .definition_span(span)
