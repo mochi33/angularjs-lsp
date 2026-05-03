@@ -1,10 +1,16 @@
 use std::sync::Arc;
 
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range, Url};
+use tower_lsp::lsp_types::{
+    Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString, Position, Range, Url,
+};
 use tracing::debug;
 
 use crate::config::DiagnosticsConfig;
 use crate::index::Index;
+
+/// 未定義 \$scope プロパティ診断に付与する code。
+/// `code_action` ハンドラはこれをキーに該当診断を識別する。
+pub const UNDEFINED_SCOPE_PROPERTY_CODE: &str = "angularjs-lsp.undefined-scope-property";
 
 /// 診断ハンドラー
 pub struct DiagnosticsHandler {
@@ -265,7 +271,9 @@ impl DiagnosticsHandler {
                             },
                         },
                         severity: Some(severity),
-                        code: None,
+                        code: Some(NumberOrString::String(
+                            UNDEFINED_SCOPE_PROPERTY_CODE.to_string(),
+                        )),
                         code_description: None,
                         source: Some("angularjs-lsp".to_string()),
                         message: format!(
@@ -354,7 +362,9 @@ impl DiagnosticsHandler {
                             },
                         },
                         severity: Some(severity),
-                        code: None,
+                        code: Some(NumberOrString::String(
+                            UNDEFINED_SCOPE_PROPERTY_CODE.to_string(),
+                        )),
                         code_description: None,
                         source: Some("angularjs-lsp".to_string()),
                         message: format!(
