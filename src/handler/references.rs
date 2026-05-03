@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::*;
 use tracing::debug;
 
-use crate::index::Index;
-use crate::model::{HtmlFormBinding, HtmlLocalVariable, SymbolKind};
+use crate::index::{HtmlResolution, Index};
+use crate::model::{HtmlFormBinding, HtmlLocalVariable, HtmlUiSrefReference, SymbolKind};
 use crate::util::is_html_file;
 
 pub struct ReferencesHandler {
@@ -45,159 +45,56 @@ impl ReferencesHandler {
     }
 
     /// HTMLファイルからの参照検索
+    ///
+    /// 解決優先順位は [`Index::resolve_html_position`] に集約 (issue #49)。
+    /// ここではその結果を `Vec<Location>` にマッピングするだけ。
     fn find_references_from_html(
         &self,
         uri: &Url,
         position: Position,
         include_declaration: bool,
     ) -> Option<Vec<Location>> {
-        // 0. ui-router の `ui-sref="state"` 参照を最優先でチェック
-        if let Some(ui_sref) = self
-            .index
-            .html
-            .find_ui_sref_reference_at(uri, position.line, position.character)
-        {
-            return self.collect_state_references(&ui_sref.state_name, include_declaration);
-        }
-
-        // 0b. カスタムディレクティブ参照をチェック
-        if let Some(directive_ref) = self.index.html.find_html_directive_reference_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            return self.collect_directive_all_references(
-                &directive_ref.directive_name,
-                include_declaration,
-            );
-        }
-
-        // 1. まずローカル変数をチェック（定義位置にカーソルがある場合）
-        if let Some(local_var_def) = self.index.html.find_html_local_variable_definition_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            return self.collect_local_variable_references(&local_var_def, include_declaration);
-        }
-
-        // 2. ローカル変数参照をチェック
-        if let Some(local_var_ref) = self.index.html.find_html_local_variable_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            if let Some(var_def) = self.index.find_local_variable_definition(
-                uri,
-                &local_var_ref.variable_name,
-                position.line,
-            ) {
-                return self.collect_local_variable_references(&var_def, include_declaration);
+        match self.index.resolve_html_position(uri, position, None)? {
+            HtmlResolution::UiSref(r) => self.build_for_ui_sref(&r, include_declaration),
+            HtmlResolution::Directive(r) => {
+                self.collect_directive_all_references(&r.directive_name, include_declaration)
             }
-        }
-
-        // 3. フォームバインディングをチェック（定義位置にカーソルがある場合）
-        if let Some(form_binding) = self.index.html.find_html_form_binding_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            return self.collect_form_binding_references(&form_binding, include_declaration);
-        }
-
-        // 5. 位置からHTMLスコープ参照を取得
-        let html_ref = self.index.html.find_html_scope_reference_at(
-            uri,
-            position.line,
-            position.character,
-        )?;
-
-        debug!(
-            "find_references_from_html: found reference '{}' at {}:{}",
-            html_ref.property_path, position.line, position.character
-        );
-
-        // 5a. フォームバインディング参照かどうかをチェック
-        let base_name = html_ref
-            .property_path
-            .split('.')
-            .next()
-            .unwrap_or(&html_ref.property_path);
-        if let Some(form_binding) =
-            self.index
-                .find_form_binding_definition(uri, base_name, position.line)
-        {
-            debug!(
-                "find_references_from_html: '{}' is a form binding",
-                base_name
-            );
-            return self.collect_form_binding_references(&form_binding, include_declaration);
-        }
-
-        // 5b. 継承されたローカル変数かどうかをチェック
-        let base_name = html_ref
-            .property_path
-            .split('.')
-            .next()
-            .unwrap_or(&html_ref.property_path);
-        if let Some(var_def) =
-            self.index
-                .find_local_variable_definition(uri, base_name, position.line)
-        {
-            debug!(
-                "find_references_from_html: '{}' is an inherited local variable",
-                base_name
-            );
-            return self.collect_local_variable_references(&var_def, include_declaration);
-        }
-
-        // 3b. alias.property 形式かチェック（controller as alias 構文）
-        let (resolved_controller, property_path) = if html_ref.property_path.contains('.') {
-            let parts: Vec<&str> = html_ref.property_path.splitn(2, '.').collect();
-            if parts.len() == 2 {
-                let alias = parts[0];
-                let prop = parts[1];
-                if let Some(controller) =
-                    self.index
-                        .resolve_controller_by_alias(uri, position.line, alias)
-                {
-                    debug!(
-                        "find_references_from_html: resolved alias '{}' to controller '{}'",
-                        alias, controller
-                    );
-                    (Some(controller), prop.to_string())
-                } else {
-                    (None, html_ref.property_path.clone())
-                }
-            } else {
-                (None, html_ref.property_path.clone())
+            HtmlResolution::LocalVarDef(v) | HtmlResolution::LocalVarRef(v) => {
+                self.collect_local_variable_references(&v, include_declaration)
             }
-        } else {
-            (None, html_ref.property_path.clone())
-        };
+            HtmlResolution::InheritedLocalVar(v) => {
+                self.collect_local_variable_references(&v, include_declaration)
+            }
+            HtmlResolution::FormBindingDef(f) | HtmlResolution::InheritedFormBinding(f) => {
+                self.collect_form_binding_references(&f, include_declaration)
+            }
+            HtmlResolution::Scope {
+                controllers,
+                property_path,
+                is_alias,
+            } => self.build_for_scope(&controllers, &property_path, is_alias, include_declaration),
+        }
+    }
 
-        // 3. コントローラー名を解決
-        let is_controller_as = resolved_controller.is_some();
-        let controllers = if let Some(controller) = resolved_controller {
-            vec![controller]
-        } else {
-            self.index.resolve_controllers_for_html(uri, position.line)
-        };
+    fn build_for_ui_sref(
+        &self,
+        ui_sref: &HtmlUiSrefReference,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        self.collect_state_references(&ui_sref.state_name, include_declaration)
+    }
 
-        // 4. 各コントローラーを順番に試して、定義が見つかったものを返す
-        for controller_name in &controllers {
-            debug!(
-                "find_references_from_html: trying controller '{}'",
-                controller_name
-            );
-
+    /// `Scope` variant の後段チェイン:
+    /// `{ctrl}.$scope.{prop}` → (alias なら) `{ctrl}.{prop}` → `$rootScope.{prop}`
+    fn build_for_scope(
+        &self,
+        controllers: &[String],
+        property_path: &str,
+        is_alias: bool,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        for controller_name in controllers {
             let symbol_name = format!("{}.$scope.{}", controller_name, property_path);
-
-            debug!(
-                "find_references_from_html: looking up symbol '{}'",
-                symbol_name
-            );
-
             if self.index.definitions.has_definition(&symbol_name) {
                 if let Some(locations) =
                     self.collect_references(&symbol_name, include_declaration)
@@ -207,16 +104,9 @@ impl ReferencesHandler {
             }
         }
 
-        // 5. controller as 構文の場合、this.method パターンも検索
-        if is_controller_as {
-            for controller_name in &controllers {
+        if is_alias {
+            for controller_name in controllers {
                 let symbol_name = format!("{}.{}", controller_name, property_path);
-
-                debug!(
-                    "find_references_from_html: looking up controller method '{}'",
-                    symbol_name
-                );
-
                 if self.index.definitions.has_definition(&symbol_name) {
                     if let Some(locations) =
                         self.collect_references(&symbol_name, include_declaration)
@@ -227,11 +117,10 @@ impl ReferencesHandler {
             }
         }
 
-        // 6. $rootScope からのグローバル参照を検索
         if let Some(root_scope_symbol) = self
             .index
             .definitions
-            .find_root_scope_symbol_name_by_property(&property_path)
+            .find_root_scope_symbol_name_by_property(property_path)
         {
             debug!(
                 "find_references_from_html: found $rootScope symbol '{}'",

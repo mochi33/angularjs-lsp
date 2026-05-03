@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
-use crate::index::Index;
+use crate::index::{HtmlResolution, Index};
 use crate::model::{
     DirectiveUsageType, HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable,
-    HtmlLocalVariableSource, HtmlNgModelTarget, SymbolKind,
+    HtmlLocalVariableSource, HtmlNgModelTarget, HtmlUiSrefReference, SymbolKind,
 };
 use crate::util::is_html_file;
 
@@ -37,150 +37,69 @@ impl HoverHandler {
     }
 
     /// HTMLファイルからのホバー
+    ///
+    /// 解決優先順位は [`Index::resolve_html_position`] に集約 (issue #49)。
+    /// ここではその結果を `Hover` にマッピングするだけ。
     fn hover_from_html(&self, uri: &Url, position: Position) -> Option<Hover> {
-        // 0. ui-router の `ui-sref="state"` を最優先でチェック
-        if let Some(ui_sref) = self
-            .index
-            .html
-            .find_ui_sref_reference_at(uri, position.line, position.character)
-        {
-            let definitions = self.index.definitions.get_definitions(&ui_sref.state_name);
-            let state_def = definitions
-                .into_iter()
-                .find(|d| d.kind == SymbolKind::UiRouterState);
-            if let Some(def) = state_def {
-                return self.build_hover_for_symbol(&def.name);
+        match self.index.resolve_html_position(uri, position, None)? {
+            HtmlResolution::UiSref(r) => self.build_for_ui_sref(&r),
+            HtmlResolution::Directive(r) => self.build_hover_for_directive(&r),
+            HtmlResolution::LocalVarDef(v) | HtmlResolution::LocalVarRef(v) => {
+                self.build_hover_for_local_variable(&v)
             }
-            return None;
-        }
-
-        // 1. まずローカル変数をチェック（定義位置にカーソルがある場合）
-        if let Some(local_var_def) = self.index.html.find_html_local_variable_definition_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            return self.build_hover_for_local_variable(&local_var_def);
-        }
-
-        // 2. ローカル変数参照をチェック
-        if let Some(local_var_ref) = self.index.html.find_html_local_variable_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            if let Some(var_def) = self.index.find_local_variable_definition(
-                uri,
-                &local_var_ref.variable_name,
-                position.line,
-            ) {
-                return self.build_hover_for_local_variable(&var_def);
+            HtmlResolution::FormBindingDef(f) | HtmlResolution::InheritedFormBinding(f) => {
+                self.build_hover_for_form_binding(&f)
             }
+            HtmlResolution::InheritedLocalVar(v) => self.build_hover_for_local_variable(&v),
+            HtmlResolution::Scope {
+                controllers,
+                property_path,
+                is_alias,
+            } => self.build_for_scope(uri, &controllers, &property_path, is_alias),
         }
+    }
 
-        // 3. フォームバインディングをチェック（定義位置にカーソルがある場合）
-        if let Some(form_binding) = self.index.html.find_html_form_binding_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            return self.build_hover_for_form_binding(&form_binding);
-        }
+    fn build_for_ui_sref(&self, ui_sref: &HtmlUiSrefReference) -> Option<Hover> {
+        let definitions = self.index.definitions.get_definitions(&ui_sref.state_name);
+        let state_def = definitions
+            .into_iter()
+            .find(|d| d.kind == SymbolKind::UiRouterState)?;
+        self.build_hover_for_symbol(&state_def.name)
+    }
 
-        // 3.5. ディレクティブ参照をチェック
-        if let Some(directive_ref) = self.index.html.find_html_directive_reference_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            return self.build_hover_for_directive(&directive_ref);
-        }
-
-        // 4. 位置からHTMLスコープ参照を取得
-        let html_ref = self.index.html.find_html_scope_reference_at(
-            uri,
-            position.line,
-            position.character,
-        )?;
-
-        // 4a. フォームバインディング参照かどうかをチェック
-        let base_name = html_ref
-            .property_path
-            .split('.')
-            .next()
-            .unwrap_or(&html_ref.property_path);
-        if let Some(form_binding) =
-            self.index
-                .find_form_binding_definition(uri, base_name, position.line)
-        {
-            return self.build_hover_for_form_binding(&form_binding);
-        }
-
-        // 4b. 継承されたローカル変数かどうかをチェック
-        if let Some(var_def) =
-            self.index
-                .find_local_variable_definition(uri, base_name, position.line)
-        {
-            return self.build_hover_for_local_variable(&var_def);
-        }
-
-        // 4c. alias.property 形式かチェック（controller as alias 構文）
-        let (resolved_controller, property_path) = if html_ref.property_path.contains('.') {
-            let parts: Vec<&str> = html_ref.property_path.splitn(2, '.').collect();
-            if parts.len() == 2 {
-                let alias = parts[0];
-                let prop = parts[1];
-                if let Some(controller) =
-                    self.index
-                        .resolve_controller_by_alias(uri, position.line, alias)
-                {
-                    (Some(controller), prop.to_string())
-                } else {
-                    (None, html_ref.property_path.clone())
-                }
-            } else {
-                (None, html_ref.property_path.clone())
-            }
-        } else {
-            (None, html_ref.property_path.clone())
-        };
-
-        // 3. コントローラー名を解決
-        let controllers = if let Some(ref controller) = resolved_controller {
-            vec![controller.clone()]
-        } else {
-            self.index.resolve_controllers_for_html(uri, position.line)
-        };
-
-        // 4. 各コントローラーを順番に試して、定義が見つかったものを返す
-        for controller_name in &controllers {
+    /// `Scope` variant の後段チェイン:
+    /// `{ctrl}.$scope.{prop}` → (alias なら) `{ctrl}.{prop}` → ng-model 暗黙的定義
+    ///
+    /// (definition / references と異なり hover では `$rootScope` ホバーは未対応 —
+    /// 既存挙動を維持。必要なら別 Issue で追加)
+    fn build_for_scope(
+        &self,
+        uri: &Url,
+        controllers: &[String],
+        property_path: &str,
+        is_alias: bool,
+    ) -> Option<Hover> {
+        for controller_name in controllers {
             let symbol_name = format!("{}.$scope.{}", controller_name, property_path);
-
             if let Some(hover) = self.build_hover_for_symbol(&symbol_name) {
                 return Some(hover);
             }
         }
 
-        // 5. controller as 構文の場合、this.method パターンも検索
-        if resolved_controller.is_some() {
-            for controller_name in &controllers {
+        if is_alias {
+            for controller_name in controllers {
                 let symbol_name = format!("{}.{}", controller_name, property_path);
-
                 if let Some(hover) = self.build_hover_for_symbol(&symbol_name) {
                     return Some(hover);
                 }
             }
         }
 
-        // 6. ng-model 経由の暗黙的定義を最終フォールバック
-        // (controller 側で明示的に書いていなくても、HTML 上の ng-model が
-        //  \$scope に property を生成するため、その情報を表示する)
-        for controller_name in &controllers {
-            if let Some(target) = self.index.find_ng_model_implicit_def_target(
-                uri,
-                controller_name,
-                &property_path,
-            ) {
+        for controller_name in controllers {
+            if let Some(target) =
+                self.index
+                    .find_ng_model_implicit_def_target(uri, controller_name, property_path)
+            {
                 return self.build_hover_for_ng_model_target(&target, controller_name);
             }
         }
