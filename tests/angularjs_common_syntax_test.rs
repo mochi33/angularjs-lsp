@@ -3973,3 +3973,160 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
         labels
     );
 }
+
+// ============================================================
+// document highlight tests (#67)
+// ============================================================
+
+/// document_highlight ハンドラ呼び出しヘルパー
+fn run_document_highlight(
+    index: std::sync::Arc<Index>,
+    uri: tower_lsp::lsp_types::Url,
+    line: u32,
+    character: u32,
+) -> Option<Vec<tower_lsp::lsp_types::DocumentHighlight>> {
+    use angularjs_lsp::handler::DocumentHighlightHandler;
+    use tower_lsp::lsp_types::{
+        DocumentHighlightParams, PartialResultParams, Position, TextDocumentIdentifier,
+        TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let params = DocumentHighlightParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position { line, character },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    DocumentHighlightHandler::new(index).document_highlight(params)
+}
+
+#[test]
+fn test_document_highlight_html_scope_reference() {
+    // HTML 内で `$scope.greeting` を 2 箇所参照しているとき、片方にカーソルを
+    // 置いたら同 URI の両方がハイライトされる。
+    let js = r#"
+angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
+    $scope.greeting = 'hello';
+}]);
+"#;
+    let html = r#"<div ng-controller="MyCtrl">
+    <p>{{ greeting }}</p>
+    <span>{{ greeting }}</span>
+</div>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // 行 1, "{{ greeting }}" の greeting 中央 (col 9)
+    let highlights = run_document_highlight(
+        std::sync::Arc::clone(&index),
+        html_uri.clone(),
+        1,
+        12,
+    )
+    .expect("HTML scope ref のハイライトが返るべき");
+
+    assert!(
+        highlights.len() >= 2,
+        "同一 HTML 内の 2 箇所がハイライトされるべき (got {}: {:?})",
+        highlights.len(),
+        highlights
+    );
+    assert!(
+        highlights.iter().any(|h| h.range.start.line == 1),
+        "1 行目の参照がハイライトに含まれるべき"
+    );
+    assert!(
+        highlights.iter().any(|h| h.range.start.line == 2),
+        "2 行目の参照がハイライトに含まれるべき"
+    );
+}
+
+#[test]
+fn test_document_highlight_does_not_cross_files() {
+    // 別 URI の同名シンボルはハイライトされない (同 URI 限定)。
+    use angularjs_lsp::analyzer::html::HtmlAngularJsAnalyzer;
+    use angularjs_lsp::analyzer::js::AngularJsAnalyzer;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
+    $scope.greeting = 'hello';
+}]);
+"#;
+    let html_a = r#"<div ng-controller="MyCtrl">
+    <p>{{ greeting }}</p>
+</div>"#;
+    let html_b = r#"<div ng-controller="MyCtrl">
+    <p>{{ greeting }}</p>
+</div>"#;
+
+    let index = Arc::new(Index::new());
+    let js_analyzer = Arc::new(AngularJsAnalyzer::new(index.clone()));
+    let html_analyzer =
+        HtmlAngularJsAnalyzer::new(index.clone(), js_analyzer.clone());
+
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    js_analyzer.analyze_document(&js_uri, js);
+
+    let uri_a = Url::parse("file:///a.html").unwrap();
+    let uri_b = Url::parse("file:///b.html").unwrap();
+    html_analyzer.analyze_document(&uri_a, html_a);
+    html_analyzer.analyze_document(&uri_b, html_b);
+
+    // a.html の greeting にカーソルを置く → a.html の参照のみ返る
+    let highlights = run_document_highlight(Arc::clone(&index), uri_a.clone(), 1, 12)
+        .expect("a.html 上のハイライトが返るべき");
+
+    assert!(
+        !highlights.is_empty(),
+        "a.html 上で少なくとも 1 つハイライトされるべき"
+    );
+    // すべてのハイライトの位置は同 URI 上の参照だけのはず
+    // (DocumentHighlight 自体は range のみで URI 情報を持たないため、
+    //  b.html 由来の参照位置 (line 1) が混入していないことは件数で確認する)
+    assert_eq!(
+        highlights.len(),
+        1,
+        "a.html 内の 1 件だけがハイライトされるべき (b.html の同名は含めない); got {:?}",
+        highlights
+    );
+}
+
+#[test]
+fn test_document_highlight_js_symbol() {
+    // JS ファイル内のシンボル: 定義位置にカーソル → 定義 (WRITE) を含む
+    // 同 URI 内の全ハイライトが返る。
+    use angularjs_lsp::analyzer::js::AngularJsAnalyzer;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::DocumentHighlightKind;
+
+    // controller 内で `$scope.greeting = 'hello'; ... $scope.greeting + '!'`
+    // のように 1 ファイル内で同シンボルを 2 回触れるようにする。
+    let js = r#"angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
+    $scope.greeting = 'hello';
+    var x = $scope.greeting + '!';
+}]);
+"#;
+    let index = Arc::new(Index::new());
+    let js_analyzer = AngularJsAnalyzer::new(index.clone());
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    js_analyzer.analyze_document(&js_uri, js);
+
+    // line 1: "    $scope.greeting = 'hello';" → "greeting" は col 11〜18
+    let highlights = run_document_highlight(Arc::clone(&index), js_uri.clone(), 1, 14)
+        .expect("$scope プロパティのハイライトが返るべき");
+
+    assert!(
+        !highlights.is_empty(),
+        "JS シンボルが 1 件以上ハイライトされるべき"
+    );
+    assert!(
+        highlights
+            .iter()
+            .any(|h| h.kind == Some(DocumentHighlightKind::WRITE)),
+        "定義位置は WRITE kind であるべき (got: {:?})",
+        highlights
+    );
+}

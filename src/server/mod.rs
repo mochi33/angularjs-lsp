@@ -21,8 +21,8 @@ use crate::cache::{CacheLoader, CacheWriter};
 use crate::config::{AjsConfig, DiagnosticsConfig, PathMatcher};
 use crate::handler::{
     CodeLensHandler, CompletionHandler, DefinitionHandler, DiagnosticsHandler,
-    DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler,
-    SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
+    DocumentHighlightHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler,
+    RenameHandler, SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
 };
 use crate::index::Index;
 use crate::ts_proxy::TsProxy;
@@ -1316,6 +1316,7 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".to_string()]),
@@ -1856,6 +1857,24 @@ impl LanguageServer for Backend {
         }
 
         Ok(None)
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let index = Arc::clone(&self.index);
+        let params_for_blocking = params.clone();
+        let local = tokio::task::spawn_blocking(move || {
+            DocumentHighlightHandler::new(index).document_highlight(params_for_blocking)
+        })
+        .await
+        .ok()
+        .flatten();
+        // tsserver にフォールバックしない: documentHighlight は同ファイル内の
+        // 即時ハイライト用途で、AngularJS 固有のシンボルが解決できなかった場合は
+        // クライアント側のデフォルト挙動 (なし or text-based highlight) に任せる。
+        Ok(local)
     }
 
     async fn goto_definition(
