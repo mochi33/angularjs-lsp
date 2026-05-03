@@ -3973,3 +3973,149 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
         labels
     );
 }
+
+// ====================================================================
+// PR (issue #61): 未登録 ui-router state 名の診断
+// ====================================================================
+
+#[test]
+fn test_diagnose_unknown_ui_sref_state_name_in_html() {
+    // ui-sref="users.detial" (typo) は state 定義 'users.detail' とマッチしないので
+    // 未登録 state 警告が出るべき。一方で正しい 'users.detail' には出ない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('users.detail', {
+        url: '/users/:id',
+        templateUrl: 'views/users/detail.html'
+    });
+}]);
+"#;
+    let html = r#"
+<div>
+    <a ui-sref="users.detail">OK</a>
+    <a ui-sref="users.detial">Typo</a>
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("Unknown ui-router state 'users.detial'")),
+        "ui-sref='users.detial' (typo) に対し未登録 state 警告が出るべき (messages: {:?})",
+        messages
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.contains("Unknown ui-router state 'users.detail'")),
+        "正しい ui-sref='users.detail' に対し警告が出てはいけない (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_diagnose_unknown_state_go_in_js() {
+    // $state.go('users.detial') (typo) は警告。$state.go('home') は警告無し。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', [])
+.config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', { url: '/' });
+}])
+.controller('NavCtrl', ['$state', function($state) {
+    $state.go('home');
+    $state.go('users.detial');
+    $state.transitionTo('home');
+}]);
+"#;
+    let index = analyze_js(js);
+    let js_uri = Url::parse("file:///test.js").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_js(&js_uri);
+
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("Unknown ui-router state 'users.detial'")),
+        "$state.go('users.detial') に対し未登録 state 警告が出るべき (messages: {:?})",
+        messages
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.contains("Unknown ui-router state 'home'")),
+        "登録済み state 'home' を参照する $state.go / transitionTo に警告が出てはいけない (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_diagnose_unknown_state_skipped_when_no_state_definitions() {
+    // workspace に state 定義が一つも無いプロジェクト (ui-router を使っていない or
+    // まだ解析されていない) では false positive を避けるため一切警告しない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    // state 定義は無し
+    let html = r#"<a ui-sref="some.state">Link</a>"#;
+    let index = analyze_html("", html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.contains("Unknown ui-router state")),
+        "state 定義 0 件の workspace では false positive を避けるため警告しない (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_diagnose_unknown_state_severity_off_disables_check() {
+    // unknown_state_severity = "off" なら一切警告しない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).config(['$stateProvider', function($stateProvider) {
+    $stateProvider.state('home', { url: '/' });
+}]);
+"#;
+    let html = r#"<a ui-sref="users.detial">Typo</a>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let mut config = DiagnosticsConfig::default();
+    config.unknown_state_severity = "off".to_string();
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), config).diagnose_html(&html_uri);
+
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.contains("Unknown ui-router state")),
+        "unknown_state_severity='off' なら未登録 state 警告は出ないべき (messages: {:?})",
+        messages
+    );
+}

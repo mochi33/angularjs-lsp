@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
 
-use crate::model::{Symbol, SymbolKind, SymbolReference};
+use crate::model::{JsStateNavigationReference, Symbol, SymbolKind, SymbolReference};
 
 /// シンボル定義・参照の管理ストア
 pub struct DefinitionStore {
@@ -13,6 +13,12 @@ pub struct DefinitionStore {
     /// `get_definitions_for_uri` 等の URI 逆引きを O(該当ドキュメントのシンボル数)
     /// で行うためのインデックス。重複登録を避けるため HashSet で保持する。
     document_symbols: DashMap<Url, HashSet<String>>,
+    /// JS 内の `$state.go('home')` / `$state.transitionTo('home')` の state 名参照。
+    /// URI 別に保持し、未登録 state 診断で「該当 JS ファイル内の警告位置」
+    /// を引くのに使う。通常の `references` (シンボル名キー) とは別に持たないと、
+    /// 「state 名に該当する SymbolReference」の中から JS 経路で来たものだけを
+    /// 効率良く取り出せない (HTML 経路の参照と混在するため)。
+    js_state_navigation_references: DashMap<Url, Vec<JsStateNavigationReference>>,
 }
 
 impl DefinitionStore {
@@ -21,6 +27,7 @@ impl DefinitionStore {
             definitions: DashMap::new(),
             references: DashMap::new(),
             document_symbols: DashMap::new(),
+            js_state_navigation_references: DashMap::new(),
         }
     }
 
@@ -295,6 +302,31 @@ impl DefinitionStore {
         result
     }
 
+    /// `$state.go('name')` / `$state.transitionTo('name')` の state 名参照を登録
+    pub fn add_js_state_navigation_reference(&self, reference: JsStateNavigationReference) {
+        let uri = reference.uri.clone();
+        let mut entry = self.js_state_navigation_references.entry(uri).or_default();
+        let is_duplicate = entry.iter().any(|r| {
+            r.span.start_line == reference.span.start_line
+                && r.span.start_col == reference.span.start_col
+                && r.state_name == reference.state_name
+        });
+        if !is_duplicate {
+            entry.push(reference);
+        }
+    }
+
+    /// 指定 URI の JS state 遷移参照 (`$state.go` / `$state.transitionTo`) を取得
+    pub fn get_js_state_navigation_references_for_uri(
+        &self,
+        uri: &Url,
+    ) -> Vec<JsStateNavigationReference> {
+        self.js_state_navigation_references
+            .get(uri)
+            .map(|v| v.value().clone())
+            .unwrap_or_default()
+    }
+
     pub fn clear_document(&self, uri: &Url) {
         if let Some((_, symbols)) = self.document_symbols.remove(uri) {
             for symbol_name in symbols {
@@ -319,12 +351,15 @@ impl DefinitionStore {
                 }
             }
         }
+        // JS state 遷移参照は URI キーなので一発で消せる
+        self.js_state_navigation_references.remove(uri);
     }
 
     pub fn clear_all(&self) {
         self.definitions.clear();
         self.references.clear();
         self.document_symbols.clear();
+        self.js_state_navigation_references.clear();
     }
 }
 

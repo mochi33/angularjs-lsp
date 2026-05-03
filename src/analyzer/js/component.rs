@@ -4,8 +4,8 @@ use tree_sitter::Node;
 use super::context::{AnalyzerContext, DiScope};
 use super::AngularJsAnalyzer;
 use crate::model::{
-    BindingSource, ComponentTemplateUrl, ControllerScope, Span, SymbolBuilder, SymbolKind,
-    SymbolReference, TemplateBinding,
+    BindingSource, ComponentTemplateUrl, ControllerScope, JsStateNavigationReference, Span,
+    SymbolBuilder, SymbolKind, SymbolReference, TemplateBinding,
 };
 
 impl AngularJsAnalyzer {
@@ -608,6 +608,8 @@ impl AngularJsAnalyzer {
     /// `SymbolReference` として登録する。
     ///
     /// 文字列リテラル以外 (動的式) は state 名を解決できないので無視する。
+    /// 相対参照 (`.`, `^.foo` など) は state 解決に親 state コンテキストが必要なので
+    /// 診断インデックスにも登録しない (false positive 防止)。
     fn extract_state_navigation_reference(&self, node: Node, source: &str, uri: &Url) {
         let args = match node.child_by_field_name("arguments") {
             Some(a) => a,
@@ -621,11 +623,24 @@ impl AngularJsAnalyzer {
             return;
         }
         let state_name = self.extract_string_value(first_arg, source);
+        let span = self.span_of(first_arg);
         self.index.definitions.add_reference(SymbolReference {
-            name: state_name,
+            name: state_name.clone(),
             uri: uri.clone(),
-            span: self.span_of(first_arg),
+            span,
         });
+
+        // 診断 (未登録 state 警告) 用の URI 別インデックスにも登録する。
+        // 相対参照は親 state を解決しないと正しく warning 出せないので除外する。
+        if !state_name.is_empty() && state_name != "." && !state_name.starts_with('^') {
+            self.index
+                .definitions
+                .add_js_state_navigation_reference(JsStateNavigationReference {
+                    state_name,
+                    uri: uri.clone(),
+                    span,
+                });
+        }
     }
 
     /// `views: { 'name': { controller, templateUrl, ... }, ... }` の各ビュー設定を処理する
