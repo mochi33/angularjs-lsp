@@ -456,71 +456,109 @@ impl AngularJsAnalyzer {
 
             if let Some(config_obj) = config_arg {
                 if config_obj.kind() == "object" {
-                    self.extract_controller_di_from_config_object(config_obj, source, uri, ctx);
+                    self.extract_controller_di_from_config(config_obj, source, uri, ctx, ConfigKind::Route);
                 }
             }
         }
     }
 
-    /// 設定オブジェクトからcontrollerプロパティを探し、DIスコープを抽出する
-    /// また、controller と templateUrl の組み合わせでテンプレートバインディングも登録する
-    fn extract_controller_di_from_config_object(&self, obj_node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
-        // まずテンプレートバインディング用にcontrollerとtemplateUrlを収集
-        self.extract_template_binding_from_object(obj_node, source, uri, BindingSource::RouteProvider);
+    /// route / state の設定オブジェクトから controller プロパティを探し、DI スコープを抽出する。
+    /// また、controller と templateUrl の組み合わせでテンプレートバインディングも登録する。
+    ///
+    /// `kind` で route (`$routeProvider`) と state (`$stateProvider`) の差を切り替える:
+    /// - 登録する `BindingSource` (`RouteProvider` / `StateProvider`)
+    /// - DiScope / ControllerScope の `component_name` ("route" / "state")
+    /// - state のみ `views: {...}` (名前付きビュー) を再帰的に処理する
+    fn extract_controller_di_from_config(
+        &self,
+        obj_node: Node,
+        source: &str,
+        uri: &Url,
+        ctx: &mut AnalyzerContext,
+        kind: ConfigKind,
+    ) {
+        // テンプレートバインディング用に controller / templateUrl を収集
+        self.extract_template_binding_from_object(obj_node, source, uri, kind.binding_source());
 
         let mut cursor = obj_node.walk();
         for child in obj_node.children(&mut cursor) {
-            if child.kind() == "pair" {
-                if let Some(key) = child.child_by_field_name("key") {
-                    let key_name = self.node_text(key, source);
-                    let key_name = key_name.trim_matches(|c| c == '"' || c == '\'');
+            if child.kind() != "pair" {
+                continue;
+            }
+            let Some(key) = child.child_by_field_name("key") else { continue };
+            let key_name = self.node_text(key, source);
+            let key_name = key_name.trim_matches(|c| c == '"' || c == '\'');
 
-                    if key_name == "controller" {
-                        if let Some(value) = child.child_by_field_name("value") {
-                            // controller: 'ControllerName' パターンは参照登録のみ
-                            if value.kind() == "string" {
-                                let controller_name = self.extract_string_value(value, source);
-                                let reference = SymbolReference {
-                                    name: controller_name,
-                                    uri: uri.clone(),
-                                    span: self.span_of(value),
-                                };
-                                self.index.definitions.add_reference(reference);
-                            } else {
-                                // 配列・関数・class・識別子を統一的にDI解析
-                                self.extract_dependencies(value, source, uri);
-                                let di_info = self.extract_di_info(value, source);
-
-                                if di_info.has_any() {
-                                    if let Some((body_start, body_end)) = self.find_function_body_range(value, source) {
-                                        if di_info.has_scope {
-                                            self.index.controllers.add_controller_scope(ControllerScope {
-                                                name: "route".to_string(),
-                                                uri: uri.clone(),
-                                                start_line: body_start,
-                                                end_line: body_end,
-                                                injected_services: di_info.injected_services.clone(),
-                                            });
-                                        }
-
-                                        let di_scope = DiScope {
-                                            component_name: "route".to_string(),
-                                            injected_services: di_info.injected_services,
-                                            body_start_line: body_start,
-                                            body_end_line: body_end,
-                                            has_scope: di_info.has_scope,
-                                            has_root_scope: di_info.has_root_scope,
-                                            param_to_service: di_info.param_to_service,
-                                        };
-                                        ctx.push_scope(di_scope);
-                                    }
-                                }
-                            }
+            match key_name {
+                "controller" => {
+                    if let Some(value) = child.child_by_field_name("value") {
+                        self.extract_controller_di_value(value, source, uri, ctx, kind);
+                    }
+                }
+                "views" if kind.supports_named_views() => {
+                    // ui-router 名前付きビュー: views: { 'main': {...}, 'sidebar': {...} }
+                    // 各ビュー設定は state 設定と同じ controller / templateUrl 構造を持つ
+                    if let Some(views_obj) = child.child_by_field_name("value") {
+                        if views_obj.kind() == "object" {
+                            self.extract_state_views(views_obj, source, uri, ctx);
                         }
                     }
                 }
+                _ => {}
             }
         }
+    }
+
+    /// `controller:` プロパティ値から参照登録 / DI スコープを抽出する。
+    fn extract_controller_di_value(
+        &self,
+        value: Node,
+        source: &str,
+        uri: &Url,
+        ctx: &mut AnalyzerContext,
+        kind: ConfigKind,
+    ) {
+        // controller: 'ControllerName' パターンは参照登録のみ
+        if value.kind() == "string" {
+            let controller_name = self.extract_string_value(value, source);
+            self.index.definitions.add_reference(SymbolReference {
+                name: controller_name,
+                uri: uri.clone(),
+                span: self.span_of(value),
+            });
+            return;
+        }
+
+        // 配列・関数・class・識別子を統一的にDI解析
+        self.extract_dependencies(value, source, uri);
+        let di_info = self.extract_di_info(value, source);
+        if !di_info.has_any() {
+            return;
+        }
+        let Some((body_start, body_end)) = self.find_function_body_range(value, source) else {
+            return;
+        };
+
+        let component_name = kind.component_name();
+        if di_info.has_scope {
+            self.index.controllers.add_controller_scope(ControllerScope {
+                name: component_name.to_string(),
+                uri: uri.clone(),
+                start_line: body_start,
+                end_line: body_end,
+                injected_services: di_info.injected_services.clone(),
+            });
+        }
+
+        ctx.push_scope(DiScope {
+            component_name: component_name.to_string(),
+            injected_services: di_info.injected_services,
+            body_start_line: body_start,
+            body_end_line: body_end,
+            has_scope: di_info.has_scope,
+            has_root_scope: di_info.has_root_scope,
+            param_to_service: di_info.param_to_service,
+        });
     }
 
     /// `$stateProvider.state()` (ui-router) の state 定義と controller DI スコープを抽出する
@@ -559,7 +597,7 @@ impl AngularJsAnalyzer {
             // state('name', {config}) の設定オブジェクトは第2引数
             if let Some(config_obj) = args.named_child(1) {
                 if config_obj.kind() == "object" {
-                    self.extract_controller_di_from_state_config(config_obj, source, uri, ctx);
+                    self.extract_controller_di_from_config(config_obj, source, uri, ctx, ConfigKind::State);
                 }
             }
         }
@@ -590,78 +628,6 @@ impl AngularJsAnalyzer {
         });
     }
 
-    /// $stateProvider.state() の設定オブジェクトからcontrollerプロパティを探し、DIスコープを抽出する
-    /// また、controller と templateUrl の組み合わせでテンプレートバインディングも登録する
-    ///
-    /// `views: { 'main': {...}, 'sidebar': {...} }` (ui-router の名前付きビュー) も
-    /// 各ビュー設定を再帰的に処理する。
-    fn extract_controller_di_from_state_config(&self, obj_node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
-        // テンプレートバインディング用にcontrollerとtemplateUrlを収集（StateProviderソース）
-        self.extract_template_binding_from_object(obj_node, source, uri, BindingSource::StateProvider);
-
-        let mut cursor = obj_node.walk();
-        for child in obj_node.children(&mut cursor) {
-            if child.kind() == "pair" {
-                if let Some(key) = child.child_by_field_name("key") {
-                    let key_name = self.node_text(key, source);
-                    let key_name = key_name.trim_matches(|c| c == '"' || c == '\'');
-
-                    if key_name == "controller" {
-                        if let Some(value) = child.child_by_field_name("value") {
-                            // controller: 'ControllerName' パターンは参照登録のみ
-                            if value.kind() == "string" {
-                                let controller_name = self.extract_string_value(value, source);
-                                let reference = SymbolReference {
-                                    name: controller_name,
-                                    uri: uri.clone(),
-                                    span: self.span_of(value),
-                                };
-                                self.index.definitions.add_reference(reference);
-                            } else {
-                                // 配列・関数・class・識別子を統一的にDI解析
-                                self.extract_dependencies(value, source, uri);
-                                let di_info = self.extract_di_info(value, source);
-
-                                if di_info.has_any() {
-                                    if let Some((body_start, body_end)) = self.find_function_body_range(value, source) {
-                                        if di_info.has_scope {
-                                            self.index.controllers.add_controller_scope(ControllerScope {
-                                                name: "state".to_string(),
-                                                uri: uri.clone(),
-                                                start_line: body_start,
-                                                end_line: body_end,
-                                                injected_services: di_info.injected_services.clone(),
-                                            });
-                                        }
-
-                                        let di_scope = DiScope {
-                                            component_name: "state".to_string(),
-                                            injected_services: di_info.injected_services,
-                                            body_start_line: body_start,
-                                            body_end_line: body_end,
-                                            has_scope: di_info.has_scope,
-                                            has_root_scope: di_info.has_root_scope,
-                                            param_to_service: di_info.param_to_service,
-                                        };
-                                        ctx.push_scope(di_scope);
-                                    }
-                                }
-                            }
-                        }
-                    } else if key_name == "views" {
-                        // ui-router 名前付きビュー: views: { 'main': {...}, 'sidebar': {...} }
-                        // 各ビュー設定は state 設定と同じ controller / templateUrl 構造を持つ
-                        if let Some(views_obj) = child.child_by_field_name("value") {
-                            if views_obj.kind() == "object" {
-                                self.extract_state_views(views_obj, source, uri, ctx);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// `views: { 'name': { controller, templateUrl, ... }, ... }` の各ビュー設定を処理する
     fn extract_state_views(&self, views_obj: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         let mut cursor = views_obj.walk();
@@ -669,7 +635,7 @@ impl AngularJsAnalyzer {
             if child.kind() == "pair" {
                 if let Some(value) = child.child_by_field_name("value") {
                     if value.kind() == "object" {
-                        self.extract_controller_di_from_state_config(value, source, uri, ctx);
+                        self.extract_controller_di_from_config(value, source, uri, ctx, ConfigKind::State);
                     }
                 }
             }
@@ -1217,6 +1183,42 @@ impl AngularJsAnalyzer {
     }
 }
 
+/// route / state の config オブジェクト解析時に variant ごとの差分を表現する。
+///
+/// 共通ロジック (controller プロパティの解析、DI scope push、template binding 登録) は
+/// `extract_controller_di_from_config` に集約され、variant 軸の差は本 enum を介して
+/// 切り替える。新たに `$urlRouterProvider` などを足す場合はここに variant を追加する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigKind {
+    /// `$routeProvider.when()` / `.otherwise()`
+    Route,
+    /// `$stateProvider.state()` (ui-router)
+    State,
+}
+
+impl ConfigKind {
+    /// テンプレートバインディング登録時の出所マーカー
+    fn binding_source(self) -> BindingSource {
+        match self {
+            ConfigKind::Route => BindingSource::RouteProvider,
+            ConfigKind::State => BindingSource::StateProvider,
+        }
+    }
+
+    /// DiScope / ControllerScope に積む `component_name`
+    fn component_name(self) -> &'static str {
+        match self {
+            ConfigKind::Route => "route",
+            ConfigKind::State => "state",
+        }
+    }
+
+    /// `views: {...}` (名前付きビュー) を再帰展開すべきか
+    fn supports_named_views(self) -> bool {
+        matches!(self, ConfigKind::State)
+    }
+}
+
 /// `.show()` / `.open()` 呼び出しでテンプレートバインディングとして
 /// 認識すべきサービスのレジストリ。
 ///
@@ -1388,6 +1390,22 @@ mod template_service_registry_tests {
         assert_eq!(detect_template_service("show", "$unknown"), None);
         // 他の .open() 呼び出し
         assert_eq!(detect_template_service("open", "fileSystem"), None);
+    }
+
+    #[test]
+    fn config_kind_route_axis() {
+        let k = ConfigKind::Route;
+        assert_eq!(k.binding_source(), BindingSource::RouteProvider);
+        assert_eq!(k.component_name(), "route");
+        assert!(!k.supports_named_views());
+    }
+
+    #[test]
+    fn config_kind_state_axis() {
+        let k = ConfigKind::State;
+        assert_eq!(k.binding_source(), BindingSource::StateProvider);
+        assert_eq!(k.component_name(), "state");
+        assert!(k.supports_named_views());
     }
 
     #[test]
