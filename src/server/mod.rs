@@ -21,8 +21,8 @@ use crate::cache::{CacheLoader, CacheWriter};
 use crate::config::{AjsConfig, DiagnosticsConfig, PathMatcher};
 use crate::handler::{
     CodeLensHandler, CompletionHandler, DefinitionHandler, DiagnosticsHandler,
-    DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler,
-    SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
+    DocumentSymbolHandler, HoverHandler, InlayHintsHandler, ReferencesHandler,
+    RenameHandler, SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
 };
 use crate::index::Index;
 use crate::ts_proxy::TsProxy;
@@ -1345,6 +1345,7 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec!["angularjs-lsp.refreshIndex".to_string()],
                     work_done_progress_options: Default::default(),
@@ -2090,6 +2091,23 @@ impl LanguageServer for Backend {
         .ok()
         .flatten();
         Ok(tokens.map(SemanticTokensResult::Tokens))
+    }
+
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri.clone();
+        let range = Some(params.range);
+        let index = Arc::clone(&self.index);
+        let documents = Arc::clone(&self.documents);
+        let hints = tokio::task::spawn_blocking(move || {
+            InlayHintsHandler::new(index, documents).inlay_hints(&uri, range)
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(hints)
     }
 
     async fn symbol(
