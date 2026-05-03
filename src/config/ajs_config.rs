@@ -40,6 +40,13 @@ pub struct DiagnosticsConfig {
     /// 未使用スコープ変数の警告を有効にする（デフォルト: true）
     #[serde(default = "default_true")]
     pub unused_scope_variables: bool,
+    /// DI 配列の要素数と関数の引数数の不一致を警告する重要度
+    /// "error", "warning", "hint", "information"（デフォルト: "warning"）
+    /// 専用の severity を持たせるのは、本診断は誤検出のしようがない強い指摘
+    /// (実行時に確実に undefined になる) のため、ユーザがプロジェクト方針に応じて
+    /// error として扱えるようにするため。
+    #[serde(default = "default_severity")]
+    pub di_arity_severity: String,
 }
 
 fn default_true() -> bool {
@@ -56,6 +63,7 @@ impl Default for DiagnosticsConfig {
             enabled: default_true(),
             severity: default_severity(),
             unused_scope_variables: default_true(),
+            di_arity_severity: default_severity(),
         }
     }
 }
@@ -158,5 +166,6 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.severity, "warning");
         assert!(config.unused_scope_variables);
+        assert_eq!(config.di_arity_severity, "warning");
     }
 }

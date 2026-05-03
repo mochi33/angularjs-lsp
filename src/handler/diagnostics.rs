@@ -19,7 +19,12 @@ impl DiagnosticsHandler {
 
     /// 重要度文字列をDiagnosticSeverityに変換
     fn parse_severity(&self) -> DiagnosticSeverity {
-        match self.config.severity.to_lowercase().as_str() {
+        Self::severity_from_str(&self.config.severity)
+    }
+
+    /// 任意の重要度文字列を `DiagnosticSeverity` に変換する
+    fn severity_from_str(s: &str) -> DiagnosticSeverity {
+        match s.to_lowercase().as_str() {
             "error" => DiagnosticSeverity::ERROR,
             "warning" => DiagnosticSeverity::WARNING,
             "hint" => DiagnosticSeverity::HINT,
@@ -58,7 +63,40 @@ impl DiagnosticsHandler {
             diagnostics.extend(self.check_unused_scope_variables(uri));
         }
 
+        // DI 配列の要素数と関数の引数数の不一致チェック
+        diagnostics.extend(self.check_di_arity_mismatch(uri));
+
         diagnostics
+    }
+
+    /// DI 配列の要素数と関数の引数数の不一致を診断する
+    ///
+    /// アナライザーが解析時に収集した `DiArityIssue` を読み出して LSP 診断に変換する。
+    /// 検出ロジックの詳細は `AngularJsAnalyzer::check_di_arity_mismatch` を参照。
+    fn check_di_arity_mismatch(&self, uri: &Url) -> Vec<Diagnostic> {
+        let severity = Self::severity_from_str(&self.config.di_arity_severity);
+        let issues = self.index.diagnostics.get_di_arity_issues(uri);
+
+        issues
+            .into_iter()
+            .map(|issue| {
+                let message = format!(
+                    "DI array has {} dependency name(s) but the function takes {} parameter(s); they must match or services will not be injected correctly",
+                    issue.di_count, issue.param_count
+                );
+                Diagnostic {
+                    range: issue.span.to_lsp_range(),
+                    severity: Some(severity),
+                    code: None,
+                    code_description: None,
+                    source: Some("angularjs-lsp".to_string()),
+                    message,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                }
+            })
+            .collect()
     }
 
     /// 未使用スコープ変数をチェックし警告生成

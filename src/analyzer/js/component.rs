@@ -57,7 +57,7 @@ impl AngularJsAnalyzer {
                                 uri,
                             )
                         }
-                        "config" | "run" => self.extract_run_config_di(node, source, ctx),
+                        "config" | "run" => self.extract_run_config_di(node, source, uri, ctx),
                         "when" | "otherwise" => {
                             // レシーバが `$routeProvider` (DI 経由含む) のときだけ
                             // route binding として扱う。これがないと任意の
@@ -531,6 +531,10 @@ impl AngularJsAnalyzer {
 
         // 配列・関数・class・識別子を統一的にDI解析
         self.extract_dependencies(value, source, uri);
+
+        // DI 配列の arity 不一致チェック (DI 配列のみ対象、内部で判定)
+        self.check_di_arity_mismatch(value, source, uri);
+
         let di_info = self.extract_di_info(value, source);
         if !di_info.has_any() {
             return;
@@ -646,9 +650,12 @@ impl AngularJsAnalyzer {
     ///
     /// これらはシンボル定義を作成しないが、DIスコープを作成して
     /// $rootScope などの解析を可能にする
-    fn extract_run_config_di(&self, node: Node, source: &str, ctx: &mut AnalyzerContext) {
+    fn extract_run_config_di(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if let Some(args) = node.child_by_field_name("arguments") {
             if let Some(first_arg) = args.named_child(0) {
+                // DI 配列の arity 不一致チェック (DI 配列のみ対象、内部で判定)
+                self.check_di_arity_mismatch(first_arg, source, uri);
+
                 let di_info = self.extract_di_info(first_arg, source);
 
                 if di_info.has_any() {
@@ -725,6 +732,9 @@ impl AngularJsAnalyzer {
                     // 定義位置は関数定義を優先する
                     let (start, end, docs_line) = if let Some(second_arg) = args.named_child(1) {
                         self.extract_dependencies(second_arg, source, uri);
+
+                        // DI 配列の arity 不一致チェック (DI 配列のみ対象、内部で判定)
+                        self.check_di_arity_mismatch(second_arg, source, uri);
 
                         // DIスコープを追加（配列・関数・class・識別子を統一的に処理）
                         let di_info = self.extract_di_info(second_arg, source);

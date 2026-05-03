@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use super::context::{AnalyzerContext, DiInfo};
 use super::AngularJsAnalyzer;
-use crate::model::{ControllerScope, SymbolReference};
+use crate::model::{ControllerScope, DiArityIssue, Span, SymbolReference};
 
 impl AngularJsAnalyzer {
     /// ES6 classノードからconstructorメソッドを取得する
@@ -356,6 +356,80 @@ impl AngularJsAnalyzer {
     ) -> HashMap<String, String> {
         let params = self.extract_function_param_names(node, source);
         params.into_iter().map(|p| (p.clone(), p)).collect()
+    }
+
+    /// DI 配列の要素数と関数の引数数が一致しているかをチェックし、
+    /// 不一致なら `DiArityIssue` として登録する。
+    ///
+    /// チェック対象は **DI 配列** (`['$scope', function(...) {}]`) のみ。
+    /// 純粋な関数 / class 単独 (DI 配列なし) や、識別子経由の渡し方は対象外。
+    ///
+    /// 認識する不一致パターン:
+    /// ```javascript
+    /// // 文字列要素 2 個 vs 関数引数 1 個 → 警告
+    /// .controller('Ctrl', ['$scope', '$timeout', function($scope) {}])
+    /// // 文字列要素 1 個 vs 関数引数 2 個 → 警告
+    /// .controller('Ctrl', ['$scope', function($scope, $timeout) {}])
+    /// // class constructor の場合
+    /// .controller('Ctrl', ['s1', class { constructor(s1, s2) {} }])
+    /// ```
+    pub(super) fn check_di_arity_mismatch(&self, node: Node, source: &str, uri: &Url) {
+        // DI 配列以外は対象外 (純粋な function alone は注入されるサービス数を
+        // 静的に知る術がないので警告対象から除外)
+        if node.kind() != "array" {
+            return;
+        }
+
+        // 配列内を走査して文字列要素数と関数 / class ノードを収集
+        let mut string_count: usize = 0;
+        let mut function_node: Option<Node> = None;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "string" => string_count += 1,
+                "function_expression" | "arrow_function" | "class" => {
+                    function_node = Some(child);
+                }
+                // 配列末尾が識別子のケース (関数を別変数で受け渡し) は arity を
+                // 静的に確定できないので対象外
+                _ => {}
+            }
+        }
+
+        let Some(func) = function_node else {
+            return;
+        };
+
+        let param_count = self.extract_function_param_names(func, source).len();
+
+        if param_count == string_count {
+            return;
+        }
+
+        // 警告位置: function は関数ノード自体、class は constructor または class 全体
+        let (start, end) = match func.kind() {
+            "class" => {
+                if let Some(ctor) = self.get_constructor_from_class(func, source) {
+                    (ctor.start_position(), ctor.end_position())
+                } else {
+                    (func.start_position(), func.end_position())
+                }
+            }
+            _ => (func.start_position(), func.end_position()),
+        };
+        let span = Span::new(
+            self.offset_line(start.row as u32),
+            start.column as u32,
+            self.offset_line(end.row as u32),
+            end.column as u32,
+        );
+
+        self.index.diagnostics.add_di_arity_issue(DiArityIssue {
+            uri: uri.clone(),
+            di_count: string_count,
+            param_count,
+            span,
+        });
     }
 
     /// 関数 (式 / 宣言 / class constructor) のパラメータ識別子名を順番通りに返す
