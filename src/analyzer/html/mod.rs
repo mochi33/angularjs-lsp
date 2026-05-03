@@ -14,9 +14,11 @@ pub mod expression;
 pub mod form;
 pub mod local_variable;
 pub mod ng_include;
+pub mod ng_model;
 pub mod parser;
 pub mod scope_reference;
 pub mod script;
+pub mod ui_sref;
 pub mod variable_parser;
 
 use controller::ControllerScopeInfo;
