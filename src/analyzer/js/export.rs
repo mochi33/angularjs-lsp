@@ -153,18 +153,8 @@ impl AngularJsAnalyzer {
         self.index.exports.add_export(export_info);
 
         // Symbol として登録（Go to Definition 用）
-        let def_span = Span::new(
-            self.offset_line(array_node.start_position().row as u32),
-            array_node.start_position().column as u32,
-            self.offset_line(array_node.end_position().row as u32),
-            array_node.end_position().column as u32,
-        );
-        let name_span = Span::new(
-            self.offset_line(last.start_position().row as u32),
-            last.start_position().column as u32,
-            self.offset_line(last.end_position().row as u32),
-            last.end_position().column as u32,
-        );
+        let def_span = self.span_of(array_node);
+        let name_span = self.span_of(*last);
 
         let symbol = SymbolBuilder::new(component_name.clone(), SymbolKind::ExportedComponent, uri.clone())
             .definition_span(def_span)
@@ -339,17 +329,7 @@ impl AngularJsAnalyzer {
             "function_declaration" => {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let func_name = self.node_text(name_node, source);
-                    let start = node.start_position();
-                    let end = node.end_position();
-                    local_vars.insert(
-                        func_name,
-                        Span::new(
-                            self.offset_line(start.row as u32),
-                            start.column as u32,
-                            self.offset_line(end.row as u32),
-                            end.column as u32,
-                        ),
-                    );
+                    local_vars.insert(func_name, self.span_of(node));
                 }
             }
             "variable_declaration" | "lexical_declaration" => {
@@ -363,17 +343,7 @@ impl AngularJsAnalyzer {
                                     "function_expression" | "arrow_function"
                                 ) {
                                     let var_name = self.node_text(name_node, source);
-                                    let start = value_node.start_position();
-                                    let end = value_node.end_position();
-                                    local_vars.insert(
-                                        var_name,
-                                        Span::new(
-                                            self.offset_line(start.row as u32),
-                                            start.column as u32,
-                                            self.offset_line(end.row as u32),
-                                            end.column as u32,
-                                        ),
-                                    );
+                                    local_vars.insert(var_name, self.span_of(value_node));
                                 }
                             }
                         }
@@ -457,8 +427,6 @@ impl AngularJsAnalyzer {
                     if is_this_or_alias {
                         if let Some(property) = left.child_by_field_name("property") {
                             let method_name = self.node_text(property, source);
-                            let start = property.start_position();
-                            let end = property.end_position();
 
                             let docs =
                                 self.extract_jsdoc_for_line(assign_node.start_position().row, source);
@@ -468,12 +436,7 @@ impl AngularJsAnalyzer {
                                 .and_then(|right| self.extract_function_params(right, source));
 
                             let full_name = format!("{}.{}", component_name, method_name);
-                            let span = Span::new(
-                                self.offset_line(start.row as u32),
-                                start.column as u32,
-                                self.offset_line(end.row as u32),
-                                end.column as u32,
-                            );
+                            let span = self.span_of(property);
 
                             let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                                 .definition_span(span)
@@ -511,28 +474,14 @@ impl AngularJsAnalyzer {
                         if let Some(value) = child.child_by_field_name("value") {
                             let method_name = self.node_text(key, source);
                             let full_name = format!("{}.{}", component_name, method_name);
-                            let name_start = key.start_position();
-                            let name_end = key.end_position();
-                            let name_span = Span::new(
-                                self.offset_line(name_start.row as u32),
-                                name_start.column as u32,
-                                self.offset_line(name_end.row as u32),
-                                name_end.column as u32,
-                            );
+                            let name_span = self.span_of(key);
 
                             match value.kind() {
                                 "function_expression" | "arrow_function" => {
-                                    let start = key.start_position();
-                                    let end = key.end_position();
                                     let docs = self
                                         .extract_jsdoc_for_line(child.start_position().row, source);
                                     let parameters = self.extract_function_params(value, source);
-                                    let def_span = Span::new(
-                                        self.offset_line(start.row as u32),
-                                        start.column as u32,
-                                        self.offset_line(end.row as u32),
-                                        end.column as u32,
-                                    );
+                                    let def_span = self.span_of(key);
 
                                     let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                                         .definition_span(def_span)
@@ -563,16 +512,9 @@ impl AngularJsAnalyzer {
 
                                         self.index.definitions.add_definition(builder.build());
                                     } else {
-                                        let start = key.start_position();
-                                        let end = key.end_position();
                                         let docs = self
                                             .extract_jsdoc_for_line(child.start_position().row, source);
-                                        let def_span = Span::new(
-                                            self.offset_line(start.row as u32),
-                                            start.column as u32,
-                                            self.offset_line(end.row as u32),
-                                            end.column as u32,
-                                        );
+                                        let def_span = self.span_of(key);
 
                                         let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                                             .definition_span(def_span)
@@ -593,14 +535,7 @@ impl AngularJsAnalyzer {
                 "shorthand_property_identifier" => {
                     let method_name = self.node_text(child, source);
                     let full_name = format!("{}.{}", component_name, method_name);
-                    let name_start = child.start_position();
-                    let name_end = child.end_position();
-                    let name_span = Span::new(
-                        self.offset_line(name_start.row as u32),
-                        name_start.column as u32,
-                        self.offset_line(name_end.row as u32),
-                        name_end.column as u32,
-                    );
+                    let name_span = self.span_of(child);
 
                     if let Some(var_span) = local_vars.get(&method_name) {
                         let docs = self.extract_jsdoc_for_line(var_span.start_line as usize, source);
@@ -615,15 +550,8 @@ impl AngularJsAnalyzer {
 
                         self.index.definitions.add_definition(builder.build());
                     } else {
-                        let start = child.start_position();
-                        let end = child.end_position();
-                        let docs = self.extract_jsdoc_for_line(start.row, source);
-                        let def_span = Span::new(
-                            self.offset_line(start.row as u32),
-                            start.column as u32,
-                            self.offset_line(end.row as u32),
-                            end.column as u32,
-                        );
+                        let docs = self.extract_jsdoc_for_line(child.start_position().row, source);
+                        let def_span = self.span_of(child);
 
                         let mut builder = SymbolBuilder::new(full_name, SymbolKind::Method, uri.clone())
                             .definition_span(def_span)
@@ -697,12 +625,7 @@ impl AngularJsAnalyzer {
         self.index.exports.add_export(export_info);
 
         // Symbol として登録
-        let span = Span::new(
-            self.offset_line(node.start_position().row as u32),
-            node.start_position().column as u32,
-            self.offset_line(node.end_position().row as u32),
-            node.end_position().column as u32,
-        );
+        let span = self.span_of(node);
 
         let symbol = SymbolBuilder::new(identifier_name.clone(), SymbolKind::ExportedComponent, uri.clone())
             .definition_span(span)
@@ -775,18 +698,8 @@ impl AngularJsAnalyzer {
             self.index.exports.add_exported_component_object(exported_obj);
 
             // Symbol としても登録（Go to Definition 用）
-            let def_span = Span::new(
-                self.offset_line(obj_node.start_position().row as u32),
-                obj_node.start_position().column as u32,
-                self.offset_line(obj_node.end_position().row as u32),
-                obj_node.end_position().column as u32,
-            );
-            let name_span = Span::new(
-                self.offset_line(name_pos.start_position().row as u32),
-                name_pos.start_position().column as u32,
-                self.offset_line(name_pos.end_position().row as u32),
-                name_pos.end_position().column as u32,
-            );
+            let def_span = self.span_of(obj_node);
+            let name_span = self.span_of(name_pos);
 
             let symbol = SymbolBuilder::new(name, SymbolKind::Component, uri.clone())
                 .definition_span(def_span)
@@ -909,18 +822,10 @@ impl AngularJsAnalyzer {
                         None
                     };
 
-                    let start = key.start_position();
-                    let end = key.end_position();
-
                     let full_name = format!("{}.{}", controller_name, binding_name);
                     let docs = binding_type.map(|t| format!("Component binding: {}", t));
 
-                    let span = Span::new(
-                        self.offset_line(start.row as u32),
-                        start.column as u32,
-                        self.offset_line(end.row as u32),
-                        end.column as u32,
-                    );
+                    let span = self.span_of(key);
 
                     let mut builder = SymbolBuilder::new(full_name, SymbolKind::ComponentBinding, uri.clone())
                         .definition_span(span)

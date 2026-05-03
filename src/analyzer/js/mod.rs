@@ -18,6 +18,7 @@ use tower_lsp::lsp_types::Url;
 use tree_sitter::{Node, Tree};
 
 use crate::index::Index;
+use crate::model::Span;
 use context::AnalyzerContext;
 use parser::JsParser;
 
@@ -183,6 +184,20 @@ impl AngularJsAnalyzer {
     /// 行番号にオフセットを加算
     pub(super) fn offset_line(&self, line: u32) -> u32 {
         line + self.line_offset.load(Ordering::Relaxed)
+    }
+
+    /// tree-sitter `Node` から `Span` を作る。
+    ///
+    /// 行番号は `offset_line` を経由して埋め込みスクリプト用のオフセットを反映する。
+    pub(super) fn span_of(&self, node: Node) -> Span {
+        let start = node.start_position();
+        let end = node.end_position();
+        Span::new(
+            self.offset_line(start.row as u32),
+            start.column as u32,
+            self.offset_line(end.row as u32),
+            end.column as u32,
+        )
     }
 
     /// ASTノードからソーステキストを取得する
