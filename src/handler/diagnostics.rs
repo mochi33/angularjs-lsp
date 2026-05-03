@@ -5,6 +5,7 @@ use tracing::debug;
 
 use crate::config::DiagnosticsConfig;
 use crate::index::Index;
+use crate::model::SymbolKind;
 
 /// 診断ハンドラー
 pub struct DiagnosticsHandler {
@@ -28,6 +29,19 @@ impl DiagnosticsHandler {
         }
     }
 
+    /// 未登録 state 用 severity を解決。"off" の場合は `None` を返し、
+    /// 呼び出し側で診断スキップを判断する。
+    fn parse_unknown_state_severity(&self) -> Option<DiagnosticSeverity> {
+        match self.config.unknown_state_severity.to_lowercase().as_str() {
+            "off" | "none" => None,
+            "error" => Some(DiagnosticSeverity::ERROR),
+            "warning" => Some(DiagnosticSeverity::WARNING),
+            "hint" => Some(DiagnosticSeverity::HINT),
+            "information" | "info" => Some(DiagnosticSeverity::INFORMATION),
+            _ => Some(DiagnosticSeverity::WARNING),
+        }
+    }
+
     /// HTMLファイルの診断を実行
     pub fn diagnose_html(&self, uri: &Url) -> Vec<Diagnostic> {
         if !self.config.enabled {
@@ -41,6 +55,9 @@ impl DiagnosticsHandler {
 
         // ローカル変数参照のチェック
         diagnostics.extend(self.check_local_variable_references(uri));
+
+        // 未登録 ui-router state 名 (ui-sref) のチェック
+        diagnostics.extend(self.check_unknown_state_names_html(uri));
 
         diagnostics
     }
@@ -58,7 +75,139 @@ impl DiagnosticsHandler {
             diagnostics.extend(self.check_unused_scope_variables(uri));
         }
 
+        // 未登録 ui-router state 名 ($state.go / $state.transitionTo) のチェック
+        diagnostics.extend(self.check_unknown_state_names_js(uri));
+
         diagnostics
+    }
+
+    /// HTML 内の `ui-sref="state-name"` 参照のうち、workspace 内に対応する
+    /// `$stateProvider.state(...)` 定義が存在しないものを警告として返す。
+    ///
+    /// state 定義が一切登録されていない workspace では false positive を避けるため
+    /// 全参照について警告を抑制する (state ファイルがまだ解析されていない可能性が
+    /// あり、例えばシングルファイル編集時など)。
+    fn check_unknown_state_names_html(&self, uri: &Url) -> Vec<Diagnostic> {
+        let Some(severity) = self.parse_unknown_state_severity() else {
+            return Vec::new();
+        };
+        let mut diagnostics = Vec::new();
+
+        // workspace に state 定義が一つも無ければ false positive を避けるため何も出さない
+        if !self.workspace_has_any_state_definition() {
+            return diagnostics;
+        }
+
+        let references = self.index.html.get_ui_sref_references_for_uri(uri);
+        debug!(
+            "check_unknown_state_names_html: uri={}, ref_count={}",
+            uri,
+            references.len()
+        );
+
+        for reference in references {
+            if !self
+                .index
+                .definitions
+                .has_definition_of_kind(&reference.state_name, SymbolKind::UiRouterState)
+            {
+                diagnostics.push(Diagnostic {
+                    range: Range {
+                        start: Position {
+                            line: reference.start_line,
+                            character: reference.start_col,
+                        },
+                        end: Position {
+                            line: reference.end_line,
+                            character: reference.end_col,
+                        },
+                    },
+                    severity: Some(severity),
+                    code: None,
+                    code_description: None,
+                    source: Some("angularjs-lsp".to_string()),
+                    message: format!(
+                        "Unknown ui-router state '{}' (no matching $stateProvider.state(...) definition)",
+                        reference.state_name
+                    ),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+
+        diagnostics
+    }
+
+    /// JS 内の `$state.go('state-name')` / `$state.transitionTo('state-name')`
+    /// 参照のうち、workspace 内に対応する state 定義が無いものを警告として返す。
+    fn check_unknown_state_names_js(&self, uri: &Url) -> Vec<Diagnostic> {
+        let Some(severity) = self.parse_unknown_state_severity() else {
+            return Vec::new();
+        };
+        let mut diagnostics = Vec::new();
+
+        if !self.workspace_has_any_state_definition() {
+            return diagnostics;
+        }
+
+        let references = self
+            .index
+            .definitions
+            .get_js_state_navigation_references_for_uri(uri);
+        debug!(
+            "check_unknown_state_names_js: uri={}, ref_count={}",
+            uri,
+            references.len()
+        );
+
+        for reference in references {
+            if !self
+                .index
+                .definitions
+                .has_definition_of_kind(&reference.state_name, SymbolKind::UiRouterState)
+            {
+                diagnostics.push(Diagnostic {
+                    range: Range {
+                        start: Position {
+                            line: reference.span.start_line,
+                            character: reference.span.start_col,
+                        },
+                        end: Position {
+                            line: reference.span.end_line,
+                            character: reference.span.end_col,
+                        },
+                    },
+                    severity: Some(severity),
+                    code: None,
+                    code_description: None,
+                    source: Some("angularjs-lsp".to_string()),
+                    message: format!(
+                        "Unknown ui-router state '{}' (no matching $stateProvider.state(...) definition)",
+                        reference.state_name
+                    ),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+
+        diagnostics
+    }
+
+    /// workspace 全体に `$stateProvider.state(...)` 由来の定義が 1 件でもあるか。
+    ///
+    /// 何も解析されていない / ui-router を使っていないプロジェクトでは
+    /// 全 ui-sref / `$state.go` 参照に false positive が出るので、
+    /// state 定義が皆無なら本診断は完全にスキップする。
+    fn workspace_has_any_state_definition(&self) -> bool {
+        self.index
+            .definitions
+            .get_all_definitions()
+            .iter()
+            .any(|s| s.kind == SymbolKind::UiRouterState)
     }
 
     /// 未使用スコープ変数をチェックし警告生成

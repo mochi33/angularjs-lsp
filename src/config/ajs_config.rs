@@ -40,6 +40,15 @@ pub struct DiagnosticsConfig {
     /// 未使用スコープ変数の警告を有効にする（デフォルト: true）
     #[serde(default = "default_true")]
     pub unused_scope_variables: bool,
+    /// 未登録の ui-router state を `ui-sref` / `$state.go` で参照した場合の重要度。
+    /// "error" / "warning" / "hint" / "information" / "off"（デフォルト: "warning"）
+    ///
+    /// "off" を指定すると本診断は出力されない。
+    ///
+    /// TODO: 将来的には `external_states` のような allowlist を導入し、
+    /// プロジェクト外で定義される (lazy-loaded module 等の) state を許容する。
+    #[serde(default = "default_unknown_state_severity")]
+    pub unknown_state_severity: String,
 }
 
 fn default_true() -> bool {
@@ -50,12 +59,17 @@ fn default_severity() -> String {
     "warning".to_string()
 }
 
+fn default_unknown_state_severity() -> String {
+    "warning".to_string()
+}
+
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {
             enabled: default_true(),
             severity: default_severity(),
             unused_scope_variables: default_true(),
+            unknown_state_severity: default_unknown_state_severity(),
         }
     }
 }
@@ -158,5 +172,18 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.severity, "warning");
         assert!(config.unused_scope_variables);
+        assert_eq!(config.unknown_state_severity, "warning");
+    }
+
+    #[test]
+    fn test_diagnostics_unknown_state_severity_off() {
+        // "off" を指定すれば後段で診断スキップに使える文字列として読み込めること
+        let json = r#"{
+            "diagnostics": {
+                "unknown_state_severity": "off"
+            }
+        }"#;
+        let config: AjsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.diagnostics.unknown_state_severity, "off");
     }
 }

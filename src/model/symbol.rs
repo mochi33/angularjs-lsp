@@ -149,3 +149,32 @@ impl SymbolReference {
         self.span.end_col
     }
 }
+
+/// JS 内の `$state.go('home')` / `$state.transitionTo('home')` で参照される
+/// ui-router state 名と、その第1引数 (state 名リテラル) の位置範囲を表す。
+///
+/// `HtmlUiSrefReference` の JS 版。診断 (未登録 state 警告) の際に
+/// 「JS 内のどの位置に warning を出すべきか」を URI 別に逆引きするため、
+/// 通常の `SymbolReference` インデックス (シンボル名キー) とは別に
+/// URI キーで保持する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsStateNavigationReference {
+    pub state_name: String,
+    pub uri: Url,
+    pub span: Span,
+}
+
+impl JsStateNavigationReference {
+    pub fn start_line(&self) -> u32 {
+        self.span.start_line
+    }
+    pub fn start_col(&self) -> u32 {
+        self.span.start_col
+    }
+    pub fn end_line(&self) -> u32 {
+        self.span.end_line
+    }
+    pub fn end_col(&self) -> u32 {
+        self.span.end_col
+    }
+}
