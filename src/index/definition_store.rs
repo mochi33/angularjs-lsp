@@ -116,6 +116,27 @@ impl DefinitionStore {
             .collect()
     }
 
+    /// 指定したコンポーネント名 (camelCase) の `SymbolKind::ComponentBinding` を全て取得
+    ///
+    /// bindings は `extract_component_bindings` で `<componentName>.<bindingName>` の形で
+    /// 登録されているため、`<componentName>.` プレフィックスで前方一致した上で
+    /// `SymbolKind::ComponentBinding` のものだけ返す。
+    pub fn get_component_bindings(&self, component_name: &str) -> Vec<Symbol> {
+        let prefix = format!("{}.", component_name);
+        let mut result = Vec::new();
+        for entry in self.definitions.iter() {
+            if !entry.key().starts_with(&prefix) {
+                continue;
+            }
+            for symbol in entry.value() {
+                if symbol.kind == SymbolKind::ComponentBinding {
+                    result.push(symbol.clone());
+                }
+            }
+        }
+        result
+    }
+
     /// 指定した名前がService/Factoryかどうかを判定
     pub fn is_service_or_factory(&self, name: &str) -> bool {
         if let Some(symbols) = self.definitions.get(name) {

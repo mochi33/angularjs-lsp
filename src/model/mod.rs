@@ -10,9 +10,10 @@ pub mod template;
 pub use builder::SymbolBuilder;
 pub use export::{ExportInfo, ExportedComponentObject};
 pub use html::{
-    DirectiveUsageType, HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable,
-    HtmlLocalVariableReference, HtmlLocalVariableSource, HtmlNgModelTarget, HtmlScopeReference,
-    HtmlUiSrefReference, InheritedFormBinding, InheritedLocalVariable,
+    DirectiveUsageType, HtmlComponentAttribute, HtmlComponentUsage, HtmlDirectiveReference,
+    HtmlFormBinding, HtmlLocalVariable, HtmlLocalVariableReference, HtmlLocalVariableSource,
+    HtmlNgModelTarget, HtmlScopeReference, HtmlUiSrefReference, InheritedFormBinding,
+    InheritedLocalVariable,
 };
 pub use inheritance::{NgIncludeBinding, NgViewBinding};
 pub use scope::{ControllerScope, HtmlControllerScope};

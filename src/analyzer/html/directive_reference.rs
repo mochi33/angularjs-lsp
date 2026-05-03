@@ -6,7 +6,9 @@ use tree_sitter::Node;
 
 use super::directives::is_ng_directive;
 use super::HtmlAngularJsAnalyzer;
-use crate::model::{DirectiveUsageType, HtmlDirectiveReference};
+use crate::model::{
+    DirectiveUsageType, HtmlComponentAttribute, HtmlComponentUsage, HtmlDirectiveReference,
+};
 
 /// kebab-case を camelCase に変換
 /// 例: "my-directive" -> "myDirective"
@@ -159,8 +161,12 @@ impl HtmlAngularJsAnalyzer {
     ///
     /// ハイフンを含む要素名・属性名を全て潜在的なカスタムディレクティブとして登録する。
     /// 定義の有無は定義ジャンプ時にチェックするため、解析順序に依存しない。
+    ///
+    /// 副作用: 要素名がカスタム要素の可能性がある場合、その要素 + 全属性のリストを
+    /// `HtmlComponentUsage` としても記録する (component bindings 診断 #64 用)。
     fn extract_directive_from_tag(&self, tag_node: Node, source: &str, uri: &Url) {
         // 1. 要素名としてのディレクティブをチェック
+        let mut component_usage: Option<HtmlComponentUsage> = None;
         if let Some(tag_name_node) = self.find_child_by_kind(tag_node, "tag_name") {
             let tag_name = self.node_text(tag_name_node, source);
 
@@ -169,17 +175,31 @@ impl HtmlAngularJsAnalyzer {
                 let camel_name = kebab_to_camel_case(&tag_name);
                 let start = tag_name_node.start_position();
                 let end = tag_name_node.end_position();
+                let element_start_col =
+                    self.byte_col_to_utf16_col(source, start.row, start.column);
+                let element_end_col = self.byte_col_to_utf16_col(source, end.row, end.column);
 
                 let reference = HtmlDirectiveReference {
-                    directive_name: camel_name,
+                    directive_name: camel_name.clone(),
                     uri: uri.clone(),
                     start_line: start.row as u32,
-                    start_col: self.byte_col_to_utf16_col(source, start.row, start.column),
+                    start_col: element_start_col,
                     end_line: end.row as u32,
-                    end_col: self.byte_col_to_utf16_col(source, end.row, end.column),
+                    end_col: element_end_col,
                     usage_type: DirectiveUsageType::Element,
                 };
                 self.index.html.add_html_directive_reference(reference);
+
+                // コンポーネント使用情報の雛形 (属性は次のループで埋める)
+                component_usage = Some(HtmlComponentUsage {
+                    component_name: camel_name,
+                    uri: uri.clone(),
+                    element_start_line: start.row as u32,
+                    element_start_col,
+                    element_end_line: end.row as u32,
+                    element_end_col,
+                    attributes: Vec::new(),
+                });
             }
         }
 
@@ -197,6 +217,25 @@ impl HtmlAngularJsAnalyzer {
                         &attr_name
                     };
 
+                    let start = name_node.start_position();
+                    let end = name_node.end_position();
+                    let attr_start_col =
+                        self.byte_col_to_utf16_col(source, start.row, start.column);
+                    let attr_end_col = self.byte_col_to_utf16_col(source, end.row, end.column);
+
+                    // コンポーネント使用箇所には全属性を記録 (診断側でフィルタ)
+                    if let Some(usage) = component_usage.as_mut() {
+                        let camel_name = kebab_to_camel_case(normalized_attr);
+                        usage.attributes.push(HtmlComponentAttribute {
+                            name: attr_name.to_string(),
+                            camel_name,
+                            start_line: start.row as u32,
+                            start_col: attr_start_col,
+                            end_line: end.row as u32,
+                            end_col: attr_end_col,
+                        });
+                    }
+
                     // ビルトインng-*ディレクティブは除外
                     if is_ng_directive(&attr_name) {
                         continue;
@@ -205,26 +244,25 @@ impl HtmlAngularJsAnalyzer {
                     // カスタムディレクティブの可能性があるかチェック
                     if is_potential_custom_directive(normalized_attr) {
                         let camel_name = kebab_to_camel_case(normalized_attr);
-                        let start = name_node.start_position();
-                        let end = name_node.end_position();
 
                         let reference = HtmlDirectiveReference {
                             directive_name: camel_name,
                             uri: uri.clone(),
                             start_line: start.row as u32,
-                            start_col: self.byte_col_to_utf16_col(
-                                source,
-                                start.row,
-                                start.column,
-                            ),
+                            start_col: attr_start_col,
                             end_line: end.row as u32,
-                            end_col: self.byte_col_to_utf16_col(source, end.row, end.column),
+                            end_col: attr_end_col,
                             usage_type: DirectiveUsageType::Attribute,
                         };
                         self.index.html.add_html_directive_reference(reference);
                     }
                 }
             }
+        }
+
+        // 要素ベースのコンポーネント使用箇所として登録
+        if let Some(usage) = component_usage {
+            self.index.html.add_component_usage(usage);
         }
     }
 }

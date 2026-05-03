@@ -228,3 +228,45 @@ impl HtmlUiSrefReference {
         Span::new(self.start_line, self.start_col, self.end_line, self.end_col)
     }
 }
+
+/// HTML 上で使われたコンポーネント要素 (`<user-card user="..." on-select="...">`) の
+/// 使用情報。`directive: component bindings` 診断 (#64) に使う。
+///
+/// `directive_name` は kebab→camelCase 変換済みのコンポーネント名 (例: `userCard`)。
+/// 解析時点で対応する `SymbolKind::Component` 定義の有無は確認しないため、
+/// 任意のカスタム要素について記録する。診断側でコンポーネント定義の有無で
+/// フィルタする。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HtmlComponentUsage {
+    /// camelCase 化されたコンポーネント名 (要素名から変換)
+    pub component_name: String,
+    pub uri: Url,
+    /// 要素名トークン (`<user-card`) 自体の位置
+    pub element_start_line: u32,
+    pub element_start_col: u32,
+    pub element_end_line: u32,
+    pub element_end_col: u32,
+    /// この要素についていた属性たち (`class` / `id` 等の標準HTML属性、`ng-*` などの
+    /// ビルトイン属性も含む生の状態で格納する。診断側でフィルタする。)
+    pub attributes: Vec<HtmlComponentAttribute>,
+}
+
+/// `HtmlComponentUsage` 配下の属性 1 つ。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HtmlComponentAttribute {
+    /// 属性名 (HTMLソースの生の表記。kebab-case の場合と素の単語の場合がある)
+    pub name: String,
+    /// `name` を kebab→camelCase 変換した bindings 名候補
+    pub camel_name: String,
+    /// 属性名トークンの位置
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
+impl HtmlComponentAttribute {
+    pub fn span(&self) -> Span {
+        Span::new(self.start_line, self.start_col, self.end_line, self.end_col)
+    }
+}
