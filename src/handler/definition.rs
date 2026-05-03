@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::*;
 use tracing::debug;
 
-use crate::index::Index;
-use crate::model::SymbolKind;
+use crate::index::{HtmlResolution, Index};
+use crate::model::{HtmlDirectiveReference, HtmlUiSrefReference, SymbolKind};
 use crate::util::is_html_file;
 
 pub struct DefinitionHandler {
@@ -57,325 +57,151 @@ impl DefinitionHandler {
     }
 
     /// HTMLファイルからの定義ジャンプ
+    ///
+    /// 解決優先順位は [`Index::resolve_html_position`] に集約 (issue #49)。
+    /// ここではその結果を `GotoDefinitionResponse` にマッピングするだけ。
     fn goto_definition_from_html(
         &self,
         uri: &Url,
         position: Position,
         source: Option<&str>,
     ) -> Option<GotoDefinitionResponse> {
-        // 0. ui-router の `ui-sref="state"` 参照を最優先でチェック
-        if let Some(ui_sref) = self
-            .index
-            .html
-            .find_ui_sref_reference_at(uri, position.line, position.character)
-        {
-            let definitions = self.index.definitions.get_definitions(&ui_sref.state_name);
-            let state_defs: Vec<_> = definitions
-                .into_iter()
-                .filter(|d| d.kind == SymbolKind::UiRouterState)
-                .collect();
-            if !state_defs.is_empty() {
-                let locations: Vec<Location> = state_defs
-                    .into_iter()
-                    .map(|def| Location {
-                        uri: def.uri.clone(),
-                        range: def.name_span.to_lsp_range(),
-                    })
-                    .collect();
-                return Some(GotoDefinitionResponse::Array(locations));
+        match self.index.resolve_html_position(uri, position, source)? {
+            HtmlResolution::UiSref(r) => self.build_for_ui_sref(&r),
+            HtmlResolution::Directive(r) => self.build_for_directive(&r),
+            HtmlResolution::LocalVarDef(v) | HtmlResolution::LocalVarRef(v) => {
+                Some(scalar(&v.uri, v.name_span().to_lsp_range()))
             }
+            HtmlResolution::FormBindingDef(f) | HtmlResolution::InheritedFormBinding(f) => {
+                Some(scalar(&f.uri, f.name_span().to_lsp_range()))
+            }
+            HtmlResolution::InheritedLocalVar(v) => {
+                Some(scalar(&v.uri, v.name_span().to_lsp_range()))
+            }
+            HtmlResolution::Scope {
+                controllers,
+                property_path,
+                is_alias,
+            } => self.build_for_scope(uri, &controllers, &property_path, is_alias),
+        }
+    }
+
+    fn build_for_ui_sref(&self, ui_sref: &HtmlUiSrefReference) -> Option<GotoDefinitionResponse> {
+        let definitions = self.index.definitions.get_definitions(&ui_sref.state_name);
+        let state_defs: Vec<_> = definitions
+            .into_iter()
+            .filter(|d| d.kind == SymbolKind::UiRouterState)
+            .collect();
+        if state_defs.is_empty() {
             // state 定義が見つからなくても、他のシンボルとして解決すべきではない
-            // (ui-sref の値は state 名なので、controller 名等として解決すると誤動作する)
+            // (ui-sref の値は state 名なので controller 名等での解決は誤動作する)
             return None;
         }
+        let locations: Vec<Location> = state_defs
+            .into_iter()
+            .map(|def| Location {
+                uri: def.uri.clone(),
+                range: def.name_span.to_lsp_range(),
+            })
+            .collect();
+        Some(GotoDefinitionResponse::Array(locations))
+    }
 
-        // 0b. まずカスタムディレクティブ/コンポーネント参照をチェック
-        if let Some(directive_ref) =
-            self.index
-                .html
-                .find_html_directive_reference_at(uri, position.line, position.character)
-        {
-            // ディレクティブまたはコンポーネント定義を検索
-            let definitions = self
-                .index
-                .definitions
-                .get_definitions(&directive_ref.directive_name);
-            let directive_defs: Vec<_> = definitions
-                .into_iter()
-                .filter(|d| d.kind == SymbolKind::Directive || d.kind == SymbolKind::Component)
-                .collect();
-
-            if !directive_defs.is_empty() {
-                let locations: Vec<Location> = directive_defs
-                    .into_iter()
-                    .map(|def| Location {
-                        uri: def.uri.clone(),
-                        range: def.definition_span.to_lsp_range(),
-                    })
-                    .collect();
-
-                return Some(GotoDefinitionResponse::Array(locations));
-            }
-        }
-
-        // 1. まずローカル変数をチェック（定義位置にカーソルがある場合）
-        if let Some(local_var_def) = self.index.html.find_html_local_variable_definition_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: local_var_def.uri.clone(),
-                range: local_var_def.name_span().to_lsp_range(),
-            }));
-        }
-
-        // 2. ローカル変数参照をチェック
-        if let Some(local_var_ref) = self.index.html.find_html_local_variable_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            if let Some(var_def) = self.index.find_local_variable_definition(
-                uri,
-                &local_var_ref.variable_name,
-                position.line,
-            ) {
-                return Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: var_def.uri.clone(),
-                    range: var_def.name_span().to_lsp_range(),
-                }));
-            }
-        }
-
-        // 3. フォームバインディングをチェック（定義位置にカーソルがある場合）
-        if let Some(form_binding) = self.index.html.find_html_form_binding_at(
-            uri,
-            position.line,
-            position.character,
-        ) {
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: form_binding.uri.clone(),
-                range: form_binding.name_span().to_lsp_range(),
-            }));
-        }
-
-        // 4. 位置からHTMLスコープ参照を取得
-        let html_ref =
-            self.index
-                .html
-                .find_html_scope_reference_at(uri, position.line, position.character);
-
-        // スコープ参照が見つからない場合、継承されたローカル変数またはフォームバインディングを探す
-        // (子テンプレートが親より先に解析された場合に発生)
-        if html_ref.is_none() {
-            if let Some(src) = source {
-                if let Some(identifier) = self.extract_identifier_at_position(src, position) {
-                    debug!(
-                        "goto_definition_from_html: no scope ref, trying inherited local var or form binding '{}'",
-                        identifier
-                    );
-
-                    // まず継承されたフォームバインディングをチェック
-                    let base_name = identifier.split('.').next().unwrap_or(&identifier);
-                    if let Some(form_binding) =
-                        self.index
-                            .find_form_binding_definition(uri, base_name, position.line)
-                    {
-                        return Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: form_binding.uri.clone(),
-                            range: form_binding.name_span().to_lsp_range(),
-                        }));
-                    }
-
-                    // 次に継承されたローカル変数をチェック
-                    if let Some(var_def) =
-                        self.index
-                            .find_local_variable_definition(uri, &identifier, position.line)
-                    {
-                        return Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: var_def.uri.clone(),
-                            range: var_def.name_span().to_lsp_range(),
-                        }));
-                    }
-                }
-            }
+    fn build_for_directive(
+        &self,
+        directive_ref: &HtmlDirectiveReference,
+    ) -> Option<GotoDefinitionResponse> {
+        let definitions = self
+            .index
+            .definitions
+            .get_definitions(&directive_ref.directive_name);
+        let directive_defs: Vec<_> = definitions
+            .into_iter()
+            .filter(|d| d.kind == SymbolKind::Directive || d.kind == SymbolKind::Component)
+            .collect();
+        if directive_defs.is_empty() {
             return None;
         }
+        let locations: Vec<Location> = directive_defs
+            .into_iter()
+            .map(|def| Location {
+                uri: def.uri.clone(),
+                range: def.definition_span.to_lsp_range(),
+            })
+            .collect();
+        Some(GotoDefinitionResponse::Array(locations))
+    }
 
-        let html_ref = html_ref.unwrap();
-
-        debug!(
-            "goto_definition_from_html: found reference '{}' at {}:{}",
-            html_ref.property_path, position.line, position.character
-        );
-
-        // 5a. フォームバインディング参照かどうかをチェック
-        let base_name = html_ref
-            .property_path
-            .split('.')
-            .next()
-            .unwrap_or(&html_ref.property_path);
-        if let Some(form_binding) =
-            self.index
-                .find_form_binding_definition(uri, base_name, position.line)
-        {
-            debug!(
-                "goto_definition_from_html: '{}' is a form binding",
-                base_name
-            );
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: form_binding.uri.clone(),
-                range: form_binding.name_span().to_lsp_range(),
-            }));
-        }
-
-        // 5b. 継承されたローカル変数かどうかをチェック
-        if let Some(var_def) =
-            self.index
-                .find_local_variable_definition(uri, base_name, position.line)
-        {
-            debug!(
-                "goto_definition_from_html: '{}' is an inherited local variable",
-                base_name
-            );
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: var_def.uri.clone(),
-                range: var_def.name_span().to_lsp_range(),
-            }));
-        }
-
-        // 5c. alias.property 形式かチェック（controller as alias 構文）
-        let (resolved_controller, property_path) = if html_ref.property_path.contains('.') {
-            let parts: Vec<&str> = html_ref.property_path.splitn(2, '.').collect();
-            if parts.len() == 2 {
-                let alias = parts[0];
-                let prop = parts[1];
-                if let Some(controller) =
-                    self.index
-                        .resolve_controller_by_alias(uri, position.line, alias)
-                {
-                    debug!(
-                        "goto_definition_from_html: resolved alias '{}' to controller '{}'",
-                        alias, controller
-                    );
-                    (Some(controller), prop.to_string())
-                } else {
-                    (None, html_ref.property_path.clone())
-                }
-            } else {
-                (None, html_ref.property_path.clone())
-            }
-        } else {
-            (None, html_ref.property_path.clone())
-        };
-
-        // 3. コントローラー名を解決
-        let is_controller_as = resolved_controller.is_some();
-        let controllers = if let Some(controller) = resolved_controller {
-            vec![controller]
-        } else {
-            self.index.resolve_controllers_for_html(uri, position.line)
-        };
-
-        // 4. 各コントローラーを順番に試して、定義が見つかったものを返す
-        for controller_name in &controllers {
-            debug!(
-                "goto_definition_from_html: trying controller '{}'",
-                controller_name
-            );
-
+    /// `Scope` variant の後段チェイン:
+    /// `{ctrl}.$scope.{prop}` → (alias なら) `{ctrl}.{prop}` → `$rootScope.{prop}`
+    /// → ng-model 暗黙的定義
+    fn build_for_scope(
+        &self,
+        uri: &Url,
+        controllers: &[String],
+        property_path: &str,
+        is_alias: bool,
+    ) -> Option<GotoDefinitionResponse> {
+        // 1. `{ctrl}.$scope.{prop}` を各 controller で試す
+        for controller_name in controllers {
             let symbol_name = format!("{}.$scope.{}", controller_name, property_path);
-
-            debug!(
-                "goto_definition_from_html: looking up symbol '{}'",
-                symbol_name
-            );
-
             let definitions = self.index.definitions.get_definitions(&symbol_name);
-
             if !definitions.is_empty() {
-                let locations: Vec<Location> = definitions
-                    .into_iter()
-                    .map(|def| Location {
-                        uri: def.uri.clone(),
-                        range: def.definition_span.to_lsp_range(),
-                    })
-                    .collect();
-
-                debug!(
-                    "goto_definition_from_html: found {} locations",
-                    locations.len()
-                );
-
-                return Some(GotoDefinitionResponse::Array(locations));
-            }
-        }
-
-        // 5. controller as 構文の場合、this.method パターンも検索
-        if is_controller_as {
-            for controller_name in &controllers {
-                let symbol_name = format!("{}.{}", controller_name, property_path);
-
-                debug!(
-                    "goto_definition_from_html: looking up controller method '{}'",
-                    symbol_name
-                );
-
-                let definitions = self.index.definitions.get_definitions(&symbol_name);
-
-                if !definitions.is_empty() {
-                    let locations: Vec<Location> = definitions
+                return Some(GotoDefinitionResponse::Array(
+                    definitions
                         .into_iter()
                         .map(|def| Location {
                             uri: def.uri.clone(),
                             range: def.definition_span.to_lsp_range(),
                         })
-                        .collect();
+                        .collect(),
+                ));
+            }
+        }
 
-                    debug!(
-                        "goto_definition_from_html: found {} controller method locations",
-                        locations.len()
-                    );
-
-                    return Some(GotoDefinitionResponse::Array(locations));
+        // 2. controller as 構文の場合は `{ctrl}.{prop}` (this.method) も試す
+        if is_alias {
+            for controller_name in controllers {
+                let symbol_name = format!("{}.{}", controller_name, property_path);
+                let definitions = self.index.definitions.get_definitions(&symbol_name);
+                if !definitions.is_empty() {
+                    return Some(GotoDefinitionResponse::Array(
+                        definitions
+                            .into_iter()
+                            .map(|def| Location {
+                                uri: def.uri.clone(),
+                                range: def.definition_span.to_lsp_range(),
+                            })
+                            .collect(),
+                    ));
                 }
             }
         }
 
-        // 6. $rootScope からのグローバル参照を検索
+        // 3. $rootScope からのグローバル参照
         let root_scope_defs = self
             .index
             .definitions
-            .find_root_scope_definitions_by_property(&property_path);
+            .find_root_scope_definitions_by_property(property_path);
         if !root_scope_defs.is_empty() {
-            debug!(
-                "goto_definition_from_html: found {} $rootScope definitions for '{}'",
-                root_scope_defs.len(),
-                property_path
-            );
-
-            let locations: Vec<Location> = root_scope_defs
-                .into_iter()
-                .map(|def| Location {
-                    uri: def.uri.clone(),
-                    range: def.definition_span.to_lsp_range(),
-                })
-                .collect();
-
-            return Some(GotoDefinitionResponse::Array(locations));
+            return Some(GotoDefinitionResponse::Array(
+                root_scope_defs
+                    .into_iter()
+                    .map(|def| Location {
+                        uri: def.uri.clone(),
+                        range: def.definition_span.to_lsp_range(),
+                    })
+                    .collect(),
+            ));
         }
 
-        // 7. ng-model 経由の暗黙的 scope 定義を最終フォールバック
-        // (controller 側で明示的に \$scope.X = ... を書いていなくても、
-        //  HTML 上に <input ng-model="X"> があれば AngularJS が自動的に
-        //  \$scope.X を生成するため、その ng-model 位置を definition と扱う)
-        for controller_name in &controllers {
-            if let Some(target) = self.index.find_ng_model_implicit_def_target(
-                uri,
-                controller_name,
-                &property_path,
-            ) {
+        // 4. ng-model 経由の暗黙的 scope 定義 (controller 側で `$scope.X = ...` を
+        //    書かなくても <input ng-model="X"> があれば AngularJS が自動生成するため)
+        for controller_name in controllers {
+            if let Some(target) =
+                self.index
+                    .find_ng_model_implicit_def_target(uri, controller_name, property_path)
+            {
                 debug!(
                     "goto_definition_from_html: '{}' resolved via ng-model implicit def at {}:{}",
                     property_path, target.start_line, target.start_col
@@ -387,58 +213,13 @@ impl DefinitionHandler {
             }
         }
 
-        debug!(
-            "goto_definition_from_html: no definitions found in any controller, $rootScope, or ng-model"
-        );
         None
     }
+}
 
-    /// カーソル位置の識別子を抽出
-    fn extract_identifier_at_position(
-        &self,
-        source: &str,
-        position: Position,
-    ) -> Option<String> {
-        let lines: Vec<&str> = source.lines().collect();
-        let line = lines.get(position.line as usize)?;
-        let col = position.character as usize;
-
-        if col >= line.len() {
-            return None;
-        }
-
-        // カーソル位置から識別子の開始と終了を探す
-        let chars: Vec<char> = line.chars().collect();
-
-        // 開始位置を探す
-        let mut start = col;
-        while start > 0 {
-            let c = chars[start - 1];
-            if !c.is_alphanumeric() && c != '_' && c != '$' {
-                break;
-            }
-            start -= 1;
-        }
-
-        // 終了位置を探す
-        let mut end = col;
-        while end < chars.len() {
-            let c = chars[end];
-            if !c.is_alphanumeric() && c != '_' && c != '$' {
-                break;
-            }
-            end += 1;
-        }
-
-        if start == end {
-            return None;
-        }
-
-        let identifier: String = chars[start..end].iter().collect();
-        if identifier.is_empty() {
-            None
-        } else {
-            Some(identifier)
-        }
-    }
+fn scalar(uri: &Url, range: Range) -> GotoDefinitionResponse {
+    GotoDefinitionResponse::Scalar(Location {
+        uri: uri.clone(),
+        range,
+    })
 }

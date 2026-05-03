@@ -2,10 +2,13 @@ pub mod component_store;
 pub mod controller_store;
 pub mod definition_store;
 pub mod export_store;
+pub mod html_resolve;
 pub mod html_store;
 pub mod interpolate_store;
 mod query;
 pub mod template_store;
+
+pub use html_resolve::HtmlResolution;
 
 pub use component_store::ComponentStore;
 pub use controller_store::ControllerStore;
