@@ -62,7 +62,7 @@ impl AngularJsAnalyzer {
                             // レシーバが `$routeProvider` (DI 経由含む) のときだけ
                             // route binding として扱う。これがないと任意の
                             // `obj.when(s, {controller, templateUrl})` を誤検知する。
-                            if self.is_provider_receiver(callee, source, ctx, "routeProvider") {
+                            if self.is_receiver(callee, source, ctx, ReceiverMatch::BaseName("routeProvider")) {
                                 self.extract_route_when_di(node, source, uri, ctx);
                             }
                         }
@@ -70,7 +70,7 @@ impl AngularJsAnalyzer {
                             // `$interpolateProvider.startSymbol('[[')` のような呼び出しから
                             // interpolate 記号をワークスペース全体の設定として収集する。
                             // ajsconfig.json 設定よりも優先される (詳細は InterpolateStore)
-                            if self.is_provider_receiver(callee, source, ctx, "interpolateProvider") {
+                            if self.is_receiver(callee, source, ctx, ReceiverMatch::BaseName("interpolateProvider")) {
                                 self.extract_interpolate_symbol_call(
                                     node,
                                     source,
@@ -81,7 +81,7 @@ impl AngularJsAnalyzer {
                         }
                         "state" => {
                             // 同上、`$stateProvider` (ui-router) 限定
-                            if self.is_provider_receiver(callee, source, ctx, "stateProvider") {
+                            if self.is_receiver(callee, source, ctx, ReceiverMatch::BaseName("stateProvider")) {
                                 self.extract_state_provider_di(node, source, uri, ctx);
                             }
                         }
@@ -89,7 +89,7 @@ impl AngularJsAnalyzer {
                             // `$state.go('home')` / `$state.transitionTo('home')` の
                             // 第1引数 (state 名) を参照として登録する。
                             // `$state` であることを厳密に判定して誤検知を避ける。
-                            if self.is_state_service_receiver(callee, source, ctx) {
+                            if self.is_receiver(callee, source, ctx, ReceiverMatch::Service("$state")) {
                                 self.extract_state_navigation_reference(node, source, uri);
                             }
                         }
@@ -130,24 +130,30 @@ impl AngularJsAnalyzer {
         }
     }
 
-    /// `.when()` / `.otherwise()` / `.state()` のレシーバが `$routeProvider` /
-    /// `$stateProvider` (またはそれに DI されたローカル変数) かを判定する。
+    /// メソッド呼び出しのレシーバが特定の AngularJS サービスに該当するかを判定する。
     ///
-    /// 任意の `obj.when(s, {controller, templateUrl})` を route binding として
-    /// 誤検知しないためのガード。次のいずれかにマッチすれば true:
+    /// 任意の `obj.when(s, {...})` や `obj.go('home')` を誤検知しないためのガード。
+    /// 判定ルールは `ReceiverMatch` の variant で表現する:
     ///
-    /// 1. レシーバ識別子がそのまま `$<base>` または `<base>` (例: `$routeProvider`)
-    ///    あるいは末尾が `.<base>` / `.$<base>` (例: `module.$routeProvider`)
-    /// 2. レシーバ識別子が DI スコープ内のパラメータで、サービス名が `$<base>` に解決
-    ///    (例: array DI で `['$routeProvider', function(rp) { rp.when(...) }]`)
-    /// 3. レシーバがチェイン (`a.when(...).when(...)`) の場合、チェインを辿って根の
-    ///    receiver で再判定 (`$routeProvider.when()` は `$routeProvider` を返す慣習)
-    fn is_provider_receiver(
+    /// - `BaseName("routeProvider")`: `$routeProvider` / `routeProvider` / 末尾が
+    ///   `.$routeProvider` / `.routeProvider` のいずれかに緩くマッチ。`Provider`
+    ///   サフィックスを持つサービス名 (一般変数名と衝突しにくい) で使う。
+    /// - `Service("$state")`: 完全一致 `$state` または末尾が `.$state` のみ。
+    ///   `state` 単体のような一般変数名と紛らわしい場合に使う。
+    ///
+    /// どちらの variant でも次の処理は共通:
+    ///
+    /// 1. レシーバがチェイン (`a.when(...).when(...)`) の場合、チェインを辿って根の
+    ///    receiver で再判定 (`$stateProvider.state(...)` は `$stateProvider` を返す慣習)
+    /// 2. ルートレシーバが直接判定ルールにマッチすれば `true`
+    /// 3. 単純識別子の場合は DI スコープを引いて、リネームされたサービス名で再判定
+    ///    (例: array DI `['$state', function(s) { s.go(...) }]` で `s` → `$state`)
+    fn is_receiver(
         &self,
         callee: Node,
         source: &str,
         ctx: &AnalyzerContext,
-        base_name: &str,
+        kind: ReceiverMatch,
     ) -> bool {
         let object = match callee.child_by_field_name("object") {
             Some(o) => o,
@@ -158,8 +164,8 @@ impl AngularJsAnalyzer {
         let root = Self::unwrap_chain_receiver(object);
         let root_text = self.node_text(root, source);
 
-        // 1. 直接マッチ ($routeProvider / module.$routeProvider など)
-        if matches_service(&root_text, base_name) {
+        // 1. レシーバ自体が判定ルールにマッチするか
+        if kind.matches(&root_text) {
             return true;
         }
 
@@ -167,7 +173,7 @@ impl AngularJsAnalyzer {
         if root.kind() == "identifier" {
             let line = self.offset_line(callee.start_position().row as u32);
             if let Some(service) = ctx.resolve_di_param(&root_text, line) {
-                return matches_service(service, base_name);
+                return kind.matches(service);
             }
         }
 
@@ -559,39 +565,6 @@ impl AngularJsAnalyzer {
         }
     }
 
-    /// `$state.go('home')` / `$state.transitionTo('home')` のレシーバが
-    /// `$state` (またはそれに DI されたローカル変数) かを判定する。
-    ///
-    /// `is_provider_receiver` と異なり `state` 単体は許容しない (一般変数名と紛らわしいため)。
-    /// `$state` を直接含む形式 (`$state`, `this.$state` など) のみ true。
-    fn is_state_service_receiver(
-        &self,
-        callee: Node,
-        source: &str,
-        ctx: &AnalyzerContext,
-    ) -> bool {
-        let object = match callee.child_by_field_name("object") {
-            Some(o) => o,
-            None => return false,
-        };
-        let root = Self::unwrap_chain_receiver(object);
-        let root_text = self.node_text(root, source);
-
-        // 1. `$state` を含むレシーバ
-        if root_text == "$state" || root_text.ends_with(".$state") {
-            return true;
-        }
-
-        // 2. 単純識別子なら DI 経由でリネームされたケースをチェック
-        if root.kind() == "identifier" {
-            let line = self.offset_line(callee.start_position().row as u32);
-            if let Some(service) = ctx.resolve_di_param(&root_text, line) {
-                return service == "$state";
-            }
-        }
-
-        false
-    }
 
     /// `$state.go('home')` / `$state.transitionTo('home')` の第1引数 (state 名) を
     /// `SymbolReference` として登録する。
@@ -1267,6 +1240,35 @@ const TEMPLATE_SERVICE_REGISTRY: &[(&str, &str, BindingSource)] = &[
     ("open", "modal", BindingSource::UibModal), // 旧名 ($modal)
 ];
 
+/// レシーバ判定のルール。`is_receiver` の引数として用い、判定の厳密さを variant で表現する。
+///
+/// - `BaseName`: 緩いマッチ。`$` 接頭辞ありなし両方を許容し、`Provider` のように
+///   一般変数名と衝突しにくいサービスに使う。
+/// - `Service`: 厳密マッチ。`$` 接頭辞ありの完全一致 / `.<full>` 末尾のみ許容。
+///   `state` のように一般変数名と紛らわしいサービスに使う。
+#[derive(Clone, Copy)]
+pub(super) enum ReceiverMatch<'a> {
+    /// 例: `BaseName("routeProvider")` は `$routeProvider` / `routeProvider` /
+    /// `module.$routeProvider` 等にマッチ
+    BaseName(&'a str),
+    /// 例: `Service("$state")` は `$state` 完全一致 / `this.$state` のみマッチ。
+    /// `state` 単体や `myState` は不一致。
+    Service(&'a str),
+}
+
+impl<'a> ReceiverMatch<'a> {
+    /// `obj_text` (レシーバの全文字列) が判定ルールにマッチするかを返す。
+    pub(super) fn matches(&self, obj_text: &str) -> bool {
+        match self {
+            ReceiverMatch::BaseName(base) => matches_service(obj_text, base),
+            ReceiverMatch::Service(full) => {
+                let with_dot = format!(".{}", full);
+                obj_text == *full || obj_text.ends_with(&with_dot)
+            }
+        }
+    }
+}
+
 /// `obj_text` が `base_name` を末尾に含むか（`$` 接頭辞付き / なしの両方を許容）
 /// 例: base_name="mdDialog" は obj_text="$mdDialog" や "this.$mdDialog" や
 /// ローカル変数 "mdDialog" にマッチする
@@ -1332,6 +1334,30 @@ mod template_service_registry_tests {
         // "fooMdDialog" のように長い識別子の末尾に偶然一致してもマッチしない
         assert!(!matches_service("fooMdDialog", "mdDialog"));
         assert!(!matches_service("not$mdDialog", "mdDialog"));
+    }
+
+    #[test]
+    fn receiver_match_basename_is_lenient() {
+        // BaseName variant は $ ありなし両方を許容 (既存の matches_service と同じ振る舞い)
+        let m = ReceiverMatch::BaseName("routeProvider");
+        assert!(m.matches("$routeProvider"));
+        assert!(m.matches("routeProvider"));
+        assert!(m.matches("module.$routeProvider"));
+    }
+
+    #[test]
+    fn receiver_match_service_is_strict() {
+        // Service variant は完全一致 / .$state 末尾のみ。
+        // 一般変数名 (state) と紛らわしいサービスでの誤検知防止に使う。
+        let m = ReceiverMatch::Service("$state");
+        assert!(m.matches("$state"));
+        assert!(m.matches("this.$state"));
+        assert!(m.matches("self.$state"));
+
+        // $ なしの "state" は不一致 (BaseName と異なり厳しい)
+        assert!(!m.matches("state"));
+        assert!(!m.matches("myState"));
+        assert!(!m.matches("this.state"));
     }
 
     #[test]
