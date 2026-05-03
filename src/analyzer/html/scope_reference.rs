@@ -144,21 +144,9 @@ impl HtmlAngularJsAnalyzer {
             let positions = self.find_identifier_positions(value, property_path);
 
             for (byte_offset, byte_len) in positions {
-                // マルチライン属性値の場合、実際の行と列を計算（UTF-16対応）
-                let before_identifier = &value[..byte_offset];
                 let identifier_text = &value[byte_offset..byte_offset + byte_len];
-                let newline_count = before_identifier.matches('\n').count();
-
-                let start_line = value_start_line + newline_count as u32;
-                let start_col = if newline_count == 0 {
-                    // 改行がない場合、UTF-16オフセットを加算
-                    value_start_col + self.byte_offset_to_utf16_offset(before_identifier, before_identifier.len()) as u32
-                } else {
-                    // 改行がある場合、最後の改行以降のテキストをUTF-16に変換
-                    let last_newline_pos = before_identifier.rfind('\n').unwrap();
-                    let after_newline = &before_identifier[last_newline_pos + 1..];
-                    self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
-                };
+                let (start_line, start_col) =
+                    self.position_in_text(value, byte_offset, value_start_line, value_start_col);
                 let end_line = start_line; // 識別子は1行内と仮定
                 let end_col = start_col + identifier_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
@@ -205,24 +193,19 @@ impl HtmlAngularJsAnalyzer {
 
                 let property_paths = self.parse_angular_expression(expr_trimmed, "interpolation");
 
-                // 式内での位置を計算（UTF-16対応）
-                let before_expr = &value[..expr_start_byte_offset];
-                let newline_count = before_expr.matches('\n').count();
-                let expr_line = value_start_line + newline_count;
-
-                let expr_col = if newline_count == 0 {
-                    value_start_col + self.byte_offset_to_utf16_offset(before_expr, before_expr.len()) as u32
-                } else {
-                    let last_newline_pos = before_expr.rfind('\n').unwrap();
-                    let after_newline = &value[last_newline_pos + 1..expr_start_byte_offset];
-                    self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
-                };
+                // 式の開始位置を外側 (属性値) 座標系に変換
+                let (expr_line, expr_col) = self.position_in_text(
+                    value,
+                    expr_start_byte_offset,
+                    value_start_line as u32,
+                    value_start_col,
+                );
 
                 // 式内でのプロパティパスの位置を登録
                 for property_path in &property_paths {
                     // ローカル変数の場合はスキップ
                     let base_name = property_path.split('.').next().unwrap_or(property_path);
-                    if self.index.find_local_variable_definition(uri, base_name, expr_line as u32).is_some() {
+                    if self.index.find_local_variable_definition(uri, base_name, expr_line).is_some() {
                         continue;
                     }
 
@@ -231,8 +214,8 @@ impl HtmlAngularJsAnalyzer {
                         let parts: Vec<&str> = property_path.splitn(2, '.').collect();
                         if parts.len() == 2 {
                             let potential_alias = parts[0];
-                            let is_alias = self.index.resolve_controller_by_alias(uri, expr_line as u32, potential_alias).is_some();
-                            let is_form_binding = self.index.find_form_binding_definition(uri, potential_alias, expr_line as u32).is_some();
+                            let is_alias = self.index.resolve_controller_by_alias(uri, expr_line, potential_alias).is_some();
+                            let is_form_binding = self.index.find_form_binding_definition(uri, potential_alias, expr_line).is_some();
                             if !is_alias && !is_form_binding {
                                 continue;
                             }
@@ -243,27 +226,18 @@ impl HtmlAngularJsAnalyzer {
                     let positions = self.find_identifier_positions(expr_trimmed, property_path);
 
                     for (byte_offset, byte_len) in positions {
-                        let before_identifier = &expr_trimmed[..byte_offset];
                         let identifier_text = &expr_trimmed[byte_offset..byte_offset + byte_len];
-                        let newline_count_in_expr = before_identifier.matches('\n').count();
-
-                        let start_line = expr_line + newline_count_in_expr;
-                        let start_col = if newline_count_in_expr == 0 {
-                            expr_col + self.byte_offset_to_utf16_offset(before_identifier, before_identifier.len()) as u32
-                        } else {
-                            let last_newline_pos = before_identifier.rfind('\n').unwrap();
-                            let after_newline = &before_identifier[last_newline_pos + 1..];
-                            self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
-                        };
+                        let (start_line, start_col) =
+                            self.position_in_text(expr_trimmed, byte_offset, expr_line, expr_col);
                         let end_line = start_line;
                         let end_col = start_col + identifier_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
                         let html_reference = HtmlScopeReference {
                             property_path: property_path.clone(),
                             uri: uri.clone(),
-                            start_line: start_line as u32,
+                            start_line,
                             start_col,
-                            end_line: end_line as u32,
+                            end_line,
                             end_col,
                         };
                         self.index.html.add_html_scope_reference(html_reference);
@@ -366,8 +340,31 @@ impl HtmlAngularJsAnalyzer {
 
     /// テキスト内でのバイトオフセットからUTF-16コードユニット数を計算
     pub(super) fn byte_offset_to_utf16_offset(&self, text: &str, byte_offset: usize) -> usize {
-        let before = &text[..byte_offset.min(text.len())];
-        before.chars().map(|c| c.len_utf16()).sum()
+        byte_offset_to_utf16_offset(text, byte_offset)
+    }
+
+    /// 多行文字列 `text` 内のバイトオフセット `byte_offset` を、外側ソース座標系での
+    /// `(line, utf16_col)` に変換する。
+    ///
+    /// `(base_line, base_col)` は `text` の先頭が外側ソースのどこにあるかを示す
+    /// (`base_line`: 0-origin 行, `base_col`: UTF-16 列)。
+    ///
+    /// - `byte_offset` が `text` の最初の行 (text 内に改行がない範囲) にある場合:
+    ///   `col = base_col + (text[..byte_offset] の UTF-16 文字数)`
+    /// - 複数行に跨る場合: `byte_offset` が含まれる行の先頭 (= 外側ソースの行頭、
+    ///   col 0) からの UTF-16 オフセットを `col` として返す。`base_col` は加算しない。
+    ///
+    /// この「複数行のときに `base_col` を加算しない」挙動は意図したもので、`text` が
+    /// 行 0 では `base_col` から始まるが行 1 以降は外側行の先頭 (col 0) から始まる
+    /// ためである。
+    pub(super) fn position_in_text(
+        &self,
+        text: &str,
+        byte_offset: usize,
+        base_line: u32,
+        base_col: u32,
+    ) -> (u32, u32) {
+        position_in_text(text, byte_offset, base_line, base_col)
     }
 
     /// interpolation（デフォルト: {{...}}）からスコープ参照を抽出
@@ -395,26 +392,18 @@ impl HtmlAngularJsAnalyzer {
 
                 let property_paths = self.parse_angular_expression(expr_trimmed, "interpolation");
 
-                // 式内での位置を計算（マルチライン対応、UTF-16変換）
-                let before_expr = &text[..expr_start_byte_offset];
-                let newline_count = before_expr.matches('\n').count();
-                let expr_line = node_start_line + newline_count;
-
-                let expr_col = if newline_count == 0 {
-                    // 改行がない場合、テキスト内のオフセットをUTF-16に変換して加算
-                    let utf16_offset = self.byte_offset_to_utf16_offset(text, expr_start_byte_offset);
-                    node_start_col + utf16_offset as u32
-                } else {
-                    // 改行がある場合、最後の改行以降のテキストをUTF-16に変換
-                    let last_newline_pos = before_expr.rfind('\n').unwrap();
-                    let after_newline = &text[last_newline_pos + 1..expr_start_byte_offset];
-                    self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
-                };
+                // 式の開始位置を外側 (text node) 座標系に変換
+                let (expr_line, expr_col) = self.position_in_text(
+                    text,
+                    expr_start_byte_offset,
+                    node_start_line as u32,
+                    node_start_col,
+                );
 
                 for property_path in property_paths {
                     // ローカル変数の場合はスキップ
                     let base_name = property_path.split('.').next().unwrap_or(&property_path);
-                    if self.index.find_local_variable_definition(uri, base_name, expr_line as u32).is_some() {
+                    if self.index.find_local_variable_definition(uri, base_name, expr_line).is_some() {
                         continue;
                     }
 
@@ -425,9 +414,9 @@ impl HtmlAngularJsAnalyzer {
                         if parts.len() == 2 {
                             let potential_alias = parts[0];
                             // このaliasが有効かチェック
-                            let is_alias = self.index.resolve_controller_by_alias(uri, expr_line as u32, potential_alias).is_some();
+                            let is_alias = self.index.resolve_controller_by_alias(uri, expr_line, potential_alias).is_some();
                             // フォームバインディングかチェック
-                            let is_form_binding = self.index.find_form_binding_definition(uri, potential_alias, expr_line as u32).is_some();
+                            let is_form_binding = self.index.find_form_binding_definition(uri, potential_alias, expr_line).is_some();
                             if !is_alias && !is_form_binding {
                                 // aliasでもフォームバインディングでもないのでスキップ
                                 continue;
@@ -439,19 +428,9 @@ impl HtmlAngularJsAnalyzer {
                     let positions = self.find_identifier_positions(expr_trimmed, &property_path);
 
                     for (byte_offset, byte_len) in positions {
-                        // 式内でのUTF-16オフセットを計算
-                        let before_identifier = &expr_trimmed[..byte_offset];
                         let identifier_text = &expr_trimmed[byte_offset..byte_offset + byte_len];
-                        let newline_count_in_expr = before_identifier.matches('\n').count();
-
-                        let start_line = expr_line + newline_count_in_expr;
-                        let start_col = if newline_count_in_expr == 0 {
-                            expr_col + self.byte_offset_to_utf16_offset(before_identifier, before_identifier.len()) as u32
-                        } else {
-                            let last_newline_pos = before_identifier.rfind('\n').unwrap();
-                            let after_newline = &before_identifier[last_newline_pos + 1..];
-                            self.byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
-                        };
+                        let (start_line, start_col) =
+                            self.position_in_text(expr_trimmed, byte_offset, expr_line, expr_col);
                         let end_line = start_line;
                         let end_col = start_col + identifier_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
@@ -459,9 +438,9 @@ impl HtmlAngularJsAnalyzer {
                         let html_reference = HtmlScopeReference {
                             property_path: property_path.clone(),
                             uri: uri.clone(),
-                            start_line: start_line as u32,
+                            start_line,
                             start_col,
-                            end_line: end_line as u32,
+                            end_line,
                             end_col,
                         };
                         self.index.html.add_html_scope_reference(html_reference);
@@ -473,5 +452,98 @@ impl HtmlAngularJsAnalyzer {
                 break;
             }
         }
+    }
+}
+
+/// テキスト内でのバイトオフセットから UTF-16 コードユニット数を計算 (純粋関数版)。
+///
+/// メソッド版 `HtmlAngularJsAnalyzer::byte_offset_to_utf16_offset` の実装本体。
+/// 内部の [`position_in_text`] からも参照される。
+pub(super) fn byte_offset_to_utf16_offset(text: &str, byte_offset: usize) -> usize {
+    let before = &text[..byte_offset.min(text.len())];
+    before.chars().map(|c| c.len_utf16()).sum()
+}
+
+/// 多行文字列 `text` 内のバイトオフセット `byte_offset` を、外側ソース座標系での
+/// `(line, utf16_col)` に変換する純粋関数。
+///
+/// 詳細は [`HtmlAngularJsAnalyzer::position_in_text`] を参照。
+pub(super) fn position_in_text(
+    text: &str,
+    byte_offset: usize,
+    base_line: u32,
+    base_col: u32,
+) -> (u32, u32) {
+    let before = &text[..byte_offset.min(text.len())];
+    let newline_count = before.matches('\n').count();
+    let line = base_line + newline_count as u32;
+    let col = if newline_count == 0 {
+        // text の最初の行: 外側座標系では `base_col` 起点
+        base_col + byte_offset_to_utf16_offset(before, before.len()) as u32
+    } else {
+        // text 内で改行を跨ぐ位置: 外側ソースでも別の行の頭 (col 0) 起点に揃う
+        // ため、base_col は加算しない (これが意図した挙動)
+        let last_newline_pos = before.rfind('\n').unwrap();
+        let after_newline = &before[last_newline_pos + 1..];
+        byte_offset_to_utf16_offset(after_newline, after_newline.len()) as u32
+    };
+    (line, col)
+}
+
+#[cfg(test)]
+mod position_in_text_tests {
+    use super::{byte_offset_to_utf16_offset, position_in_text};
+
+    #[test]
+    fn single_line_ascii() {
+        // "hello world" の 'w' (byte 6) は、base=(10, 5) 起点なら (10, 5+6)
+        let (line, col) = position_in_text("hello world", 6, 10, 5);
+        assert_eq!((line, col), (10, 11));
+    }
+
+    #[test]
+    fn single_line_with_supplementary_planes() {
+        // 絵文字 "🎉" は UTF-8 4byte / UTF-16 2unit。byte_offset=4 (絵文字の直後) は
+        // UTF-16 で +2 進んでいる。base=(0, 3) なら (0, 3+2)=(0, 5)。
+        let (line, col) = position_in_text("🎉abc", 4, 0, 3);
+        assert_eq!((line, col), (0, 5));
+    }
+
+    #[test]
+    fn multi_line_starts_at_outer_column_zero() {
+        // text="ab\ncd", byte_offset=4 ('d' の位置)。
+        // 改行を跨ぐので line=base_line+1, col=外側行の先頭からの UTF-16 オフセット=1。
+        // base_col=10 は加算してはならない (これが「multi-line で base_col を加算しない」挙動)。
+        let (line, col) = position_in_text("ab\ncd", 4, 7, 10);
+        assert_eq!((line, col), (8, 1));
+    }
+
+    #[test]
+    fn multi_line_with_unicode_after_newline() {
+        // "ab\n🎉xy", byte_offset=8 ('y') は改行後 UTF-8 5byte、UTF-16 3unit。
+        // line=base_line+1, col=3 (改行後の文字列 "🎉x" の UTF-16 長)。
+        let (line, col) = position_in_text("ab\n🎉xy", 8, 0, 99);
+        assert_eq!((line, col), (1, 3));
+    }
+
+    #[test]
+    fn at_byte_zero() {
+        let (line, col) = position_in_text("hello", 0, 5, 7);
+        assert_eq!((line, col), (5, 7));
+    }
+
+    #[test]
+    fn at_text_end() {
+        let (line, col) = position_in_text("abc", 3, 0, 0);
+        assert_eq!((line, col), (0, 3));
+    }
+
+    #[test]
+    fn byte_offset_helper_counts_utf16_units() {
+        assert_eq!(byte_offset_to_utf16_offset("abc", 3), 3);
+        assert_eq!(byte_offset_to_utf16_offset("a🎉b", 5), 3); // 'a' + '🎉' = 1 + 2 utf16
+        assert_eq!(byte_offset_to_utf16_offset("", 0), 0);
+        // byte_offset > len は飽和して全長を返す
+        assert_eq!(byte_offset_to_utf16_offset("ab", 99), 2);
     }
 }
