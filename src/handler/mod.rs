@@ -1,7 +1,8 @@
+mod code_action;
 mod codelens;
 mod completion;
 mod definition;
-mod diagnostics;
+pub mod diagnostics;
 mod document_symbol;
 mod hover;
 mod references;
@@ -11,6 +12,7 @@ mod semantic_tokens;
 mod signature_help;
 mod workspace_symbol;
 
+pub use code_action::CodeActionHandler;
 pub use codelens::CodeLensHandler;
 pub use completion::CompletionHandler;
 pub use definition::DefinitionHandler;

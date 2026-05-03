@@ -58,6 +58,22 @@ impl ControllerStore {
             .collect()
     }
 
+    /// コントローラー名から ControllerScope を取得する。
+    ///
+    /// 同名 controller が複数 (例: 別ファイルで再定義) ある場合は全て返す。
+    /// code action で controller body 先頭にコードを挿入する用途で使う。
+    pub fn get_controller_scopes_by_name(&self, name: &str) -> Vec<ControllerScope> {
+        let mut result = Vec::new();
+        for entry in self.controller_scopes.iter() {
+            for scope in entry.value() {
+                if scope.name == name {
+                    result.push(scope.clone());
+                }
+            }
+        }
+        result
+    }
+
     // ========== HTML Controller Scopes ==========
 
     pub fn add_html_controller_scope(&self, scope: HtmlControllerScope) {

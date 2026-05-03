@@ -20,9 +20,9 @@ use crate::analyzer::js::AngularJsAnalyzer;
 use crate::cache::{CacheLoader, CacheWriter};
 use crate::config::{AjsConfig, DiagnosticsConfig, PathMatcher};
 use crate::handler::{
-    CodeLensHandler, CompletionHandler, DefinitionHandler, DiagnosticsHandler,
-    DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler,
-    SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
+    CodeActionHandler, CodeLensHandler, CompletionHandler, DefinitionHandler,
+    DiagnosticsHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler,
+    RenameHandler, SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
 };
 use crate::index::Index;
 use crate::ts_proxy::TsProxy;
@@ -1349,6 +1349,13 @@ impl LanguageServer for Backend {
                     commands: vec!["angularjs-lsp.refreshIndex".to_string()],
                     work_done_progress_options: Default::default(),
                 }),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        work_done_progress_options: Default::default(),
+                        resolve_provider: Some(false),
+                    },
+                )),
                 ..Default::default()
             },
         })
@@ -2058,6 +2065,28 @@ impl LanguageServer for Backend {
         let index = Arc::clone(&self.index);
         let result = tokio::task::spawn_blocking(move || {
             RenameHandler::new(index).prepare_rename(params)
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(result)
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        let index = Arc::clone(&self.index);
+        // controller 側 JS の最新ソース (open buffer) を渡してインデント推定に使う。
+        // 簡単のため全 open document を投入する (open 数は大抵そう多くない)。
+        let sources: HashMap<Url, String> = self
+            .documents
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        let result = tokio::task::spawn_blocking(move || {
+            CodeActionHandler::new(index).code_action(params, &sources)
         })
         .await
         .ok()
