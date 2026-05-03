@@ -3,8 +3,13 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range, Url};
 use tracing::debug;
 
+use super::builtin_services::{is_builtin_service, suggest_builtin_service};
 use crate::config::DiagnosticsConfig;
 use crate::index::Index;
+use crate::model::SymbolKind;
+
+/// 未知サービス警告で「もしかして」候補とみなす最大 Levenshtein 距離
+const UNKNOWN_DI_SUGGEST_MAX_DISTANCE: usize = 2;
 
 /// 診断ハンドラー
 pub struct DiagnosticsHandler {
@@ -58,7 +63,108 @@ impl DiagnosticsHandler {
             diagnostics.extend(self.check_unused_scope_variables(uri));
         }
 
+        // 未登録サービス (typo) のチェック
+        diagnostics.extend(self.check_unknown_di_services(uri));
+
         diagnostics
+    }
+
+    /// `unknown_di_service_severity` 設定を `Option<DiagnosticSeverity>` に変換
+    /// "off" の場合は `None` (診断無効)
+    fn parse_unknown_di_severity(&self) -> Option<DiagnosticSeverity> {
+        match self.config.unknown_di_service_severity.to_lowercase().as_str() {
+            "off" | "none" | "disabled" | "false" => None,
+            "error" => Some(DiagnosticSeverity::ERROR),
+            "warning" => Some(DiagnosticSeverity::WARNING),
+            "hint" => Some(DiagnosticSeverity::HINT),
+            "information" | "info" => Some(DiagnosticSeverity::INFORMATION),
+            _ => Some(DiagnosticSeverity::WARNING),
+        }
+    }
+
+    /// DI 配列内の未登録サービス名 (typo) を検出する。
+    ///
+    /// 1. AngularJS 組み込みサービス allowlist と完全一致するか
+    /// 2. workspace の Service / Factory / Provider / Value / Constant 定義に存在するか
+    ///
+    /// どちらでもない要素について警告を生成する。Levenshtein 距離 2 以内の組み込み
+    /// サービス名があれば「もしかして `$timeout`?」をメッセージに含める。
+    ///
+    /// false positive を避けるため、workspace スキャン完了前は静かに何も返さない。
+    pub(crate) fn check_unknown_di_services(&self, uri: &Url) -> Vec<Diagnostic> {
+        // 設定で無効化されていれば何もしない
+        let Some(severity) = self.parse_unknown_di_severity() else {
+            return Vec::new();
+        };
+
+        // workspace 全体の解析が終わるまでは workspace 由来サービスが揃わないので
+        // false positive を避けるため黙る (ユーザ視点では「起動直後だけ静か」)
+        if !self.index.is_workspace_scanned() {
+            return Vec::new();
+        }
+
+        let usages = self.index.di_usages.get_for_uri(uri);
+        if usages.is_empty() {
+            return Vec::new();
+        }
+
+        let mut diagnostics = Vec::new();
+        for usage in usages {
+            // 1. 組み込み allowlist
+            if is_builtin_service(&usage.name) {
+                continue;
+            }
+            // 2. workspace の Service / Factory / Provider / Value / Constant 定義
+            if self.is_known_workspace_service(&usage.name) {
+                continue;
+            }
+
+            // 候補生成: 組み込みサービスから Levenshtein ≤ 2 のものを 1 件提案
+            let mut message = format!("Unknown service '{}' in DI array", usage.name);
+            if let Some(suggestion) =
+                suggest_builtin_service(&usage.name, UNKNOWN_DI_SUGGEST_MAX_DISTANCE)
+            {
+                message.push_str(&format!(". Did you mean '{}'?", suggestion));
+            }
+
+            diagnostics.push(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: usage.span.start_line,
+                        character: usage.span.start_col,
+                    },
+                    end: Position {
+                        line: usage.span.end_line,
+                        character: usage.span.end_col,
+                    },
+                },
+                severity: Some(severity),
+                code: None,
+                code_description: None,
+                source: Some("angularjs-lsp".to_string()),
+                message,
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+
+        diagnostics
+    }
+
+    /// `name` が workspace 内の Service / Factory / Provider / Value / Constant
+    /// 定義のいずれかに該当するか
+    fn is_known_workspace_service(&self, name: &str) -> bool {
+        const KINDS: &[SymbolKind] = &[
+            SymbolKind::Service,
+            SymbolKind::Factory,
+            SymbolKind::Provider,
+            SymbolKind::Value,
+            SymbolKind::Constant,
+        ];
+        KINDS
+            .iter()
+            .any(|k| self.index.definitions.has_definition_of_kind(name, *k))
     }
 
     /// 未使用スコープ変数をチェックし警告生成

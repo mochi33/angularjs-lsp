@@ -1191,6 +1191,11 @@ impl Backend {
                     )
                     .await;
 
+                // workspace スキャン完了をマーク。
+                // 「未知サービス警告 (#63)」のように workspace 全シンボルが
+                // 揃ってから判定したい診断はこのフラグを参照する。
+                self.index.mark_workspace_scanned();
+
                 self.republish_diagnostics_for_open_js_files().await;
 
                 end_progress(
@@ -1682,6 +1687,10 @@ impl LanguageServer for Backend {
         // workspace scan / cache load 完了後、既に開いていたファイルに対して
         // 解析 + 診断 + refresh を最終確定させる (初期化順の race と
         // disk-vs-buffer 不整合を解消)
+        // 「未知サービス警告 (#63)」のように workspace 全シンボルを揃えてから
+        // 判定したい診断のために、ここで scan 完了をマークする (cache load
+        // パスでも確実に true になる)
+        self.index.mark_workspace_scanned();
         self.republish_open_files_after_init().await;
     }
 

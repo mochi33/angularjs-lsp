@@ -1,3 +1,4 @@
+mod builtin_services;
 mod codelens;
 mod completion;
 mod definition;
