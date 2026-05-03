@@ -40,6 +40,11 @@ pub struct DiagnosticsConfig {
     /// 未使用スコープ変数の警告を有効にする（デフォルト: true）
     #[serde(default = "default_true")]
     pub unused_scope_variables: bool,
+    /// DI 配列内の未登録サービス名 (typo) 警告の重要度
+    /// "error" / "warning" / "hint" / "information" / "off" (デフォルト: "warning")
+    /// "off" を指定するとこの診断を無効化する。
+    #[serde(default = "default_unknown_di_service_severity")]
+    pub unknown_di_service_severity: String,
 }
 
 fn default_true() -> bool {
@@ -50,12 +55,17 @@ fn default_severity() -> String {
     "warning".to_string()
 }
 
+fn default_unknown_di_service_severity() -> String {
+    "warning".to_string()
+}
+
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {
             enabled: default_true(),
             severity: default_severity(),
             unused_scope_variables: default_true(),
+            unknown_di_service_severity: default_unknown_di_service_severity(),
         }
     }
 }

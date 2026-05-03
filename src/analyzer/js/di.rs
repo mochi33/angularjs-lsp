@@ -5,6 +5,7 @@ use tree_sitter::Node;
 
 use super::context::{AnalyzerContext, DiInfo};
 use super::AngularJsAnalyzer;
+use crate::index::DiUsage;
 use crate::model::{ControllerScope, SymbolReference};
 
 impl AngularJsAnalyzer {
@@ -124,18 +125,30 @@ impl AngularJsAnalyzer {
 
     /// `$inject` 配列から依存サービスを抽出する
     ///
-    /// `$` で始まるAngular組み込みサービスはスキップ
+    /// `$` で始まるAngular組み込みサービスはスキップ (参照登録のみ)。
+    /// 一方で「未知サービス警告 (#63)」用に `$` 付きも含めて DI usage を記録する。
     pub(super) fn extract_inject_dependencies(&self, node: Node, source: &str, uri: &Url) {
         if node.kind() == "array" {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.kind() == "string" {
                     let dep_name = self.extract_string_value(child, source);
+                    let span = self.span_of(child);
+
+                    // 未知サービス警告用: $ 付きも含めて全 DI 文字列を記録
+                    self.index.di_usages.add(
+                        uri,
+                        DiUsage {
+                            name: dep_name.clone(),
+                            span,
+                        },
+                    );
+
                     if !dep_name.starts_with('$') {
                         let reference = SymbolReference {
                             name: dep_name,
                             uri: uri.clone(),
-                            span: self.span_of(child),
+                            span,
                         };
 
                         self.index.definitions.add_reference(reference);
@@ -152,18 +165,30 @@ impl AngularJsAnalyzer {
     /// .controller('Ctrl', ['$scope', 'UserService', function(...) {}])
     /// ```
     ///
-    /// `$` で始まるAngular組み込みサービスはスキップ
+    /// `$` で始まるAngular組み込みサービスは `SymbolReference` 登録はスキップ。
+    /// 「未知サービス警告 (#63)」用には `$` 付きも含めて DI usage を記録する。
     pub(super) fn extract_dependencies(&self, node: Node, source: &str, uri: &Url) {
         if node.kind() == "array" {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.kind() == "string" {
                     let dep_name = self.extract_string_value(child, source);
+                    let span = self.span_of(child);
+
+                    // 未知サービス警告用: $ 付きも含めて全 DI 文字列を記録
+                    self.index.di_usages.add(
+                        uri,
+                        DiUsage {
+                            name: dep_name.clone(),
+                            span,
+                        },
+                    );
+
                     if !dep_name.starts_with('$') {
                         let reference = SymbolReference {
                             name: dep_name,
                             uri: uri.clone(),
-                            span: self.span_of(child),
+                            span,
                         };
 
                         self.index.definitions.add_reference(reference);
