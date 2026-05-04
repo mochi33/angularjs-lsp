@@ -50,6 +50,13 @@ pub struct DiagnosticsConfig {
     /// `severity` と同じ値を使う（=後方互換）。
     #[serde(default)]
     pub unknown_directive_severity: Option<String>,
+    /// DI 配列の要素数と関数の引数数の不一致を警告する重要度
+    /// "error", "warning", "hint", "information"（デフォルト: "warning"）
+    /// 専用の severity を持たせるのは、本診断は誤検出のしようがない強い指摘
+    /// (実行時に確実に undefined になる) のため、ユーザがプロジェクト方針に応じて
+    /// error として扱えるようにするため。
+    #[serde(default = "default_severity")]
+    pub di_arity_severity: String,
 }
 
 fn default_true() -> bool {
@@ -68,6 +75,7 @@ impl Default for DiagnosticsConfig {
             unused_scope_variables: default_true(),
             unknown_directive_references: default_true(),
             unknown_directive_severity: None,
+            di_arity_severity: default_severity(),
         }
     }
 }
@@ -172,6 +180,7 @@ mod tests {
         assert!(config.unused_scope_variables);
         assert!(config.unknown_directive_references);
         assert!(config.unknown_directive_severity.is_none());
+        assert_eq!(config.di_arity_severity, "warning");
     }
 
     #[test]

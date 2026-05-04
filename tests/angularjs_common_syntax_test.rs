@@ -4136,6 +4136,294 @@ fn test_diagnose_unknown_directive_disabled_by_config() {
     );
 }
 
+// ====================================================================
+// Issue #65: DI 配列の要素数と関数の引数数の不一致を警告
+// ====================================================================
+
+/// JS ソースを解析して `diagnose_js` の結果を返すヘルパー
+fn diagnose_js_for_test(js: &str) -> Vec<tower_lsp::lsp_types::Diagnostic> {
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let index = analyze_js(js);
+    let uri = Url::parse("file:///test.js").unwrap();
+    DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default()).diagnose_js(&uri)
+}
+
+#[test]
+fn test_di_arity_mismatch_warns_when_param_missing() {
+    // DI 配列の要素数 (2) より関数引数 (1) が少ない → 警告
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "param 不足のケースで arity 警告が 1 件出るべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        arity_msgs[0].contains("2") && arity_msgs[0].contains("1"),
+        "メッセージに DI 数 (2) と param 数 (1) が含まれるべき: {}",
+        arity_msgs[0]
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_warns_when_param_excessive() {
+    // DI 配列の要素数 (1) より関数引数 (2) が多い → 警告
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', function($scope, $timeout) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "param 過剰のケースで arity 警告が 1 件出るべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        arity_msgs[0].contains("1") && arity_msgs[0].contains("2"),
+        "メッセージに DI 数 (1) と param 数 (2) が含まれるべき: {}",
+        arity_msgs[0]
+    );
+}
+
+#[test]
+fn test_di_arity_match_no_warning() {
+    // DI 配列の要素数 (2) と関数引数 (2) が一致 → 警告なし
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope, $timeout) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "一致するケースでは arity 警告は出ないはず (got: {:?})",
+        arity_msgs
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_with_arrow_function() {
+    // arrow function でも arity 不一致を検出できる
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', ($scope) => {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "arrow function で arity 不一致を検出するべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_with_class_constructor() {
+    // class 構文でも constructor の引数数で arity チェック
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', class {
+    constructor($scope) {
+        this.value = 1;
+    }
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "class constructor で arity 不一致を検出するべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_function_only_no_warning() {
+    // DI 配列なしの純粋な function (暗黙 DI) は対象外 → 警告なし
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', function($scope, $timeout) {
+    $scope.x = 1;
+});
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "DI 配列なしの形式は arity チェック対象外 (got: {:?})",
+        arity_msgs
+    );
+}
+
+#[test]
+fn test_di_arity_underscore_prefix_param_counts_as_normal() {
+    // 末尾の `_` プレフィックス引数も「使ってない」だけで arity には数える。
+    // 一致しているなら警告なし、不一致のみ警告対象 (= 通常の数え方と同じ)。
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope, _$timeout) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "DI 数 (2) と param 数 (2) が一致するなら _-prefix があっても警告なし (got: {:?})",
+        arity_msgs
+    );
+}
+
+#[test]
+fn test_di_arity_underscore_prefix_param_mismatch_warns() {
+    // `_` プレフィックスでも arity には通常通り数えるので、
+    // DI 数と引数数がずれていれば警告対象になる (= 文字数の問題ではなく「並び」の問題)。
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', '$log', function($scope, _$timeout) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "_-prefix があっても DI 数 (3) vs param 数 (2) が一致しなければ警告すべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_in_run_block() {
+    // `.run([...])` 内の DI 配列でも arity チェックが効く
+    let js = r#"
+angular.module('app', []).run(['$rootScope', '$log', function($rootScope) {
+    $rootScope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        ".run() でも arity 不一致を検出するべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_in_config_block() {
+    // `.config([...])` 内の DI 配列でも arity チェックが効く
+    let js = r#"
+angular.module('app', []).config(['$routeProvider', '$locationProvider', function($routeProvider) {
+    $routeProvider.when('/', {});
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        ".config() でも arity 不一致を検出するべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_skips_when_function_has_rest_param() {
+    // rest パラメータが含まれる場合は静的に arity を確定できないので警告を出さない。
+    // 過剰に false positive を出さないことが目的の回帰テスト。
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope, ...rest) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "rest パラメータ含む関数は arity を確定できないので警告を出さない (got: {:?})",
+        arity_msgs
+    );
+}
+
+#[test]
+fn test_di_arity_skips_when_function_has_default_param() {
+    // デフォルト値付きパラメータが含まれる場合も警告を出さない。
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope, $timeout = null) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "デフォルト値付きパラメータでは arity を確定できないので警告を出さない (got: {:?})",
+        arity_msgs
+    );
+}
+
 // ============================================================
 // Rename refactoring (#68)
 // ============================================================
