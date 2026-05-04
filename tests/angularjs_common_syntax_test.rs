@@ -4151,3 +4151,206 @@ angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function
         arity_msgs
     );
 }
+
+// ============================================================
+// Rename refactoring (#68)
+// ============================================================
+
+/// rename 用ヘルパー: JS と HTML の双方を解析して Index を返す
+fn analyze_js_and_html(js_source: &str, html_source: &str) -> Arc<Index> {
+    analyze_html(js_source, html_source)
+}
+
+fn make_rename_params(uri: &Url, line: u32, character: u32, new_name: &str) -> tower_lsp::lsp_types::RenameParams {
+    use tower_lsp::lsp_types::{Position, RenameParams, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
+    RenameParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position { line, character },
+        },
+        new_name: new_name.to_string(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    }
+}
+
+fn edit_texts_in(edit: &tower_lsp::lsp_types::WorkspaceEdit, uri: &Url) -> Vec<String> {
+    edit.changes
+        .as_ref()
+        .and_then(|m| m.get(uri))
+        .map(|edits| edits.iter().map(|e| e.new_text.clone()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn test_rename_controller_updates_js_definition_and_html_references() {
+    // JS の controller 定義の文字列リテラルにカーソルを置いて rename すると、
+    // JS 側の登録名と HTML 側の ng-controller 値の両方が同時に書き換わるべき
+    use angularjs_lsp::handler::RenameHandler;
+
+    let js = r#"angular.module('app', []).controller('MainCtrl', ['$scope', function($scope) {}]);"#;
+    let html = r#"<div ng-controller="MainCtrl as vm">{{ vm.x }}</div>"#;
+
+    let index = analyze_js_and_html(js, html);
+    let handler = RenameHandler::new(index);
+
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // 'MainCtrl' の "M" 付近 (line 0, controller('MainCtrl' の中身) にカーソル
+    // `angular.module('app', []).controller('MainCtrl'` の "MainCtrl" は
+    // 0-index で `controller('` の後 → 文字位置を計算
+    let needle = "controller('";
+    let col = js.find(needle).unwrap() + needle.len() + 1; // 'M' の 1 文字内
+    let params = make_rename_params(&js_uri, 0, col as u32, "UserCtrl");
+    let edit = handler.rename(params).expect("rename は WorkspaceEdit を返すべき");
+
+    let js_edits = edit_texts_in(&edit, &js_uri);
+    let html_edits = edit_texts_in(&edit, &html_uri);
+
+    assert!(
+        !js_edits.is_empty(),
+        "JS 側に少なくとも 1 件の編集が必要 (got {:?})",
+        js_edits
+    );
+    assert!(
+        js_edits.iter().all(|t| t == "UserCtrl"),
+        "全ての編集 new_text は 'UserCtrl' であるべき (got {:?})",
+        js_edits
+    );
+    assert!(
+        !html_edits.is_empty(),
+        "HTML 側 ng-controller の参照も書き換え対象になるべき (got {:?})",
+        html_edits
+    );
+    assert!(
+        html_edits.iter().all(|t| t == "UserCtrl"),
+        "HTML 側の new_text も 'UserCtrl' であるべき (got {:?})",
+        html_edits
+    );
+}
+
+#[test]
+fn test_rename_scope_property_in_html_updates_js_and_html() {
+    // HTML 内の {{ foo }} にカーソルを置いて rename すると
+    // JS 側 $scope.foo と HTML 内の参照両方が書き換わるべき
+    use angularjs_lsp::handler::RenameHandler;
+
+    let js = r#"angular.module('app', []).controller('MainCtrl', ['$scope', function($scope) {
+    $scope.foo = 1;
+}]);"#;
+    let html = r#"<div ng-controller="MainCtrl">{{ foo }}</div>"#;
+
+    let index = analyze_js_and_html(js, html);
+    let handler = RenameHandler::new(index);
+
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // HTML 0 行目 `{{ foo }}` の foo (col index)
+    let foo_col = html.find("{{ foo").unwrap() + 3; // '{', '{', ' ' の後
+    let params = make_rename_params(&html_uri, 0, foo_col as u32, "bar");
+    let edit = handler
+        .rename(params)
+        .expect("scope property rename は WorkspaceEdit を返すべき");
+
+    let html_edits = edit_texts_in(&edit, &html_uri);
+    let js_edits = edit_texts_in(&edit, &js_uri);
+
+    assert!(
+        !html_edits.is_empty(),
+        "HTML 側の参照を書き換える必要がある (got {:?})",
+        html_edits
+    );
+    assert!(
+        !js_edits.is_empty(),
+        "JS 側の $scope.foo 定義も書き換える必要がある (got {:?})",
+        js_edits
+    );
+    assert!(
+        html_edits.iter().chain(js_edits.iter()).all(|t| t == "bar"),
+        "全ての new_text は 'bar' であるべき"
+    );
+}
+
+#[test]
+fn test_rename_ng_repeat_local_variable_is_scope_limited() {
+    // ng-repeat の `item in items` の `item` をリネームしても、
+    // ng-repeat スコープ外で同名の参照は書き換えられてはいけない
+    use angularjs_lsp::handler::RenameHandler;
+
+    let js = "";
+    let html = r#"<div>
+<ul>
+<li ng-repeat="item in items">{{ item.name }}</li>
+</ul>
+<span>{{ item }}</span>
+</div>"#;
+
+    let index = analyze_js_and_html(js, html);
+    let handler = RenameHandler::new(index);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // 2 行目 (0-index) の ng-repeat 内 'item' にカーソルを置く
+    // line 2: `<li ng-repeat="item in items">{{ item.name }}</li>`
+    let line = 2u32;
+    let line_text = "<li ng-repeat=\"item in items\">{{ item.name }}</li>";
+    let item_col = line_text.find("\"item").unwrap() + 1; // 'i' の位置
+
+    let params = make_rename_params(&html_uri, line, item_col as u32, "row");
+    let edit = handler
+        .rename(params)
+        .expect("ng-repeat ローカル変数の rename は WorkspaceEdit を返すべき");
+
+    let edits = edit
+        .changes
+        .as_ref()
+        .and_then(|m| m.get(&html_uri))
+        .cloned()
+        .unwrap_or_default();
+
+    assert!(!edits.is_empty(), "rename 編集が少なくとも 1 件必要");
+    assert!(
+        edits.iter().all(|e| e.new_text == "row"),
+        "new_text 全件が 'row' であるべき (got {:?})",
+        edits.iter().map(|e| &e.new_text).collect::<Vec<_>>()
+    );
+
+    // スコープ外の `<span>{{ item }}</span>` (line 4) は書き換えられないこと
+    let outer_line = 4u32;
+    assert!(
+        edits.iter().all(|e| e.range.start.line != outer_line),
+        "ng-repeat スコープ外 (line {}) の `item` は書き換え対象外であるべき (got ranges: {:?})",
+        outer_line,
+        edits.iter().map(|e| e.range).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_prepare_rename_returns_range_for_controller_literal() {
+    // prepareRename: controller の文字列リテラルにカーソルを置くと書き換え可能範囲が返る
+    use angularjs_lsp::handler::RenameHandler;
+    use tower_lsp::lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams};
+
+    let js = r#"angular.module('app', []).controller('MainCtrl', ['$scope', function($scope) {}]);"#;
+    let html = r#"<div ng-controller="MainCtrl">{{ }}</div>"#;
+
+    let index = analyze_js_and_html(js, html);
+    let handler = RenameHandler::new(index);
+    let js_uri = Url::parse("file:///test.js").unwrap();
+
+    let needle = "controller('";
+    let col = js.find(needle).unwrap() + needle.len() + 1;
+    let params = TextDocumentPositionParams {
+        text_document: TextDocumentIdentifier { uri: js_uri.clone() },
+        position: Position { line: 0, character: col as u32 },
+    };
+
+    let response = handler
+        .prepare_rename(params)
+        .expect("controller 名上では prepareRename が範囲を返すべき");
+    // Range が返ること自体を確認 (具体的な値はスキップ)
+    match response {
+        tower_lsp::lsp_types::PrepareRenameResponse::Range(_) => {}
+        _ => panic!("Range レスポンスが返るべき"),
+    }
+}
