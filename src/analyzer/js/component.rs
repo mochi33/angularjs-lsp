@@ -57,7 +57,7 @@ impl AngularJsAnalyzer {
                                 uri,
                             )
                         }
-                        "config" | "run" => self.extract_run_config_di(node, source, ctx),
+                        "config" | "run" => self.extract_run_config_di(node, source, uri, ctx),
                         "when" | "otherwise" => {
                             // レシーバが `$routeProvider` (DI 経由含む) のときだけ
                             // route binding として扱う。これがないと任意の
@@ -531,7 +531,9 @@ impl AngularJsAnalyzer {
 
         // 配列・関数・class・識別子を統一的にDI解析
         self.extract_dependencies(value, source, uri);
-        let di_info = self.extract_di_info(value, source);
+
+        // DI 解析 + arity 不一致警告 (warnings は DI 配列のみ対象、内部で判定)
+        let di_info = self.extract_di_info_with_diagnostics(value, source, uri);
         if !di_info.has_any() {
             return;
         }
@@ -646,10 +648,11 @@ impl AngularJsAnalyzer {
     ///
     /// これらはシンボル定義を作成しないが、DIスコープを作成して
     /// $rootScope などの解析を可能にする
-    fn extract_run_config_di(&self, node: Node, source: &str, ctx: &mut AnalyzerContext) {
+    fn extract_run_config_di(&self, node: Node, source: &str, uri: &Url, ctx: &mut AnalyzerContext) {
         if let Some(args) = node.child_by_field_name("arguments") {
             if let Some(first_arg) = args.named_child(0) {
-                let di_info = self.extract_di_info(first_arg, source);
+                // DI 解析 + arity 不一致警告 (warnings は DI 配列のみ対象、内部で判定)
+                let di_info = self.extract_di_info_with_diagnostics(first_arg, source, uri);
 
                 if di_info.has_any() {
                     if let Some((body_start, body_end)) = self.find_function_body_range(first_arg, source) {
@@ -726,8 +729,8 @@ impl AngularJsAnalyzer {
                     let (start, end, docs_line) = if let Some(second_arg) = args.named_child(1) {
                         self.extract_dependencies(second_arg, source, uri);
 
-                        // DIスコープを追加（配列・関数・class・識別子を統一的に処理）
-                        let di_info = self.extract_di_info(second_arg, source);
+                        // DIスコープを追加（配列・関数・class・識別子を統一的に処理、arity 不一致警告も発火）
+                        let di_info = self.extract_di_info_with_diagnostics(second_arg, source, uri);
 
                         if di_info.has_any() {
                             if let Some((body_start, body_end)) = self.find_function_body_range(second_arg, source) {
