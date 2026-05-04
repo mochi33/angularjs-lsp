@@ -5,7 +5,7 @@ use tree_sitter::Node;
 
 use super::context::{AnalyzerContext, DiInfo};
 use super::AngularJsAnalyzer;
-use crate::model::{ControllerScope, DiArityIssue, Span, SymbolReference};
+use crate::model::{ControllerScope, DiArityIssue, SymbolReference};
 
 impl AngularJsAnalyzer {
     /// ES6 classノードからconstructorメソッドを取得する
@@ -95,6 +95,20 @@ impl AngularJsAnalyzer {
             }
             _ => DiInfo::empty(),
         }
+    }
+
+    /// `extract_di_info` と DI 配列の arity 不一致チェックをセットで実行する。
+    ///
+    /// すべての DI 値を解析するサイト (controller / service / factory / run / config / state など)
+    /// はこちらを経由することで、警告呼び出しの追加忘れを防ぐ。
+    pub(super) fn extract_di_info_with_diagnostics(
+        &self,
+        node: Node,
+        source: &str,
+        uri: &Url,
+    ) -> DiInfo {
+        self.check_di_arity_mismatch(node, source, uri);
+        self.extract_di_info(node, source)
     }
 
     /// `$inject` パターンを解析する
@@ -373,6 +387,9 @@ impl AngularJsAnalyzer {
     /// // class constructor の場合
     /// .controller('Ctrl', ['s1', class { constructor(s1, s2) {} }])
     /// ```
+    ///
+    /// rest / default / 分割代入などの複雑な引数パターンが含まれる場合は
+    /// 静的に正確な arity を確定できないので警告を出さない (false positive を避ける)。
     pub(super) fn check_di_arity_mismatch(&self, node: Node, source: &str, uri: &Url) {
         // DI 配列以外は対象外 (純粋な function alone は注入されるサービス数を
         // 静的に知る術がないので警告対象から除外)
@@ -400,36 +417,63 @@ impl AngularJsAnalyzer {
             return;
         };
 
-        let param_count = self.extract_function_param_names(func, source).len();
+        // rest / default / 分割代入があれば arity を確定できないので諦める
+        let Some(param_count) = self.count_simple_function_params(func, source) else {
+            return;
+        };
 
         if param_count == string_count {
             return;
         }
 
-        // 警告位置: function は関数ノード自体、class は constructor または class 全体
-        let (start, end) = match func.kind() {
-            "class" => {
-                if let Some(ctor) = self.get_constructor_from_class(func, source) {
-                    (ctor.start_position(), ctor.end_position())
-                } else {
-                    (func.start_position(), func.end_position())
-                }
-            }
-            _ => (func.start_position(), func.end_position()),
+        // 警告位置: function は関数ノード自体、class は constructor (なければ class 全体)
+        let target = if func.kind() == "class" {
+            self.get_constructor_from_class(func, source).unwrap_or(func)
+        } else {
+            func
         };
-        let span = Span::new(
-            self.offset_line(start.row as u32),
-            start.column as u32,
-            self.offset_line(end.row as u32),
-            end.column as u32,
-        );
 
         self.index.diagnostics.add_di_arity_issue(DiArityIssue {
             uri: uri.clone(),
             di_count: string_count,
             param_count,
-            span,
+            span: self.span_of(target),
         });
+    }
+
+    /// 関数 / arrow / class constructor の引数を全て単純識別子として数える。
+    /// rest (`...rest`) / default (`x = 1`) / 分割代入 (`{a}` / `[a]`) などが
+    /// 混じる場合は `None` を返す (静的に正確な arity を確定できないため)。
+    fn count_simple_function_params(&self, node: Node, source: &str) -> Option<usize> {
+        let func_node = match node.kind() {
+            "function_expression" | "arrow_function" | "function_declaration"
+            | "method_definition" => Some(node),
+            "class_declaration" | "class" => self.get_constructor_from_class(node, source),
+            _ => None,
+        }?;
+
+        // arrow function 単一引数 (`x => ...`) は `parameter` フィールドを持つ
+        if let Some(single) = func_node.child_by_field_name("parameter") {
+            return if single.kind() == "identifier" {
+                Some(1)
+            } else {
+                None
+            };
+        }
+
+        let params = func_node.child_by_field_name("parameters")?;
+        let mut count = 0;
+        let mut cursor = params.walk();
+        for child in params.children(&mut cursor) {
+            match child.kind() {
+                "identifier" => count += 1,
+                // 構文区切り・コメントは無視
+                "(" | ")" | "," | "comment" => {}
+                // rest_pattern / assignment_pattern / object_pattern / array_pattern などは諦める
+                _ => return None,
+            }
+        }
+        Some(count)
     }
 
     /// 関数 (式 / 宣言 / class constructor) のパラメータ識別子名を順番通りに返す
