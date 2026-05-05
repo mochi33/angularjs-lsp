@@ -40,6 +40,19 @@ pub struct DiagnosticsConfig {
     /// 未使用スコープ変数の警告を有効にする（デフォルト: true）
     #[serde(default = "default_true")]
     pub unused_scope_variables: bool,
+    /// コンポーネント bindings と HTML 属性の対応漏れ警告を有効にする (#64)
+    /// （デフォルト: true）
+    #[serde(default = "default_true")]
+    pub component_bindings_mismatch: bool,
+    /// `bindings_mismatch` 診断専用の重要度。指定なし (None) なら `severity` に従う。
+    /// "error" / "warning" / "hint" / "information" を受け付ける。
+    #[serde(default)]
+    pub bindings_mismatch_severity: Option<String>,
+    /// `&` (callback) bindings が HTML で省略されているときに警告するか。
+    /// AngularJS の慣習として `&` は optional 扱いされることが多いので
+    /// デフォルト false (警告しない)。
+    #[serde(default)]
+    pub require_callback_bindings: bool,
     /// 未登録 directive / component 参照の警告を有効にする（デフォルト: true）
     #[serde(default = "default_true")]
     pub unknown_directive_references: bool,
@@ -73,6 +86,9 @@ impl Default for DiagnosticsConfig {
             enabled: default_true(),
             severity: default_severity(),
             unused_scope_variables: default_true(),
+            component_bindings_mismatch: default_true(),
+            bindings_mismatch_severity: None,
+            require_callback_bindings: false,
             unknown_directive_references: default_true(),
             unknown_directive_severity: None,
             di_arity_severity: default_severity(),
@@ -178,6 +194,12 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.severity, "warning");
         assert!(config.unused_scope_variables);
+        // #64: component bindings と HTML 属性の対応漏れ診断はデフォルト ON
+        assert!(config.component_bindings_mismatch);
+        // bindings_mismatch_severity はデフォルト未指定 (= 全体 severity を継承)
+        assert!(config.bindings_mismatch_severity.is_none());
+        // & callback の missing 警告はデフォルト OFF (AngularJS 慣習に合わせる)
+        assert!(!config.require_callback_bindings);
         assert!(config.unknown_directive_references);
         assert!(config.unknown_directive_severity.is_none());
         assert_eq!(config.di_arity_severity, "warning");

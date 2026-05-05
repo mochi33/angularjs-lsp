@@ -34,6 +34,14 @@ impl DiagnosticsHandler {
         }
     }
 
+    /// `bindings_mismatch` 専用の severity (未指定なら全体 severity を継承)
+    fn bindings_mismatch_severity(&self) -> DiagnosticSeverity {
+        match self.config.bindings_mismatch_severity.as_deref() {
+            Some(s) => Self::severity_from_str(s),
+            None => self.parse_severity(),
+        }
+    }
+
     /// 未登録 directive / component 用の severity
     /// `unknown_directive_severity` が指定されていればそれを、なければ `severity` を使う
     fn parse_unknown_directive_severity(&self) -> DiagnosticSeverity {
@@ -57,6 +65,11 @@ impl DiagnosticsHandler {
 
         // ローカル変数参照のチェック
         diagnostics.extend(self.check_local_variable_references(uri));
+
+        // component bindings と HTML 属性の対応漏れチェック (#64)
+        if self.config.component_bindings_mismatch {
+            diagnostics.extend(self.check_component_bindings_mismatch_html(uri));
+        }
 
         // 未登録 directive / component のチェック
         if self.config.unknown_directive_references {
@@ -426,6 +439,184 @@ impl DiagnosticsHandler {
         diagnostics
     }
 
+    /// component bindings と HTML 属性の対応漏れをチェック (#64)
+    ///
+    /// 2 方向で照合する:
+    /// 1. **HTML 側 → JS**: `<user-card foo="...">` の各属性を kebab→camel 変換し、
+    ///    対応するコンポーネントの bindings に存在しないなら警告 (typo / 不要属性)
+    /// 2. **JS 側 → HTML**: 必須 bindings (`<` / `=` / `@` で `?` プレフィックス
+    ///    無し) が HTML で指定されていないなら警告。
+    ///    `&` (callback) は `require_callback_bindings` 設定で制御。
+    ///
+    /// 除外:
+    /// - 標準 HTML 属性 (`class`, `id`, `style`, ...) - `STANDARD_HTML_ATTRIBUTES`
+    /// - AngularJS ビルトインディレクティブ (`ng-*`, `data-ng-*`)
+    /// - DI / 互換のためによく付く `data-*` / `aria-*`
+    pub fn check_component_bindings_mismatch_html(&self, uri: &Url) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let severity = self.bindings_mismatch_severity();
+
+        let usages = self.index.html.get_component_usages_for_uri(uri);
+        for usage in usages {
+            // コンポーネント定義が無いものは対象外 (custom directive 等)
+            if !self
+                .index
+                .definitions
+                .has_definition_of_kind(&usage.component_name, SymbolKind::Component)
+            {
+                continue;
+            }
+
+            let bindings = self
+                .index
+                .definitions
+                .get_component_bindings(&usage.component_name);
+            // bindings が登録されていない場合 (空の bindings) は対応漏れの判定不能
+            if bindings.is_empty() {
+                continue;
+            }
+
+            // bindings 名 (camelCase, prefix を取り除いたもの) を集める
+            let prefix = format!("{}.", usage.component_name);
+            let mut bindings_meta: Vec<BindingMeta> = Vec::new();
+            for b in &bindings {
+                let Some(local) = b.name.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let (kind, optional) = parse_binding_type(b.docs.as_deref());
+                bindings_meta.push(BindingMeta {
+                    name: local.to_string(),
+                    kind,
+                    optional,
+                });
+            }
+            if bindings_meta.is_empty() {
+                continue;
+            }
+
+            // ----- 1. HTML 側 → JS: 不正な属性 (typo / 不要) を検出 -----
+            for attr in &usage.attributes {
+                if should_skip_attribute(&attr.name) {
+                    continue;
+                }
+                // bindings に同名のものがあるかチェック (camelCase で照合)
+                let matches_binding = bindings_meta
+                    .iter()
+                    .any(|b| b.name == attr.camel_name);
+                if matches_binding {
+                    continue;
+                }
+                // この属性が他のディレクティブとして定義されているなら警告しない
+                // (例: `<user-card my-other-directive>` で my-other-directive が
+                //  別途 .directive() として登録されている場合)
+                if self
+                    .index
+                    .definitions
+                    .has_definition_of_kind(&attr.camel_name, SymbolKind::Directive)
+                {
+                    continue;
+                }
+
+                diagnostics.push(Diagnostic {
+                    range: Range {
+                        start: Position {
+                            line: attr.start_line,
+                            character: attr.start_col,
+                        },
+                        end: Position {
+                            line: attr.end_line,
+                            character: attr.end_col,
+                        },
+                    },
+                    severity: Some(severity),
+                    code: None,
+                    code_description: None,
+                    source: Some("angularjs-lsp".to_string()),
+                    message: format!(
+                        "Attribute '{}' does not match any binding of component '{}'",
+                        attr.name, usage.component_name
+                    ),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+
+            // ----- 2. JS 側 → HTML: 必須 bindings が漏れていないかチェック -----
+            //
+            // 既に HTML に書かれている属性 (camelCase) の集合を作る
+            let provided: std::collections::HashSet<String> = usage
+                .attributes
+                .iter()
+                .map(|a| a.camel_name.clone())
+                .collect();
+
+            // 漏れた binding 名を集めて 1 件にまとめる (#79 review #4: 同じ要素に
+            // 対する N 件の重複警告を避ける)
+            let mut missing: Vec<&str> = Vec::new();
+            for b in &bindings_meta {
+                if b.optional {
+                    continue;
+                }
+                if matches!(b.kind, BindingKind::Callback)
+                    && !self.config.require_callback_bindings
+                {
+                    continue;
+                }
+                if matches!(b.kind, BindingKind::Unknown) {
+                    // bindings 値の型を判定できないものはスキップ (false positive 防止)
+                    continue;
+                }
+                if provided.contains(&b.name) {
+                    continue;
+                }
+                missing.push(&b.name);
+            }
+
+            if !missing.is_empty() {
+                let message = if missing.len() == 1 {
+                    format!(
+                        "Missing required binding '{}' on component '{}'",
+                        missing[0], usage.component_name
+                    )
+                } else {
+                    let list = missing
+                        .iter()
+                        .map(|m| format!("'{}'", m))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "Missing required bindings on component '{}': {}",
+                        usage.component_name, list
+                    )
+                };
+                // 要素名トークンの位置に「漏れ」警告を 1 件だけ出す
+                diagnostics.push(Diagnostic {
+                    range: Range {
+                        start: Position {
+                            line: usage.element_start_line,
+                            character: usage.element_start_col,
+                        },
+                        end: Position {
+                            line: usage.element_end_line,
+                            character: usage.element_end_col,
+                        },
+                    },
+                    severity: Some(severity),
+                    code: None,
+                    code_description: None,
+                    source: Some("angularjs-lsp".to_string()),
+                    message,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+
+        diagnostics
+    }
+
     /// 未登録 directive / component 参照のチェック
     ///
     /// HTML 内で要素 (`<my-cmp>`) や属性 (`<div my-directive>`) として使われている
@@ -437,9 +628,21 @@ impl DiagnosticsHandler {
     ///   `directive_reference.rs` の登録時点で除外済み
     /// - `ng-` プレフィックス組み込みディレクティブも登録時点で除外済み
     /// - `data-` プレフィックスは正規化済み (登録側)
+    /// - **コンポーネント要素配下の属性 は #64 (component_bindings_mismatch) が
+    ///   bindings との対応漏れとして扱うので、この診断側ではスキップして
+    ///   重複警告を防ぐ。** 位置 (`(line, start_col)`) で照合する。
     fn check_unknown_directive_references(&self, uri: &Url) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         let severity = self.parse_unknown_directive_severity();
+
+        // コンポーネント要素配下の属性位置集合を作る (#64 と #62 の重複警告回避)
+        let component_attr_positions: std::collections::HashSet<(u32, u32)> = self
+            .index
+            .html
+            .get_component_usages_for_uri(uri)
+            .iter()
+            .flat_map(|u| u.attributes.iter().map(|a| (a.start_line, a.start_col)))
+            .collect();
 
         let references = self.index.html.get_all_directive_references_for_uri(uri);
 
@@ -454,6 +657,14 @@ impl DiagnosticsHandler {
                 .any(|s| s.kind == SymbolKind::Directive || s.kind == SymbolKind::Component);
 
             if registered {
+                continue;
+            }
+
+            // コンポーネント要素配下の属性は #64 が扱うのでここでは沈黙する
+            if matches!(reference.usage_type, DirectiveUsageType::Attribute)
+                && component_attr_positions
+                    .contains(&(reference.start_line, reference.start_col))
+            {
                 continue;
             }
 
@@ -547,5 +758,173 @@ impl DiagnosticsHandler {
         }
 
         diagnostics
+    }
+}
+
+/// component binding の種類 (`<` / `=` / `@` / `&` / 不明)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingKind {
+    /// `<` (one-way)
+    OneWay,
+    /// `=` (two-way)
+    TwoWay,
+    /// `@` (string)
+    String,
+    /// `&` (callback)
+    Callback,
+    /// 値が文字列でなく解析不能だった場合
+    Unknown,
+}
+
+/// 単一バインディングの解析結果
+#[derive(Debug, Clone)]
+struct BindingMeta {
+    name: String,
+    kind: BindingKind,
+    optional: bool,
+}
+
+/// `extract_component_bindings` が `Symbol.docs` に書き込む文字列
+/// (`"Component binding: <"` / `"Component binding: ?<"` 等) を
+/// `(BindingKind, optional)` にパースする。
+///
+/// 接頭辞は `crate::model::COMPONENT_BINDING_DOCS_PREFIX` で定数化されており、
+/// 書き手 (analyzer) と読み手 (この関数) が同じ定数を共有している。
+///
+/// docs が `None` または期待形式でない場合は `Unknown` / `false` を返す
+/// (false positive を出さないための保守的フォールバック)。
+fn parse_binding_type(docs: Option<&str>) -> (BindingKind, bool) {
+    let Some(value) = docs.and_then(|s| s.strip_prefix(crate::model::COMPONENT_BINDING_DOCS_PREFIX))
+    else {
+        return (BindingKind::Unknown, false);
+    };
+    let value = value.trim();
+    // `?` プレフィックス (optional) を剥がす
+    let (optional, rest) = match value.strip_prefix('?') {
+        Some(r) => (true, r),
+        None => (false, value),
+    };
+    // 先頭の symbol だけ見る (`&onSelected` のような alias は無視)
+    let kind = match rest.chars().next() {
+        Some('<') => BindingKind::OneWay,
+        Some('=') => BindingKind::TwoWay,
+        Some('@') => BindingKind::String,
+        Some('&') => BindingKind::Callback,
+        _ => BindingKind::Unknown,
+    };
+    (kind, optional)
+}
+
+/// この属性は component bindings 診断の対象外か
+///
+/// - 標準 HTML 属性 (`class`, `id`, `style` 等) は除外
+/// - AngularJS ビルトイン (`ng-*`, `data-ng-*`) は除外
+/// - `aria-*`, `data-*` も除外 (バインディング名と衝突しない)
+///
+/// 標準 HTML 属性の集合は `analyzer::html::directives::is_standard_html_attribute`
+/// に集約済み (#79 review: 重複定義を避けるためここでは独自リストを持たない)。
+fn should_skip_attribute(attr_name: &str) -> bool {
+    let lower = attr_name.to_ascii_lowercase();
+
+    // ng-*, data-ng-* はビルトイン
+    if crate::analyzer::html::directives::is_ng_directive(&lower) {
+        return true;
+    }
+
+    // aria-* / data-* (data-ng-* 以外でも) は標準パターン
+    if lower.starts_with("aria-") || lower.starts_with("data-") {
+        return true;
+    }
+
+    // 標準 HTML 属性 (analyzer 側と同じ集合を共有)
+    crate::analyzer::html::directives::is_standard_html_attribute(&lower)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_binding_type_oneway() {
+        assert_eq!(
+            parse_binding_type(Some("Component binding: <")),
+            (BindingKind::OneWay, false)
+        );
+    }
+
+    #[test]
+    fn parse_binding_type_optional_oneway() {
+        assert_eq!(
+            parse_binding_type(Some("Component binding: ?<")),
+            (BindingKind::OneWay, true)
+        );
+    }
+
+    #[test]
+    fn parse_binding_type_callback_with_alias() {
+        // `&onSelected` のように alias 指定がついていても先頭シンボルだけ拾う
+        assert_eq!(
+            parse_binding_type(Some("Component binding: &onSelected")),
+            (BindingKind::Callback, false)
+        );
+    }
+
+    #[test]
+    fn parse_binding_type_optional_callback_with_alias() {
+        assert_eq!(
+            parse_binding_type(Some("Component binding: ?&onSelected")),
+            (BindingKind::Callback, true)
+        );
+    }
+
+    #[test]
+    fn parse_binding_type_string_and_twoway() {
+        assert_eq!(
+            parse_binding_type(Some("Component binding: @")),
+            (BindingKind::String, false)
+        );
+        assert_eq!(
+            parse_binding_type(Some("Component binding: =")),
+            (BindingKind::TwoWay, false)
+        );
+        assert_eq!(
+            parse_binding_type(Some("Component binding: ?=")),
+            (BindingKind::TwoWay, true)
+        );
+    }
+
+    #[test]
+    fn parse_binding_type_none_or_unknown() {
+        assert_eq!(parse_binding_type(None), (BindingKind::Unknown, false));
+        assert_eq!(
+            parse_binding_type(Some("not a binding doc")),
+            (BindingKind::Unknown, false)
+        );
+        // 空 / 未認識記号
+        assert_eq!(
+            parse_binding_type(Some("Component binding: ")),
+            (BindingKind::Unknown, false)
+        );
+        assert_eq!(
+            parse_binding_type(Some("Component binding: ~")),
+            (BindingKind::Unknown, false)
+        );
+    }
+
+    #[test]
+    fn should_skip_attribute_standard() {
+        assert!(should_skip_attribute("class"));
+        assert!(should_skip_attribute("id"));
+        assert!(should_skip_attribute("style"));
+        assert!(should_skip_attribute("aria-label"));
+        assert!(should_skip_attribute("data-foo"));
+        assert!(should_skip_attribute("ng-if"));
+    }
+
+    #[test]
+    fn should_skip_attribute_not_standard() {
+        assert!(!should_skip_attribute("user"));
+        assert!(!should_skip_attribute("on-select"));
+        assert!(!should_skip_attribute("my-binding"));
     }
 }

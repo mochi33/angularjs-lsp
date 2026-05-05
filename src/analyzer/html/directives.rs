@@ -94,6 +94,78 @@ pub fn is_ng_directive(attr_name: &str) -> bool {
     NG_DIRECTIVE_SET.contains(attr_name)
 }
 
+/// 標準 HTML 属性 (カスタムディレクティブ / コンポーネント binding として扱わない)
+///
+/// MDN HTML attribute reference: https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes
+///
+/// `directive_reference.rs` の custom directive 判定と、`diagnostics.rs` の
+/// component bindings 漏れ判定 (#64) で共有される。重複定義回避のためここに集約。
+static STANDARD_HTML_ATTRIBUTES: phf::Set<&'static str> = phf_set! {
+    // Global attributes
+    "accesskey", "anchor", "autocapitalize", "autocomplete", "autocorrect",
+    "autofocus", "class", "contenteditable", "dir", "draggable",
+    "enterkeyhint", "exportparts", "hidden", "id", "inert", "inputmode",
+    "is", "itemid", "itemprop", "itemref", "itemscope", "itemtype",
+    "lang", "nonce", "part", "popover", "role", "slot", "spellcheck",
+    "style", "tabindex", "title", "translate", "virtualkeyboardpolicy",
+    "writingsuggestions",
+
+    // Element-specific attributes
+    "abbr", "accept", "action", "align", "allow", "alpha", "alt", "as",
+    "async", "autoplay", "background", "bgcolor", "border", "capture",
+    "charset", "checked", "cite", "color", "colorspace", "cols", "colspan",
+    "content", "controls", "coords", "crossorigin", "csp", "data",
+    "datetime", "decoding", "default", "defer", "dirname", "disabled",
+    "download", "enctype", "elementtiming", "fetchpriority", "for", "form",
+    "formaction", "formenctype", "formmethod", "formnovalidate", "formtarget",
+    "headers", "height", "high", "href", "hreflang", "ismap", "kind",
+    "label", "language", "loading", "list", "loop", "low", "max",
+    "maxlength", "media", "method", "min", "minlength", "multiple", "muted",
+    "name", "novalidate", "open", "optimum", "pattern", "ping", "placeholder",
+    "playsinline", "poster", "preload", "readonly", "referrerpolicy", "rel",
+    "required", "reversed", "rows", "rowspan", "sandbox", "scope", "selected",
+    "shape", "size", "sizes", "span", "src", "srcdoc", "srclang", "srcset",
+    "start", "step", "summary", "target", "type", "usemap", "value", "width",
+    "wrap",
+
+    // Event handler attributes
+    "onabort", "onanimationcancel", "onanimationend", "onanimationiteration",
+    "onanimationstart", "onauxclick", "onbeforeinput", "onbeforematch",
+    "onbeforetoggle", "onblur", "oncancel", "oncanplay", "oncanplaythrough",
+    "onchange", "onclick", "onclose", "oncommand",
+    "oncontentvisibilityautostatechange", "oncontextlost", "oncontextmenu",
+    "oncontextrestored", "oncopy", "oncuechange", "oncut", "ondblclick",
+    "ondrag", "ondragend", "ondragenter", "ondragleave", "ondragover",
+    "ondragstart", "ondrop", "ondurationchange", "onemptied", "onended",
+    "onerror", "onfocus", "onfocusin", "onfocusout", "onformdata",
+    "onfullscreenchange", "onfullscreenerror", "ongesturechange",
+    "ongestureend", "ongesturestart", "ongotpointercapture", "oninput",
+    "oninvalid", "onkeydown", "onkeypress", "onkeyup", "onload",
+    "onloadeddata", "onloadedmetadata", "onloadstart", "onlostpointercapture",
+    "onmousedown", "onmouseenter", "onmouseleave", "onmousemove",
+    "onmouseout", "onmouseover", "onmouseup", "onmousewheel", "onpaste",
+    "onpause", "onplay", "onplaying", "onpointercancel", "onpointerdown",
+    "onpointerenter", "onpointerleave", "onpointermove", "onpointerout",
+    "onpointerover", "onpointerrawupdate", "onpointerup", "onprogress",
+    "onratechange", "onreset", "onresize", "onscroll", "onscrollend",
+    "onscrollsnapchange", "onscrollsnapchanging", "onsecuritypolicyviolation",
+    "onseeked", "onseeking", "onselect", "onselectionchange", "onselectstart",
+    "onslotchange", "onstalled", "onsubmit", "onsuspend", "ontimeupdate",
+    "ontoggle", "ontouchcancel", "ontouchend", "ontouchmove", "ontouchstart",
+    "ontransitioncancel", "ontransitionend", "ontransitionrun",
+    "ontransitionstart", "onvolumechange", "onwaiting",
+    "onwebkitmouseforcechanged", "onwebkitmouseforcedown",
+    "onwebkitmouseforceup", "onwebkitmouseforcewillbegin", "onwheel",
+};
+
+/// 標準 HTML 属性かどうかを判定 (lowercase 比較)。
+///
+/// 呼び出し側はあらかじめ小文字化しておくこと (HTML 属性は case-insensitive だが
+/// この set 自体は lowercase で持っている)。
+pub fn is_standard_html_attribute(attr_name_lower: &str) -> bool {
+    STANDARD_HTML_ATTRIBUTES.contains(attr_name_lower)
+}
+
 /// 値が **Angular 式ではなくリテラル文字列 / 正規表現 / 補間テンプレート**
 /// として解釈されるディレクティブ集合。
 ///

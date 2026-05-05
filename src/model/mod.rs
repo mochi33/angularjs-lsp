@@ -12,12 +12,13 @@ pub use builder::SymbolBuilder;
 pub use diagnostics::DiArityIssue;
 pub use export::{ExportInfo, ExportedComponentObject};
 pub use html::{
-    DirectiveUsageType, HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable,
-    HtmlLocalVariableReference, HtmlLocalVariableSource, HtmlNgModelTarget, HtmlScopeReference,
-    HtmlUiSrefReference, InheritedFormBinding, InheritedLocalVariable,
+    DirectiveUsageType, HtmlComponentAttribute, HtmlComponentUsage, HtmlDirectiveReference,
+    HtmlFormBinding, HtmlLocalVariable, HtmlLocalVariableReference, HtmlLocalVariableSource,
+    HtmlNgModelTarget, HtmlScopeReference, HtmlUiSrefReference, InheritedFormBinding,
+    InheritedLocalVariable,
 };
 pub use inheritance::{NgIncludeBinding, NgViewBinding};
 pub use scope::{ControllerScope, HtmlControllerScope};
 pub use span::Span;
-pub use symbol::{Symbol, SymbolKind, SymbolReference};
+pub use symbol::{Symbol, SymbolKind, SymbolReference, COMPONENT_BINDING_DOCS_PREFIX};
 pub use template::{BindingSource, ComponentTemplateUrl, TemplateBinding};

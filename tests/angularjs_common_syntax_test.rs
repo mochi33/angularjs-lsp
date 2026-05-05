@@ -3974,6 +3974,416 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
     );
 }
 
+// ====================================================================
+// #64: component bindings と HTML 属性の対応漏れ診断
+// ====================================================================
+
+#[test]
+fn test_component_bindings_typo_attribute_warns() {
+    // bindings に存在しない `on-clik` (typo) は警告する
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<', onSelect: '&' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    let html = r#"
+<user-card user="vm.u" on-clik="vm.f()"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("on-clik") && m.contains("userCard")),
+        "typo 属性 'on-clik' に対する警告が出るべき (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_required_missing_warns() {
+    // 必須 `<` バインディング `user` が HTML で指定されていない → 警告
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    let html = r#"
+<user-card></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("Missing required binding") && m.contains("user")),
+        "必須 binding 'user' の漏れに対する警告が出るべき (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_optional_missing_no_warn() {
+    // optional binding (`?<`) は missing でも警告しない
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<', extra: '?<' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    let html = r#"
+<user-card user="vm.u"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("'extra'")),
+        "optional binding 'extra' (?<) の漏れに対する警告は出ない (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_callback_missing_no_warn_by_default() {
+    // & (callback) はデフォルトでは missing でも警告しない (require_callback_bindings = false)
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<', onSelect: '&' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    // onSelect が missing
+    let html = r#"
+<user-card user="vm.u"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("'onSelect'") || m.contains("on-select")),
+        "& (callback) binding はデフォルト missing 許容 (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_standard_attribute_not_warned() {
+    // 標準 HTML 属性 (`class`, `id`, `style`) は警告しない
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    let html = r#"
+<user-card user="vm.u" class="big" id="card1" style="color: red"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    for m in &messages {
+        assert!(
+            !m.contains("'class'") && !m.contains("'id'") && !m.contains("'style'"),
+            "標準 HTML 属性に対する警告は出ない (message: {})",
+            m
+        );
+    }
+}
+
+#[test]
+fn test_component_bindings_ng_attribute_not_warned() {
+    // `ng-if`, `ng-show`, `ng-class` 等のビルトインは警告しない
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    let html = r#"
+<user-card user="vm.u" ng-if="vm.show" ng-class="{active: vm.on}"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    for m in &messages {
+        assert!(
+            !m.contains("'ng-if'") && !m.contains("'ng-class'"),
+            "ng-* ビルトインに対する警告は出ない (message: {})",
+            m
+        );
+    }
+}
+
+#[test]
+fn test_component_bindings_match_with_kebab_case() {
+    // `<user-card on-select="..."` は bindings の `onSelect` と
+    // 一致するので警告しない (kebab→camel 正規化の確認)
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<', onSelect: '&' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    let html = r#"
+<user-card user="vm.u" on-select="vm.f()"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("on-select")),
+        "kebab-case 属性が camelCase binding に正規化マッチして警告されない (messages: {:?})",
+        messages
+    );
+    assert!(
+        !messages.iter().any(|m| m.contains("'user'")),
+        "正常な属性 'user' に警告は出ない (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_callback_required_with_config() {
+    // require_callback_bindings = true なら & の missing も警告する
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { onSelect: '&' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    let html = r#"
+<user-card></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let mut config = DiagnosticsConfig::default();
+    config.require_callback_bindings = true;
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), config)
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("Missing required binding") && m.contains("onSelect")),
+        "require_callback_bindings=true なら & の missing も警告 (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_disabled_via_config() {
+    // component_bindings_mismatch = false なら何も出さない
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    let html = r#"
+<user-card foo="bar"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let mut config = DiagnosticsConfig::default();
+    config.component_bindings_mismatch = false;
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), config)
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("'foo'") || m.contains("Missing required binding")),
+        "component_bindings_mismatch=false なら警告は出ない (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_multiple_components_in_one_html() {
+    // 同一 HTML に複数 component を使用 → それぞれ独立に診断される
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', [])
+    .component('userCard', {
+        bindings: { user: '<' },
+        templateUrl: 'user-card.html'
+    })
+    .component('teamList', {
+        bindings: { teams: '<' },
+        templateUrl: 'team-list.html'
+    });
+"#;
+    let html = r#"
+<user-card user="vm.u" wrong-attr="x"></user-card>
+<team-list teams="vm.t" another-typo="y"></team-list>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    // userCard 側の typo
+    assert!(
+        messages.iter().any(|m| m.contains("wrong-attr") && m.contains("userCard")),
+        "userCard の typo 'wrong-attr' が警告される (messages: {:?})",
+        messages
+    );
+    // teamList 側の typo
+    assert!(
+        messages.iter().any(|m| m.contains("another-typo") && m.contains("teamList")),
+        "teamList の typo 'another-typo' が警告される (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_no_warn_when_bindings_undefined() {
+    // bindings 未定義のコンポーネント (= 任意の属性が許される) は警告しない
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    templateUrl: 'user-card.html'
+});
+"#;
+    // bindings 定義がない → どんな属性でも警告しない
+    let html = r#"
+<user-card foo="bar" baz="qux"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("userCard")),
+        "bindings 未定義の component は警告対象外 (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_attr_matches_registered_directive() {
+    // 属性が別途 .directive() で登録されている場合は typo 扱いせず警告しない
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', [])
+    .component('userCard', {
+        bindings: { user: '<' },
+        templateUrl: 'user-card.html'
+    })
+    .directive('myHighlight', function() { return {}; });
+"#;
+    // my-highlight は別 directive として登録済みなので typo ではない
+    let html = r#"
+<user-card user="vm.u" my-highlight="red"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("my-highlight")),
+        "他 directive として登録済みの属性は警告対象外 (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_multiple_missing_aggregated_into_one() {
+    // 複数の必須 binding が漏れていても 1 件にまとめて出す (#79 review #4)
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<', age: '<', team: '<' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    // 3 つとも漏れている
+    let html = r#"
+<user-card></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let missing_messages: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("Missing required"))
+        .collect();
+    assert_eq!(
+        missing_messages.len(),
+        1,
+        "missing required binding は 1 件にまとめて出す (got: {:?})",
+        missing_messages
+    );
+    let m = missing_messages[0];
+    assert!(m.contains("'user'") && m.contains("'age'") && m.contains("'team'"),
+        "全 missing 名がメッセージに含まれる (got: {})", m);
+}
 // ============================================================
 // document highlight tests (#67)
 // ============================================================
