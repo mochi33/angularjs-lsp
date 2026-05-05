@@ -18,7 +18,7 @@ pub use definition::DefinitionHandler;
 pub use diagnostics::DiagnosticsHandler;
 pub use document_symbol::DocumentSymbolHandler;
 pub use hover::HoverHandler;
-pub use inlay_hints::InlayHintsHandler;
+pub use inlay_hints::{new_js_tree_cache, InlayHintsHandler, JsTreeCache};
 pub use references::ReferencesHandler;
 pub use rename::RenameHandler;
 pub use semantic_tokens::SemanticTokensHandler;

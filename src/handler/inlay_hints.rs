@@ -17,25 +17,54 @@
 //!
 //! issue #66 参照。
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use tower_lsp::lsp_types::{
     InlayHint, InlayHintKind, InlayHintLabel, Position, Range, Url,
 };
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 use crate::index::Index;
 use crate::util::{is_html_file, is_js_file};
 
+/// JS の tree-sitter Tree を URI ごとにキャッシュする。
+///
+/// LSP の `textDocument/inlayHint` はクライアントのスクロール毎に呼ばれるが、
+/// その間にソースが変わっていなければ Tree を使い回せる。
+/// `source_hash` を毎回比較し、ソースが変化したときだけ再パースする。
+pub struct CachedJsTree {
+    source_hash: u64,
+    tree: Tree,
+}
+
+/// `Backend` から共有する JS Tree キャッシュ。`Backend::new` で生成して、
+/// `InlayHintsHandler::new` に渡す。
+pub type JsTreeCache = DashMap<Url, CachedJsTree>;
+
+pub fn new_js_tree_cache() -> Arc<JsTreeCache> {
+    Arc::new(DashMap::new())
+}
+
 pub struct InlayHintsHandler {
     index: Arc<Index>,
     documents: Arc<DashMap<Url, String>>,
+    js_tree_cache: Arc<JsTreeCache>,
 }
 
 impl InlayHintsHandler {
-    pub fn new(index: Arc<Index>, documents: Arc<DashMap<Url, String>>) -> Self {
-        Self { index, documents }
+    pub fn new(
+        index: Arc<Index>,
+        documents: Arc<DashMap<Url, String>>,
+        js_tree_cache: Arc<JsTreeCache>,
+    ) -> Self {
+        Self {
+            index,
+            documents,
+            js_tree_cache,
+        }
     }
 
     /// 指定範囲の inlay hints を計算する。
@@ -76,24 +105,16 @@ impl InlayHintsHandler {
     /// 静的代入パターン (`MyCtrl.$inject = ['$scope']; function MyCtrl(s) {}`)
     /// は array 注釈と違って関数定義と DI が syntactic に離れているため
     /// 別 issue として future work。array 形式のみ対応する。
-    //
-    // TODO: 毎回 tree-sitter で full re-parse している。クライアントは
-    // スクロール毎に inlay hint を再要求するため、`documents` 経由で
-    // Tree をキャッシュするとコストを削れる。
+    ///
+    /// パフォーマンス: ソースの hash を URI ごとに保存し、変化していない
+    /// 場合は前回パースした Tree を再利用する (フルパース回避)。
     fn collect_js_hints(&self, uri: &Url) -> Vec<InlayHint> {
         let source = match self.documents.get(uri) {
             Some(doc) => doc.value().clone(),
             None => return Vec::new(),
         };
 
-        let mut parser = Parser::new();
-        if parser
-            .set_language(&tree_sitter_javascript::LANGUAGE.into())
-            .is_err()
-        {
-            return Vec::new();
-        }
-        let tree = match parser.parse(&source, None) {
+        let tree = match self.get_or_parse_js_tree(uri, &source) {
             Some(t) => t,
             None => return Vec::new(),
         };
@@ -101,6 +122,35 @@ impl InlayHintsHandler {
         let mut hints = Vec::new();
         collect_di_rename_hints(tree.root_node(), &source, &mut hints);
         hints
+    }
+
+    /// `js_tree_cache` から URI 対応の Tree を取得 (hash 一致時)、または
+    /// 再パースしてキャッシュ更新する。`Tree::clone` は内部 Arc 参照のため
+    /// 安価。
+    fn get_or_parse_js_tree(&self, uri: &Url, source: &str) -> Option<Tree> {
+        let new_hash = hash_source(source);
+
+        if let Some(entry) = self.js_tree_cache.get(uri) {
+            if entry.source_hash == new_hash {
+                return Some(entry.tree.clone());
+            }
+        }
+
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .ok()?;
+        let tree = parser.parse(source, None)?;
+
+        self.js_tree_cache.insert(
+            uri.clone(),
+            CachedJsTree {
+                source_hash: new_hash,
+                tree: tree.clone(),
+            },
+        );
+
+        Some(tree)
     }
 
     // ============================================================
@@ -313,6 +363,14 @@ fn emit_di_hints_for_function(
     }
 }
 
+/// JS ソースのキャッシュキー用ハッシュ。`DefaultHasher` はプロセス内で
+/// 決定的なので、同一プロセスで「ソースが変わったか」の判定に使える。
+fn hash_source(s: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// ソース全体の絶対バイト offset から「その行内での UTF-16 code unit 数」を
 /// 計算する。LSP は UTF-16 列を要求するため、tree-sitter のバイト列との
 /// 変換にこのヘルパーを使う。
@@ -502,7 +560,7 @@ angular.module('app').config(['$routeProvider', function(rp) {\n\
         index: Arc<Index>,
         documents: Arc<DashMap<Url, String>>,
     ) -> InlayHintsHandler {
-        InlayHintsHandler::new(index, documents)
+        InlayHintsHandler::new(index, documents, new_js_tree_cache())
     }
 
     #[test]
@@ -682,5 +740,71 @@ var b = ['$timeout', function(t) { t.cancel(); }];\n";
         let uri = Url::parse("file:///test.css").unwrap();
         let handler = make_handler(Arc::new(Index::new()), Arc::new(DashMap::new()));
         assert!(handler.inlay_hints(&uri, None).is_none());
+    }
+
+    #[test]
+    fn js_tree_cache_reuses_tree_when_source_unchanged() {
+        // 同じソースで 2 回呼ぶと、2 回目は cache から Tree が再利用され、
+        // cache のサイズは 1 のまま、source_hash も等しい。
+        let uri = js_url();
+        let source = "var d = ['$scope', function(s) { s.foo = 1; }];\n";
+        let documents = Arc::new(DashMap::new());
+        documents.insert(uri.clone(), source.to_string());
+        let cache = new_js_tree_cache();
+
+        let handler = InlayHintsHandler::new(
+            Arc::new(Index::new()),
+            documents.clone(),
+            Arc::clone(&cache),
+        );
+
+        let first = handler.inlay_hints(&uri, None).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(cache.len(), 1);
+        let hash_after_first = cache.get(&uri).unwrap().source_hash;
+
+        // 2 回目: 同じソース → 同じ hash で再利用
+        let second = handler.inlay_hints(&uri, None).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&uri).unwrap().source_hash, hash_after_first);
+    }
+
+    #[test]
+    fn js_tree_cache_invalidates_on_source_change() {
+        // ソースが変わると hash が変わり、再パース + cache 更新される。
+        let uri = js_url();
+        let documents = Arc::new(DashMap::new());
+        documents.insert(
+            uri.clone(),
+            "var d = ['$scope', function(s) { s.foo = 1; }];\n".to_string(),
+        );
+        let cache = new_js_tree_cache();
+        let handler = InlayHintsHandler::new(
+            Arc::new(Index::new()),
+            documents.clone(),
+            Arc::clone(&cache),
+        );
+
+        let first = handler.inlay_hints(&uri, None).unwrap();
+        assert_eq!(first.len(), 1);
+        let hash1 = cache.get(&uri).unwrap().source_hash;
+
+        // ドキュメントを差し替え
+        documents.insert(
+            uri.clone(),
+            "var d = ['$timeout', function(t) { t.cancel(); }];\n".to_string(),
+        );
+
+        let second = handler.inlay_hints(&uri, None).unwrap();
+        assert_eq!(second.len(), 1);
+        let hash2 = cache.get(&uri).unwrap().source_hash;
+        assert_ne!(hash1, hash2, "hash should change after source edit");
+
+        if let InlayHintLabel::String(label) = &second[0].label {
+            assert_eq!(label, ": $timeout");
+        } else {
+            panic!("expected String label");
+        }
     }
 }
