@@ -1,6 +1,7 @@
 pub mod component_store;
 pub mod controller_store;
 pub mod definition_store;
+pub mod diagnostics_store;
 pub mod export_store;
 pub mod html_resolve;
 pub mod html_store;
@@ -13,6 +14,7 @@ pub use html_resolve::HtmlResolution;
 pub use component_store::ComponentStore;
 pub use controller_store::ControllerStore;
 pub use definition_store::DefinitionStore;
+pub use diagnostics_store::DiagnosticsStore;
 pub use export_store::ExportStore;
 pub use html_store::HtmlStore;
 pub use interpolate_store::InterpolateStore;
@@ -20,7 +22,7 @@ pub use template_store::TemplateStore;
 
 use tower_lsp::lsp_types::Url;
 
-/// Index ファサード — 7つの専門ストアを束ねる
+/// Index ファサード — 8つの専門ストアを束ねる
 pub struct Index {
     pub definitions: DefinitionStore,
     pub controllers: ControllerStore,
@@ -29,6 +31,7 @@ pub struct Index {
     pub exports: ExportStore,
     pub components: ComponentStore,
     pub interpolate: InterpolateStore,
+    pub diagnostics: DiagnosticsStore,
 }
 
 impl Index {
@@ -41,6 +44,7 @@ impl Index {
             exports: ExportStore::new(),
             components: ComponentStore::new(),
             interpolate: InterpolateStore::new(),
+            diagnostics: DiagnosticsStore::new(),
         }
     }
 
@@ -53,6 +57,7 @@ impl Index {
         self.exports.clear_document(uri);
         self.components.clear_document(uri);
         self.interpolate.clear_document(uri);
+        self.diagnostics.clear_document(uri);
     }
 
     /// 全てのインデックスデータをクリア
@@ -64,6 +69,7 @@ impl Index {
         self.exports.clear_all();
         self.components.clear_all();
         self.interpolate.clear_all();
+        self.diagnostics.clear_all();
     }
 
     /// HTML参照情報のみをクリア（Pass 3で収集する情報）
