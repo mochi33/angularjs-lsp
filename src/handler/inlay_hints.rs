@@ -72,6 +72,14 @@ impl InlayHintsHandler {
     /// 認識パターン: `['$scope', '$timeout', function(s, t) {...}]`
     /// param 名 `s` がサービス `$scope` に DI されていて、かつ param 名と
     /// サービス名が異なるときに `: $scope` を表示する。
+    ///
+    /// 静的代入パターン (`MyCtrl.$inject = ['$scope']; function MyCtrl(s) {}`)
+    /// は array 注釈と違って関数定義と DI が syntactic に離れているため
+    /// 別 issue として future work。array 形式のみ対応する。
+    //
+    // TODO: 毎回 tree-sitter で full re-parse している。クライアントは
+    // スクロール毎に inlay hint を再要求するため、`documents` 経由で
+    // Tree をキャッシュするとコストを削れる。
     fn collect_js_hints(&self, uri: &Url) -> Vec<InlayHint> {
         let source = match self.documents.get(uri) {
             Some(doc) => doc.value().clone(),
@@ -104,8 +112,20 @@ impl InlayHintsHandler {
     /// `vm.foo` の `vm` を `controller as alias` で resolve し、`: MainCtrl`
     /// を表示する。`$ctrl.foo` は component template の場合に component 名を
     /// 表示する。
+    ///
+    /// 注: `Index::resolve_controller_by_alias` は内部で ng-controller →
+    /// component の順にフォールバックするが、component 側の解決は URI に
+    /// 対して 1 回計算すれば足りる (ref ごとに変わらない)。ここでは
+    /// `controllers` (line 依存) を ref ごとに、component binding を URI ごとに
+    /// 1 度だけ取得して per-ref のオーバーヘッドを抑える。
     fn collect_html_hints(&self, uri: &Url) -> Vec<InlayHint> {
         let mut hints = Vec::new();
+
+        // URI に対して 1 回だけ component binding を取得 (ref ごとには変わらない)
+        let component_binding = self
+            .index
+            .components
+            .get_component_binding_for_template(uri);
 
         let refs = self.index.html.get_html_scope_references(uri);
         for scope_ref in refs {
@@ -113,58 +133,46 @@ impl InlayHintsHandler {
                 continue;
             };
 
-            // `vm.foo` のような controller as alias を解決
-            if let Some(controller_name) = self
+            // ng-controller as alias (line に依存) → component controller_as
+            // (URI 単位、hoist 済みの binding を参照) の順に解決
+            let controller_name = self
                 .index
+                .controllers
                 .resolve_controller_by_alias(uri, scope_ref.start_line, alias)
-            {
-                if alias == controller_name {
-                    // alias 名 == controller 名 (例: `<div ng-controller="MainCtrl as MainCtrl">`)
-                    // のときは hint を出さない (ノイズ)。
-                    continue;
-                }
-                // `vm` の直後 (vm の end_col の位置 = start_col + alias.len()) に hint
-                let alias_end_col = scope_ref.start_col + alias.chars().count() as u32;
-                hints.push(make_hint(
-                    Position {
-                        line: scope_ref.start_line,
-                        character: alias_end_col,
-                    },
-                    format!(": {}", controller_name),
-                ));
+                .or_else(|| {
+                    component_binding.as_ref().and_then(|b| {
+                        if b.controller_as == alias {
+                            b.controller_name.clone()
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+            let Some(controller_name) = controller_name else {
+                continue;
+            };
+
+            if alias == controller_name {
+                // alias 名 == controller 名 (例: `<div ng-controller="MainCtrl as MainCtrl">`)
+                // のときは hint を出さない (ノイズ)。
                 continue;
             }
 
-            // `$ctrl.foo` (component template の controller_as) の場合は
-            // component の controller 名を出す
-            if let Some(controller_name) = self.resolve_component_alias(uri, alias) {
-                if alias == controller_name {
-                    continue;
-                }
-                let alias_end_col = scope_ref.start_col + alias.chars().count() as u32;
-                hints.push(make_hint(
-                    Position {
-                        line: scope_ref.start_line,
-                        character: alias_end_col,
-                    },
-                    format!(": {}", controller_name),
-                ));
-            }
+            // `vm` の直後 = start_col + alias の UTF-16 code unit 数
+            // (LSP の position は UTF-16 単位なので、char count ではなく
+            //  utf16 unit count を使う必要がある — `vm` 等 ASCII では同値)
+            let alias_end_col = scope_ref.start_col + alias.encode_utf16().count() as u32;
+            hints.push(make_hint(
+                Position {
+                    line: scope_ref.start_line,
+                    character: alias_end_col,
+                },
+                format!(": {}", controller_name),
+            ));
         }
 
         hints
-    }
-
-    /// component template として登録された URI に対して、`alias` が
-    /// `controller_as` と一致するときに controller 名を返す。
-    ///
-    /// component の controller_as が省略されている場合のデフォルトは `$ctrl`。
-    fn resolve_component_alias(&self, uri: &Url, alias: &str) -> Option<String> {
-        let binding = self.index.components.get_component_binding_for_template(uri)?;
-        if binding.controller_as != alias {
-            return None;
-        }
-        binding.controller_name
     }
 }
 
@@ -181,6 +189,12 @@ fn split_alias(property_path: &str) -> Option<(&str, &str)> {
 }
 
 /// hint の標準形を作るヘルパー。
+///
+/// `kind` は全 hint で `TYPE` を採用 (clangd / rust-analyzer の慣習に倣い、
+/// `: <name>` 形式のラベルは `TYPE` 扱い)。DI rename は意味的には `PARAMETER`
+/// にも近いが、見た目の一貫性を優先している。
+/// ラベル先頭にスペースを埋め込んで `padding_left/right: false` としており、
+/// クライアント側のパディング差異に左右されにくい。
 fn make_hint(position: Position, label: String) -> InlayHint {
     InlayHint {
         position,
@@ -195,7 +209,11 @@ fn make_hint(position: Position, label: String) -> InlayHint {
 }
 
 /// `position` が `range` 内にあるか判定する。
-/// LSP の半開区間に従い、`range.end` ちょうどは含まないとみなす。
+///
+/// inlay hint の filter 用途では「可視範囲の末尾ちょうどに位置する hint」も
+/// 表示したいので、ここでは閉区間 (両端含む) として扱う。LSP の Range は
+/// 一般に半開だが、この関数は client から渡された可視 range に対する
+/// 「hint を表示すべきか」の判定でしかないため UX を優先している。
 fn position_in_range(pos: Position, range: Range) -> bool {
     if pos.line < range.start.line || pos.line > range.end.line {
         return false;
@@ -279,19 +297,40 @@ fn emit_di_hints_for_function(
             continue;
         }
 
-        // tree-sitter の end_position は半開区間で、参照識別子の直後を指す
+        // tree-sitter の end_position は半開区間で、参照識別子の直後を指す。
+        // ただし column は **バイト単位**。LSP の Position.character は
+        // UTF-16 code unit 単位なので、変換が必要 (param 名手前に非 ASCII が
+        // ある場合に位置がズレるのを防ぐ)。
         let end = child.end_position();
+        let utf16_col = byte_offset_to_utf16_col(source, child.end_byte()) as u32;
         hints.push(make_hint(
             Position {
                 line: end.row as u32,
-                character: end.column as u32,
+                character: utf16_col,
             },
             format!(": {}", service),
         ));
     }
 }
 
+/// ソース全体の絶対バイト offset から「その行内での UTF-16 code unit 数」を
+/// 計算する。LSP は UTF-16 列を要求するため、tree-sitter のバイト列との
+/// 変換にこのヘルパーを使う。
+fn byte_offset_to_utf16_col(source: &str, byte_offset: usize) -> usize {
+    let end = byte_offset.min(source.len());
+    let prefix = &source[..end];
+    let line_start = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
+    source[line_start..end]
+        .chars()
+        .map(|c| c.len_utf16())
+        .sum()
+}
+
 /// `string` ノードから引用符を外した値を取り出す。
+///
+/// JavaScript の string literal は必ず ASCII の引用符 (`"` / `'` / `` ` ``)
+/// で開閉されるため、最初/最後のバイトは常に 1 バイト。`raw[1..raw.len()-1]`
+/// のバイトスライス境界は確実に文字境界に乗るのでこの実装で安全。
 fn extract_string_value(node: Node, source: &str) -> String {
     let raw = node_text(node, source);
     if raw.len() >= 2 {
@@ -479,6 +518,49 @@ angular.module('app').controller('Main', ['$scope', '$timeout', function(s, t) {
         let handler = make_handler(Arc::new(Index::new()), documents);
         let hints = handler.inlay_hints(&uri, None).unwrap();
         assert_eq!(hints.len(), 2);
+
+        // ラベル中身まで公開 API 経由で確認 (unit test と並んで二重防御)
+        let labels: Vec<String> = hints
+            .iter()
+            .filter_map(|h| match &h.label {
+                InlayHintLabel::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.contains(&": $scope".to_string()),
+            "expected `: $scope` in {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&": $timeout".to_string()),
+            "expected `: $timeout` in {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn byte_offset_to_utf16_col_handles_non_ascii_prefix() {
+        // 1 行目: `var s = '🎉'; function f(x) {}` の `x` の位置
+        // 🎉 は UTF-8 で 4 バイト、UTF-16 で 2 code unit
+        let source = "var s = '🎉'; function f(x) {}\n";
+        // `x` のバイト位置を探す
+        let byte_idx = source.find("x").unwrap();
+        let utf16_col = byte_offset_to_utf16_col(source, byte_idx);
+        // 期待値: source[..byte_idx] を UTF-16 で数えた値
+        let expected: usize = source[..byte_idx].chars().map(|c| c.len_utf16()).sum();
+        assert_eq!(utf16_col, expected);
+        // 🎉 を含むため byte 列より UTF-16 列のほうが小さい (バイト列 - 2)
+        assert!(utf16_col < byte_idx);
+    }
+
+    #[test]
+    fn byte_offset_to_utf16_col_resets_at_newline() {
+        // 改行を跨ぐ場合は「その行の頭から」の UTF-16 数を返す
+        let source = "first line\nsecond line";
+        let byte_idx = source.find("second").unwrap();
+        let utf16_col = byte_offset_to_utf16_col(source, byte_idx);
+        assert_eq!(utf16_col, 0);
     }
 
     #[test]
