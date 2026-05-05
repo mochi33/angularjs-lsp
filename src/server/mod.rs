@@ -20,8 +20,9 @@ use crate::analyzer::js::AngularJsAnalyzer;
 use crate::cache::{CacheLoader, CacheWriter};
 use crate::config::{AjsConfig, DiagnosticsConfig, PathMatcher};
 use crate::handler::{
-    CodeLensHandler, CompletionHandler, DefinitionHandler, DiagnosticsHandler,
-    DocumentSymbolHandler, HoverHandler, ReferencesHandler, RenameHandler,
+    new_js_tree_cache, CodeLensHandler, CompletionHandler, DefinitionHandler,
+    DiagnosticsHandler, DocumentHighlightHandler, DocumentSymbolHandler, HoverHandler,
+    InlayHintsHandler, JsTreeCache, ReferencesHandler, RenameHandler,
     SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
 };
 use crate::index::Index;
@@ -49,6 +50,9 @@ pub struct Backend {
     /// 待ちの did_change が積まれている)。`ensure_ts_synced` で同期済みかを
     /// 判定し、必要なら request 直前に flush する。
     ts_synced_versions: Arc<DashMap<Url, u64>>,
+    /// Inlay hint 用の JS Tree キャッシュ (URI -> 直近パース結果)。
+    /// `did_close` でエントリを破棄する。
+    inlay_hint_js_tree_cache: Arc<JsTreeCache>,
 }
 
 async fn publish_html_diagnostics(
@@ -528,6 +532,7 @@ impl Backend {
             diagnostics_config: Arc::new(RwLock::new(DiagnosticsConfig::default())),
             debounce_versions: Arc::new(DashMap::new()),
             ts_synced_versions: Arc::new(DashMap::new()),
+            inlay_hint_js_tree_cache: new_js_tree_cache(),
         }
     }
 
@@ -608,19 +613,25 @@ impl Backend {
             }
         }
 
-        // 2. 全 open file の診断を再発行 (HTML + JS)
-        for (uri, _) in &open_files {
-            if is_html_file(uri) {
-                self.publish_diagnostics_for_html(uri).await;
-            } else if is_js_file(uri) {
-                self.publish_diagnostics_for_js(uri).await;
+        // 2. 全 open file の診断を再発行 (HTML + JS) と refresh signal を並列化。
+        //    診断発行ループは open files 数に比例するので、refresh を直列に置くと
+        //    ハイライト復帰が遅れる。両者とも index は populate 済みで互いに独立。
+        let diagnostics = async {
+            for (uri, _) in &open_files {
+                if is_html_file(uri) {
+                    self.publish_diagnostics_for_html(uri).await;
+                } else if is_js_file(uri) {
+                    self.publish_diagnostics_for_js(uri).await;
+                }
             }
-        }
-
-        // 3. semanticTokens / codeLens refresh 発火 (クライアント側に全 open file
-        //    分の再要求をさせる)
-        let _ = self.client.semantic_tokens_refresh().await;
-        let _ = self.client.code_lens_refresh().await;
+        };
+        let refresh_signals = async {
+            // semanticTokens / codeLens refresh 発火 (クライアント側に全 open file
+            // 分の再要求をさせる)
+            let _ = self.client.semantic_tokens_refresh().await;
+            let _ = self.client.code_lens_refresh().await;
+        };
+        tokio::join!(diagnostics, refresh_signals);
     }
 
     async fn on_change(&self, uri: Url, text: String) {
@@ -874,14 +885,23 @@ impl Backend {
             .await
             .unwrap_or(());
 
-            self.publish_diagnostics_for_html(&uri).await;
-            self.republish_diagnostics_for_open_js_files().await;
-
-            // クライアントが on_open 完了前に semantic_tokens_full を要求した場合、
-            // 空トークンが返ってハイライトが永続的に消えるレースを防ぐ。
-            // 解析完了をクライアントに通知して再要求させる。
-            let _ = self.client.semantic_tokens_refresh().await;
-            let _ = self.client.code_lens_refresh().await;
+            // 解析完了後、診断発行と semantic_tokens / code_lens の refresh signal を
+            // 並列に走らせる。診断発行は IPC + (republish 内では) CPU 解析を含むので
+            // 直列にすると refresh signal がその分遅れ、エディタのハイライト復帰が遅延する。
+            // 双方とも index 完成 (= spawn_blocking 完了) のみが事前条件で互いに依存しない。
+            //
+            // refresh signal の意味は変わらず: クライアントが on_open 完了前に
+            // `semantic_tokens_full` を要求して空トークンを得てしまうレースを潰す
+            // (解析完了を通知して再要求させる)。
+            let refresh_signals = async {
+                let _ = self.client.semantic_tokens_refresh().await;
+                let _ = self.client.code_lens_refresh().await;
+            };
+            let diagnostics = async {
+                self.publish_diagnostics_for_html(&uri).await;
+                self.republish_diagnostics_for_open_js_files().await;
+            };
+            tokio::join!(refresh_signals, diagnostics);
         } else if is_js_file(&uri) {
             self.debounce_versions.insert(uri.clone(), 0);
 
@@ -894,11 +914,13 @@ impl Backend {
             .await
             .unwrap_or(());
 
-            self.publish_diagnostics_for_js(&uri).await;
-
-            // (HTML側と同じ理由) JS ファイルでも解析後に refresh を送る
-            let _ = self.client.semantic_tokens_refresh().await;
-            let _ = self.client.code_lens_refresh().await;
+            // (HTML側と同じ理由で並列化) refresh signal と診断発行は互いに独立
+            let refresh_signals = async {
+                let _ = self.client.semantic_tokens_refresh().await;
+                let _ = self.client.code_lens_refresh().await;
+            };
+            let diagnostics = self.publish_diagnostics_for_js(&uri);
+            tokio::join!(refresh_signals, diagnostics);
         }
 
         // tsserver は JS ファイルだけ知っていれば良い (HTML は内部ハンドラで処理)
@@ -1316,6 +1338,7 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".to_string()]),
@@ -1345,6 +1368,7 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec!["angularjs-lsp.refreshIndex".to_string()],
                     work_done_progress_options: Default::default(),
@@ -1833,6 +1857,9 @@ impl LanguageServer for Backend {
         // 閉じられたファイルの sync 状態は不要、エントリを削除する
         // (再 open 時に ensure_ts_file_opened が新しく初期化する)
         self.ts_synced_versions.remove(uri);
+        // Inlay hint Tree キャッシュも閉じたファイル分は破棄 (再 open 時の
+        // ソースは別物の可能性があり、また長期蓄積を避ける)
+        self.inlay_hint_js_tree_cache.remove(uri);
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -1856,6 +1883,24 @@ impl LanguageServer for Backend {
         }
 
         Ok(None)
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let index = Arc::clone(&self.index);
+        let params_for_blocking = params.clone();
+        let local = tokio::task::spawn_blocking(move || {
+            DocumentHighlightHandler::new(index).document_highlight(params_for_blocking)
+        })
+        .await
+        .ok()
+        .flatten();
+        // tsserver にフォールバックしない: documentHighlight は同ファイル内の
+        // 即時ハイライト用途で、AngularJS 固有のシンボルが解決できなかった場合は
+        // クライアント側のデフォルト挙動 (なし or text-based highlight) に任せる。
+        Ok(local)
     }
 
     async fn goto_definition(
@@ -2090,6 +2135,24 @@ impl LanguageServer for Backend {
         .ok()
         .flatten();
         Ok(tokens.map(SemanticTokensResult::Tokens))
+    }
+
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri.clone();
+        let range = Some(params.range);
+        let index = Arc::clone(&self.index);
+        let documents = Arc::clone(&self.documents);
+        let tree_cache = Arc::clone(&self.inlay_hint_js_tree_cache);
+        let hints = tokio::task::spawn_blocking(move || {
+            InlayHintsHandler::new(index, documents, tree_cache).inlay_hints(&uri, range)
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(hints)
     }
 
     async fn symbol(

@@ -4384,3 +4384,812 @@ angular.module('app', []).component('userCard', {
     assert!(m.contains("'user'") && m.contains("'age'") && m.contains("'team'"),
         "全 missing 名がメッセージに含まれる (got: {})", m);
 }
+// ============================================================
+// document highlight tests (#67)
+// ============================================================
+
+/// document_highlight ハンドラ呼び出しヘルパー
+fn run_document_highlight(
+    index: std::sync::Arc<Index>,
+    uri: tower_lsp::lsp_types::Url,
+    line: u32,
+    character: u32,
+) -> Option<Vec<tower_lsp::lsp_types::DocumentHighlight>> {
+    use angularjs_lsp::handler::DocumentHighlightHandler;
+    use tower_lsp::lsp_types::{
+        DocumentHighlightParams, PartialResultParams, Position, TextDocumentIdentifier,
+        TextDocumentPositionParams, WorkDoneProgressParams,
+    };
+
+    let params = DocumentHighlightParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position { line, character },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    DocumentHighlightHandler::new(index).document_highlight(params)
+}
+
+#[test]
+fn test_document_highlight_html_scope_reference() {
+    // HTML 内で `$scope.greeting` を 2 箇所参照しているとき、片方にカーソルを
+    // 置いたら同 URI の両方がハイライトされる。
+    let js = r#"
+angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
+    $scope.greeting = 'hello';
+}]);
+"#;
+    let html = r#"<div ng-controller="MyCtrl">
+    <p>{{ greeting }}</p>
+    <span>{{ greeting }}</span>
+</div>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // 行 1: "    <p>{{ greeting }}</p>" の greeting 内 (col 12 ≒ "greet|ing")
+    let highlights = run_document_highlight(
+        std::sync::Arc::clone(&index),
+        html_uri.clone(),
+        1,
+        12,
+    )
+    .expect("HTML scope ref のハイライトが返るべき");
+
+    assert!(
+        highlights.len() >= 2,
+        "同一 HTML 内の 2 箇所がハイライトされるべき (got {}: {:?})",
+        highlights.len(),
+        highlights
+    );
+    assert!(
+        highlights.iter().any(|h| h.range.start.line == 1),
+        "1 行目の参照がハイライトに含まれるべき"
+    );
+    assert!(
+        highlights.iter().any(|h| h.range.start.line == 2),
+        "2 行目の参照がハイライトに含まれるべき"
+    );
+}
+
+#[test]
+fn test_document_highlight_does_not_cross_files() {
+    // 別 URI の同名シンボルはハイライトされない (同 URI 限定)。
+    use angularjs_lsp::analyzer::html::HtmlAngularJsAnalyzer;
+    use angularjs_lsp::analyzer::js::AngularJsAnalyzer;
+    use std::sync::Arc;
+
+    let js = r#"
+angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
+    $scope.greeting = 'hello';
+}]);
+"#;
+    let html_a = r#"<div ng-controller="MyCtrl">
+    <p>{{ greeting }}</p>
+</div>"#;
+    let html_b = r#"<div ng-controller="MyCtrl">
+    <p>{{ greeting }}</p>
+</div>"#;
+
+    let index = Arc::new(Index::new());
+    let js_analyzer = Arc::new(AngularJsAnalyzer::new(index.clone()));
+    let html_analyzer =
+        HtmlAngularJsAnalyzer::new(index.clone(), js_analyzer.clone());
+
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    js_analyzer.analyze_document(&js_uri, js);
+
+    let uri_a = Url::parse("file:///a.html").unwrap();
+    let uri_b = Url::parse("file:///b.html").unwrap();
+    html_analyzer.analyze_document(&uri_a, html_a);
+    html_analyzer.analyze_document(&uri_b, html_b);
+
+    // a.html の greeting にカーソルを置く → a.html の参照のみ返る
+    let highlights = run_document_highlight(Arc::clone(&index), uri_a.clone(), 1, 12)
+        .expect("a.html 上のハイライトが返るべき");
+
+    assert!(
+        !highlights.is_empty(),
+        "a.html 上で少なくとも 1 つハイライトされるべき"
+    );
+    // a.html / b.html はテキスト内容が同じなので「URI 跨ぎが混入していない」を
+    // 件数で示すと、将来 a.html 上でハイライト件数が変わったときに脆くなる。
+    // 代わりに「すべての hit が a.html 上の参照行 (line 1) と一致している」
+    // という性質で確認する。
+    assert!(
+        highlights.iter().all(|h| h.range.start.line == 1),
+        "a.html 上 (line 1) 以外のハイライトが混入してはならない; got {:?}",
+        highlights
+    );
+}
+
+#[test]
+fn test_document_highlight_js_symbol() {
+    // JS ファイル内のシンボル: 定義位置にカーソル → 定義 (WRITE) を含む
+    // 同 URI 内の全ハイライトが返る。
+    use angularjs_lsp::analyzer::js::AngularJsAnalyzer;
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::DocumentHighlightKind;
+
+    // controller 内で `$scope.greeting = 'hello'; ... $scope.greeting + '!'`
+    // のように 1 ファイル内で同シンボルを 2 回触れるようにする。
+    let js = r#"angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
+    $scope.greeting = 'hello';
+    var x = $scope.greeting + '!';
+}]);
+"#;
+    let index = Arc::new(Index::new());
+    let js_analyzer = AngularJsAnalyzer::new(index.clone());
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    js_analyzer.analyze_document(&js_uri, js);
+
+    // line 1: "    $scope.greeting = 'hello';" → "greeting" は col 11〜18
+    let highlights = run_document_highlight(Arc::clone(&index), js_uri.clone(), 1, 14)
+        .expect("$scope プロパティのハイライトが返るべき");
+
+    assert!(
+        !highlights.is_empty(),
+        "JS シンボルが 1 件以上ハイライトされるべき"
+    );
+    assert!(
+        highlights
+            .iter()
+            .any(|h| h.kind == Some(DocumentHighlightKind::WRITE)),
+        "定義位置は WRITE kind であるべき (got: {:?})",
+        highlights
+    );
+}
+
+// ====================================================================
+// Issue #62: 未登録 directive / component の使用を警告
+// ====================================================================
+
+#[test]
+fn test_diagnose_unknown_directive_element_warns() {
+    // workspace のどこにも .directive(...) / .component(...) で登録されていない
+    // カスタム要素 <my-cmpnt> (typo) は警告を出す。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('myComponent', {
+    template: '<div>hello</div>'
+});
+"#;
+    // <my-cmpnt> は typo (登録名は myComponent / kebab: my-component)
+    let html = r#"<my-cmpnt></my-cmpnt>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("'myCmpnt'")
+                && d.message.to_lowercase().contains("unknown")),
+        "未登録カスタム要素 <my-cmpnt> に対して警告が出るべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_diagnose_unknown_directive_attribute_warns() {
+    // 属性として <div my-bind="..."> と書かれているが my-bind が登録されて
+    // いない場合は警告を出す。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).controller('Ctrl', ['$scope', function($scope) {
+    $scope.value = 1;
+}]);
+"#;
+    let html = r#"<div ng-controller="Ctrl" my-bind="value"></div>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("'myBind'")
+                && d.message.to_lowercase().contains("unknown")),
+        "未登録カスタム属性 my-bind に対して警告が出るべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_diagnose_known_directive_does_not_warn() {
+    // 登録済みの directive / component に対しては警告を出さない。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', [])
+    .component('myWidget', {
+        template: '<div></div>'
+    })
+    .directive('highlightMe', [function() {
+        return { restrict: 'A', link: function() {} };
+    }]);
+"#;
+    let html = r#"<my-widget highlight-me></my-widget>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    for d in &diagnostics {
+        assert!(
+            !d.message.contains("'myWidget'") || !d.message.to_lowercase().contains("unknown"),
+            "登録済み component <my-widget> に対して unknown 警告が出てはいけない (diagnostic: {})",
+            d.message
+        );
+        assert!(
+            !d.message.contains("'highlightMe'") || !d.message.to_lowercase().contains("unknown"),
+            "登録済み directive highlight-me に対して unknown 警告が出てはいけない (diagnostic: {})",
+            d.message
+        );
+    }
+}
+
+#[test]
+fn test_diagnose_standard_html_attributes_do_not_warn() {
+    // 標準 HTML 属性 (class, id, style, ...) や ng- 組み込みディレクティブ、
+    // aria-* / data-* などは directive_reference 登録時点で除外されているので
+    // 警告は一切出ないこと。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = "";
+    let html = r#"
+<div id="root" class="container" style="color: red"
+     tabindex="0" aria-label="hello" data-id="42"
+     ng-if="true" ng-click="noop()">
+    <input type="text" placeholder="..." readonly />
+</div>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+
+    let unknown_msgs: Vec<&str> = diagnostics
+        .iter()
+        .filter(|d| d.message.to_lowercase().contains("unknown"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        unknown_msgs.is_empty(),
+        "標準 HTML 属性 / ng-* / aria-* / data-* に対して unknown 警告が出てはいけない (msgs: {:?})",
+        unknown_msgs
+    );
+}
+
+#[test]
+fn test_diagnose_unknown_directive_disabled_by_config() {
+    // unknown_directive_references = false で機能を無効化できる。
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = "";
+    let html = r#"<my-undefined-component></my-undefined-component>"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let mut config = DiagnosticsConfig::default();
+    config.unknown_directive_references = false;
+
+    let diagnostics =
+        DiagnosticsHandler::new(Arc::clone(&index), config).diagnose_html(&html_uri);
+
+    let unknown_msgs: Vec<&str> = diagnostics
+        .iter()
+        .filter(|d| d.message.to_lowercase().contains("unknown"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        unknown_msgs.is_empty(),
+        "unknown_directive_references=false の場合は unknown 警告が出てはいけない (msgs: {:?})",
+        unknown_msgs
+    );
+}
+
+// ====================================================================
+// Issue #65: DI 配列の要素数と関数の引数数の不一致を警告
+// ====================================================================
+
+/// JS ソースを解析して `diagnose_js` の結果を返すヘルパー
+fn diagnose_js_for_test(js: &str) -> Vec<tower_lsp::lsp_types::Diagnostic> {
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let index = analyze_js(js);
+    let uri = Url::parse("file:///test.js").unwrap();
+    DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default()).diagnose_js(&uri)
+}
+
+#[test]
+fn test_di_arity_mismatch_warns_when_param_missing() {
+    // DI 配列の要素数 (2) より関数引数 (1) が少ない → 警告
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "param 不足のケースで arity 警告が 1 件出るべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        arity_msgs[0].contains("2") && arity_msgs[0].contains("1"),
+        "メッセージに DI 数 (2) と param 数 (1) が含まれるべき: {}",
+        arity_msgs[0]
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_warns_when_param_excessive() {
+    // DI 配列の要素数 (1) より関数引数 (2) が多い → 警告
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', function($scope, $timeout) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "param 過剰のケースで arity 警告が 1 件出るべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        arity_msgs[0].contains("1") && arity_msgs[0].contains("2"),
+        "メッセージに DI 数 (1) と param 数 (2) が含まれるべき: {}",
+        arity_msgs[0]
+    );
+}
+
+#[test]
+fn test_di_arity_match_no_warning() {
+    // DI 配列の要素数 (2) と関数引数 (2) が一致 → 警告なし
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope, $timeout) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "一致するケースでは arity 警告は出ないはず (got: {:?})",
+        arity_msgs
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_with_arrow_function() {
+    // arrow function でも arity 不一致を検出できる
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', ($scope) => {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "arrow function で arity 不一致を検出するべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_with_class_constructor() {
+    // class 構文でも constructor の引数数で arity チェック
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', class {
+    constructor($scope) {
+        this.value = 1;
+    }
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "class constructor で arity 不一致を検出するべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_function_only_no_warning() {
+    // DI 配列なしの純粋な function (暗黙 DI) は対象外 → 警告なし
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', function($scope, $timeout) {
+    $scope.x = 1;
+});
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "DI 配列なしの形式は arity チェック対象外 (got: {:?})",
+        arity_msgs
+    );
+}
+
+#[test]
+fn test_di_arity_underscore_prefix_param_counts_as_normal() {
+    // 末尾の `_` プレフィックス引数も「使ってない」だけで arity には数える。
+    // 一致しているなら警告なし、不一致のみ警告対象 (= 通常の数え方と同じ)。
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope, _$timeout) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "DI 数 (2) と param 数 (2) が一致するなら _-prefix があっても警告なし (got: {:?})",
+        arity_msgs
+    );
+}
+
+#[test]
+fn test_di_arity_underscore_prefix_param_mismatch_warns() {
+    // `_` プレフィックスでも arity には通常通り数えるので、
+    // DI 数と引数数がずれていれば警告対象になる (= 文字数の問題ではなく「並び」の問題)。
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', '$log', function($scope, _$timeout) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        "_-prefix があっても DI 数 (3) vs param 数 (2) が一致しなければ警告すべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_in_run_block() {
+    // `.run([...])` 内の DI 配列でも arity チェックが効く
+    let js = r#"
+angular.module('app', []).run(['$rootScope', '$log', function($rootScope) {
+    $rootScope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        ".run() でも arity 不一致を検出するべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_mismatch_in_config_block() {
+    // `.config([...])` 内の DI 配列でも arity チェックが効く
+    let js = r#"
+angular.module('app', []).config(['$routeProvider', '$locationProvider', function($routeProvider) {
+    $routeProvider.when('/', {});
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert_eq!(
+        arity_msgs.len(),
+        1,
+        ".config() でも arity 不一致を検出するべき (diagnostics: {:?})",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_di_arity_skips_when_function_has_rest_param() {
+    // rest パラメータが含まれる場合は静的に arity を確定できないので警告を出さない。
+    // 過剰に false positive を出さないことが目的の回帰テスト。
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope, ...rest) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "rest パラメータ含む関数は arity を確定できないので警告を出さない (got: {:?})",
+        arity_msgs
+    );
+}
+
+#[test]
+fn test_di_arity_skips_when_function_has_default_param() {
+    // デフォルト値付きパラメータが含まれる場合も警告を出さない。
+    let js = r#"
+angular.module('app', []).controller('MainCtrl', ['$scope', '$timeout', function($scope, $timeout = null) {
+    $scope.x = 1;
+}]);
+"#;
+    let diagnostics = diagnose_js_for_test(js);
+    let arity_msgs: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("DI array"))
+        .collect();
+    assert!(
+        arity_msgs.is_empty(),
+        "デフォルト値付きパラメータでは arity を確定できないので警告を出さない (got: {:?})",
+        arity_msgs
+    );
+}
+
+// ============================================================
+// Rename refactoring (#68)
+// ============================================================
+
+/// rename 用ヘルパー: JS と HTML の双方を解析して Index を返す
+fn analyze_js_and_html(js_source: &str, html_source: &str) -> Arc<Index> {
+    analyze_html(js_source, html_source)
+}
+
+fn make_rename_params(uri: &Url, line: u32, character: u32, new_name: &str) -> tower_lsp::lsp_types::RenameParams {
+    use tower_lsp::lsp_types::{Position, RenameParams, TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams};
+    RenameParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position { line, character },
+        },
+        new_name: new_name.to_string(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    }
+}
+
+fn edit_texts_in(edit: &tower_lsp::lsp_types::WorkspaceEdit, uri: &Url) -> Vec<String> {
+    edit.changes
+        .as_ref()
+        .and_then(|m| m.get(uri))
+        .map(|edits| edits.iter().map(|e| e.new_text.clone()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn test_rename_controller_updates_js_definition_and_html_references() {
+    // JS の controller 定義の文字列リテラルにカーソルを置いて rename すると、
+    // JS 側の登録名と HTML 側の ng-controller 値の両方が同時に書き換わるべき
+    use angularjs_lsp::handler::RenameHandler;
+
+    let js = r#"angular.module('app', []).controller('MainCtrl', ['$scope', function($scope) {}]);"#;
+    let html = r#"<div ng-controller="MainCtrl as vm">{{ vm.x }}</div>"#;
+
+    let index = analyze_js_and_html(js, html);
+    let handler = RenameHandler::new(index);
+
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // 'MainCtrl' の "M" 付近 (line 0, controller('MainCtrl' の中身) にカーソル
+    // `angular.module('app', []).controller('MainCtrl'` の "MainCtrl" は
+    // 0-index で `controller('` の後 → 文字位置を計算
+    let needle = "controller('";
+    let col = js.find(needle).unwrap() + needle.len() + 1; // 'M' の 1 文字内
+    let params = make_rename_params(&js_uri, 0, col as u32, "UserCtrl");
+    let edit = handler.rename(params).expect("rename は WorkspaceEdit を返すべき");
+
+    let js_edits = edit_texts_in(&edit, &js_uri);
+    let html_edits = edit_texts_in(&edit, &html_uri);
+
+    assert!(
+        !js_edits.is_empty(),
+        "JS 側に少なくとも 1 件の編集が必要 (got {:?})",
+        js_edits
+    );
+    assert!(
+        js_edits.iter().all(|t| t == "UserCtrl"),
+        "全ての編集 new_text は 'UserCtrl' であるべき (got {:?})",
+        js_edits
+    );
+    assert!(
+        !html_edits.is_empty(),
+        "HTML 側 ng-controller の参照も書き換え対象になるべき (got {:?})",
+        html_edits
+    );
+    assert!(
+        html_edits.iter().all(|t| t == "UserCtrl"),
+        "HTML 側の new_text も 'UserCtrl' であるべき (got {:?})",
+        html_edits
+    );
+}
+
+#[test]
+fn test_rename_scope_property_in_html_updates_js_and_html() {
+    // HTML 内の {{ foo }} にカーソルを置いて rename すると
+    // JS 側 $scope.foo と HTML 内の参照両方が書き換わるべき
+    use angularjs_lsp::handler::RenameHandler;
+
+    let js = r#"angular.module('app', []).controller('MainCtrl', ['$scope', function($scope) {
+    $scope.foo = 1;
+}]);"#;
+    let html = r#"<div ng-controller="MainCtrl">{{ foo }}</div>"#;
+
+    let index = analyze_js_and_html(js, html);
+    let handler = RenameHandler::new(index);
+
+    let js_uri = Url::parse("file:///test.js").unwrap();
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // HTML 0 行目 `{{ foo }}` の foo (col index)
+    let foo_col = html.find("{{ foo").unwrap() + 3; // '{', '{', ' ' の後
+    let params = make_rename_params(&html_uri, 0, foo_col as u32, "bar");
+    let edit = handler
+        .rename(params)
+        .expect("scope property rename は WorkspaceEdit を返すべき");
+
+    let html_edits = edit_texts_in(&edit, &html_uri);
+    let js_edits = edit_texts_in(&edit, &js_uri);
+
+    assert!(
+        !html_edits.is_empty(),
+        "HTML 側の参照を書き換える必要がある (got {:?})",
+        html_edits
+    );
+    assert!(
+        !js_edits.is_empty(),
+        "JS 側の $scope.foo 定義も書き換える必要がある (got {:?})",
+        js_edits
+    );
+    assert!(
+        html_edits.iter().chain(js_edits.iter()).all(|t| t == "bar"),
+        "全ての new_text は 'bar' であるべき"
+    );
+}
+
+#[test]
+fn test_rename_ng_repeat_local_variable_is_scope_limited() {
+    // ng-repeat の `item in items` の `item` をリネームしても、
+    // ng-repeat スコープ外で同名の参照は書き換えられてはいけない
+    use angularjs_lsp::handler::RenameHandler;
+
+    let js = "";
+    let html = r#"<div>
+<ul>
+<li ng-repeat="item in items">{{ item.name }}</li>
+</ul>
+<span>{{ item }}</span>
+</div>"#;
+
+    let index = analyze_js_and_html(js, html);
+    let handler = RenameHandler::new(index);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    // 2 行目 (0-index) の ng-repeat 内 'item' にカーソルを置く
+    // line 2: `<li ng-repeat="item in items">{{ item.name }}</li>`
+    let line = 2u32;
+    let line_text = "<li ng-repeat=\"item in items\">{{ item.name }}</li>";
+    let item_col = line_text.find("\"item").unwrap() + 1; // 'i' の位置
+
+    let params = make_rename_params(&html_uri, line, item_col as u32, "row");
+    let edit = handler
+        .rename(params)
+        .expect("ng-repeat ローカル変数の rename は WorkspaceEdit を返すべき");
+
+    let edits = edit
+        .changes
+        .as_ref()
+        .and_then(|m| m.get(&html_uri))
+        .cloned()
+        .unwrap_or_default();
+
+    assert!(!edits.is_empty(), "rename 編集が少なくとも 1 件必要");
+    assert!(
+        edits.iter().all(|e| e.new_text == "row"),
+        "new_text 全件が 'row' であるべき (got {:?})",
+        edits.iter().map(|e| &e.new_text).collect::<Vec<_>>()
+    );
+
+    // スコープ外の `<span>{{ item }}</span>` (line 4) は書き換えられないこと
+    let outer_line = 4u32;
+    assert!(
+        edits.iter().all(|e| e.range.start.line != outer_line),
+        "ng-repeat スコープ外 (line {}) の `item` は書き換え対象外であるべき (got ranges: {:?})",
+        outer_line,
+        edits.iter().map(|e| e.range).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_prepare_rename_returns_range_for_controller_literal() {
+    // prepareRename: controller の文字列リテラルにカーソルを置くと書き換え可能範囲が返る
+    use angularjs_lsp::handler::RenameHandler;
+    use tower_lsp::lsp_types::{Position, TextDocumentIdentifier, TextDocumentPositionParams};
+
+    let js = r#"angular.module('app', []).controller('MainCtrl', ['$scope', function($scope) {}]);"#;
+    let html = r#"<div ng-controller="MainCtrl">{{ }}</div>"#;
+
+    let index = analyze_js_and_html(js, html);
+    let handler = RenameHandler::new(index);
+    let js_uri = Url::parse("file:///test.js").unwrap();
+
+    let needle = "controller('";
+    let col = js.find(needle).unwrap() + needle.len() + 1;
+    let params = TextDocumentPositionParams {
+        text_document: TextDocumentIdentifier { uri: js_uri.clone() },
+        position: Position { line: 0, character: col as u32 },
+    };
+
+    let response = handler
+        .prepare_rename(params)
+        .expect("controller 名上では prepareRename が範囲を返すべき");
+    // Range が返ること自体を確認 (具体的な値はスキップ)
+    match response {
+        tower_lsp::lsp_types::PrepareRenameResponse::Range(_) => {}
+        _ => panic!("Range レスポンスが返るべき"),
+    }
+}

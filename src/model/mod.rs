@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod diagnostics;
 pub mod export;
 pub mod html;
 pub mod inheritance;
@@ -8,6 +9,7 @@ pub mod symbol;
 pub mod template;
 
 pub use builder::SymbolBuilder;
+pub use diagnostics::DiArityIssue;
 pub use export::{ExportInfo, ExportedComponentObject};
 pub use html::{
     DirectiveUsageType, HtmlComponentAttribute, HtmlComponentUsage, HtmlDirectiveReference,

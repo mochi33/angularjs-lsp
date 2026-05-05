@@ -5,7 +5,7 @@ use tracing::debug;
 
 use crate::config::DiagnosticsConfig;
 use crate::index::Index;
-use crate::model::SymbolKind;
+use crate::model::{DirectiveUsageType, SymbolKind};
 
 /// 診断ハンドラー
 pub struct DiagnosticsHandler {
@@ -23,7 +23,7 @@ impl DiagnosticsHandler {
         Self::severity_from_str(&self.config.severity)
     }
 
-    /// 任意の重要度文字列を `DiagnosticSeverity` に変換
+    /// 任意の重要度文字列を `DiagnosticSeverity` に変換する
     fn severity_from_str(s: &str) -> DiagnosticSeverity {
         match s.to_lowercase().as_str() {
             "error" => DiagnosticSeverity::ERROR,
@@ -40,6 +40,16 @@ impl DiagnosticsHandler {
             Some(s) => Self::severity_from_str(s),
             None => self.parse_severity(),
         }
+    }
+
+    /// 未登録 directive / component 用の severity
+    /// `unknown_directive_severity` が指定されていればそれを、なければ `severity` を使う
+    fn parse_unknown_directive_severity(&self) -> DiagnosticSeverity {
+        self.config
+            .unknown_directive_severity
+            .as_deref()
+            .map(Self::severity_from_str)
+            .unwrap_or_else(|| self.parse_severity())
     }
 
     /// HTMLファイルの診断を実行
@@ -61,6 +71,11 @@ impl DiagnosticsHandler {
             diagnostics.extend(self.check_component_bindings_mismatch_html(uri));
         }
 
+        // 未登録 directive / component のチェック
+        if self.config.unknown_directive_references {
+            diagnostics.extend(self.check_unknown_directive_references(uri));
+        }
+
         diagnostics
     }
 
@@ -77,7 +92,40 @@ impl DiagnosticsHandler {
             diagnostics.extend(self.check_unused_scope_variables(uri));
         }
 
+        // DI 配列の要素数と関数の引数数の不一致チェック
+        diagnostics.extend(self.check_di_arity_mismatch(uri));
+
         diagnostics
+    }
+
+    /// DI 配列の要素数と関数の引数数の不一致を診断する
+    ///
+    /// アナライザーが解析時に収集した `DiArityIssue` を読み出して LSP 診断に変換する。
+    /// 検出ロジックの詳細は `AngularJsAnalyzer::check_di_arity_mismatch` を参照。
+    fn check_di_arity_mismatch(&self, uri: &Url) -> Vec<Diagnostic> {
+        let severity = Self::severity_from_str(&self.config.di_arity_severity);
+        let issues = self.index.diagnostics.get_di_arity_issues(uri);
+
+        issues
+            .into_iter()
+            .map(|issue| {
+                let message = format!(
+                    "DI array has {} dependency name(s) but the function takes {} parameter(s); they must match or services will not be injected correctly",
+                    issue.di_count, issue.param_count
+                );
+                Diagnostic {
+                    range: issue.span.to_lsp_range(),
+                    severity: Some(severity),
+                    code: None,
+                    code_description: None,
+                    source: Some("angularjs-lsp".to_string()),
+                    message,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                }
+            })
+            .collect()
     }
 
     /// 未使用スコープ変数をチェックし警告生成
@@ -564,6 +612,90 @@ impl DiagnosticsHandler {
                     data: None,
                 });
             }
+        }
+
+        diagnostics
+    }
+
+    /// 未登録 directive / component 参照のチェック
+    ///
+    /// HTML 内で要素 (`<my-cmp>`) や属性 (`<div my-directive>`) として使われている
+    /// カスタムディレクティブが workspace 内のどこにも `.directive(...)` /
+    /// `.component(...)` で登録されていない場合に警告を出す。
+    ///
+    /// false positive 抑制:
+    /// - 標準 HTML 属性 (class, id, ...) や標準 HTML 要素 (div, span, ...) は
+    ///   `directive_reference.rs` の登録時点で除外済み
+    /// - `ng-` プレフィックス組み込みディレクティブも登録時点で除外済み
+    /// - `data-` プレフィックスは正規化済み (登録側)
+    /// - **コンポーネント要素配下の属性 は #64 (component_bindings_mismatch) が
+    ///   bindings との対応漏れとして扱うので、この診断側ではスキップして
+    ///   重複警告を防ぐ。** 位置 (`(line, start_col)`) で照合する。
+    fn check_unknown_directive_references(&self, uri: &Url) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let severity = self.parse_unknown_directive_severity();
+
+        // コンポーネント要素配下の属性位置集合を作る (#64 と #62 の重複警告回避)
+        let component_attr_positions: std::collections::HashSet<(u32, u32)> = self
+            .index
+            .html
+            .get_component_usages_for_uri(uri)
+            .iter()
+            .flat_map(|u| u.attributes.iter().map(|a| (a.start_line, a.start_col)))
+            .collect();
+
+        let references = self.index.html.get_all_directive_references_for_uri(uri);
+
+        for reference in references {
+            // workspace 内に Directive または Component の定義があるかチェック
+            let defs = self
+                .index
+                .definitions
+                .get_definitions(&reference.directive_name);
+            let registered = defs
+                .iter()
+                .any(|s| s.kind == SymbolKind::Directive || s.kind == SymbolKind::Component);
+
+            if registered {
+                continue;
+            }
+
+            // コンポーネント要素配下の属性は #64 が扱うのでここでは沈黙する
+            if matches!(reference.usage_type, DirectiveUsageType::Attribute)
+                && component_attr_positions
+                    .contains(&(reference.start_line, reference.start_col))
+            {
+                continue;
+            }
+
+            let (kind_label, suggestion) = match reference.usage_type {
+                DirectiveUsageType::Element => ("component or directive", "component"),
+                DirectiveUsageType::Attribute => ("directive", "directive"),
+            };
+
+            diagnostics.push(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: reference.start_line,
+                        character: reference.start_col,
+                    },
+                    end: Position {
+                        line: reference.end_line,
+                        character: reference.end_col,
+                    },
+                },
+                severity: Some(severity),
+                code: None,
+                code_description: None,
+                source: Some("angularjs-lsp".to_string()),
+                message: format!(
+                    "Unknown {} '{}' is not registered with .{}(...) anywhere in the workspace",
+                    kind_label, reference.directive_name, suggestion
+                ),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
         }
 
         diagnostics
