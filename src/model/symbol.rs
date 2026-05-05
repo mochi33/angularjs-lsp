@@ -3,15 +3,6 @@ use tower_lsp::lsp_types::{self, Url};
 
 use super::span::Span;
 
-/// `SymbolKind::ComponentBinding` の `Symbol.docs` に書き込まれるフォーマットの
-/// 接頭辞。analyzer (`extract_component_bindings`) が
-/// `format!("{COMPONENT_BINDING_DOCS_PREFIX}{}", binding_type)` で書き、
-/// 診断 (`parse_binding_type`) が `strip_prefix` で読み戻す。
-///
-/// 書き手と読み手で同じ定数を共有することで、「片方を変えてもう片方を直し
-/// 忘れて silently 警告ゼロ」を防ぐ (#79 review #2)。
-pub const COMPONENT_BINDING_DOCS_PREFIX: &str = "Component binding: ";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymbolKind {
     Module,

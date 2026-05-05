@@ -2,8 +2,8 @@ use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
 
 use crate::model::{
-    HtmlComponentUsage, HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable,
-    HtmlLocalVariableReference, HtmlNgModelTarget, HtmlScopeReference, HtmlUiSrefReference,
+    HtmlDirectiveReference, HtmlFormBinding, HtmlLocalVariable, HtmlLocalVariableReference,
+    HtmlNgModelTarget, HtmlScopeReference, HtmlUiSrefReference,
 };
 
 /// HTMLスコープ参照・ローカル変数・フォーム・ディレクティブの管理ストア
@@ -26,11 +26,6 @@ pub struct HtmlStore {
     /// HTML 内の ui-router `ui-sref="state"` 参照 (URI -> Vec<HtmlUiSrefReference>)
     /// state 名 → state 定義へのジャンプ・ホバー解決に使う
     ui_sref_references: DashMap<Url, Vec<HtmlUiSrefReference>>,
-    /// HTML 内のコンポーネント使用箇所 (URI -> Vec<HtmlComponentUsage>)
-    /// `<user-card user="..." on-select="...">` のような要素単位での
-    /// 「コンポーネント名 + 全属性リスト」を保持する。
-    /// component bindings との対応漏れ診断 (#64) で使う。
-    component_usages: DashMap<Url, Vec<HtmlComponentUsage>>,
 }
 
 impl HtmlStore {
@@ -43,7 +38,6 @@ impl HtmlStore {
             html_directive_references: DashMap::new(),
             ng_model_targets: DashMap::new(),
             ui_sref_references: DashMap::new(),
-            component_usages: DashMap::new(),
         }
     }
 
@@ -408,31 +402,6 @@ impl HtmlStore {
             .collect()
     }
 
-    // ========== コンポーネント使用箇所 ==========
-
-    /// HTML 上で使われたコンポーネント要素 1 件を登録
-    pub fn add_component_usage(&self, usage: HtmlComponentUsage) {
-        let uri = usage.uri.clone();
-        let mut entry = self.component_usages.entry(uri).or_default();
-        // 同位置の重複 (同じ start_line, start_col) は無視
-        let is_duplicate = entry.iter().any(|u| {
-            u.component_name == usage.component_name
-                && u.element_start_line == usage.element_start_line
-                && u.element_start_col == usage.element_start_col
-        });
-        if !is_duplicate {
-            entry.push(usage);
-        }
-    }
-
-    /// 指定 URI のコンポーネント使用箇所を取得
-    pub fn get_component_usages_for_uri(&self, uri: &Url) -> Vec<HtmlComponentUsage> {
-        self.component_usages
-            .get(uri)
-            .map(|v| v.value().clone())
-            .unwrap_or_default()
-    }
-
     // ========== ng-model ターゲット ==========
 
     pub fn add_ng_model_target(&self, target: HtmlNgModelTarget) {
@@ -524,7 +493,6 @@ impl HtmlStore {
         self.html_directive_references.remove(uri);
         self.ng_model_targets.remove(uri);
         self.ui_sref_references.remove(uri);
-        self.component_usages.remove(uri);
     }
 
     pub fn clear_document(&self, uri: &Url) {
@@ -537,7 +505,6 @@ impl HtmlStore {
         self.html_directive_references.remove(uri);
         self.ng_model_targets.remove(uri);
         self.ui_sref_references.remove(uri);
-        self.component_usages.remove(uri);
     }
 
     pub fn clear_all(&self) {
@@ -548,7 +515,6 @@ impl HtmlStore {
         self.html_directive_references.clear();
         self.ng_model_targets.clear();
         self.ui_sref_references.clear();
-        self.component_usages.clear();
     }
 }
 
