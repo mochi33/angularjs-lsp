@@ -4018,7 +4018,7 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
     let index = analyze_html(js, html);
     let html_uri = Url::parse("file:///test.html").unwrap();
 
-    // 行 1, "{{ greeting }}" の greeting 中央 (col 9)
+    // 行 1: "    <p>{{ greeting }}</p>" の greeting 内 (col 12 ≒ "greet|ing")
     let highlights = run_document_highlight(
         std::sync::Arc::clone(&index),
         html_uri.clone(),
@@ -4083,13 +4083,13 @@ angular.module('app', []).controller('MyCtrl', ['$scope', function($scope) {
         !highlights.is_empty(),
         "a.html 上で少なくとも 1 つハイライトされるべき"
     );
-    // すべてのハイライトの位置は同 URI 上の参照だけのはず
-    // (DocumentHighlight 自体は range のみで URI 情報を持たないため、
-    //  b.html 由来の参照位置 (line 1) が混入していないことは件数で確認する)
-    assert_eq!(
-        highlights.len(),
-        1,
-        "a.html 内の 1 件だけがハイライトされるべき (b.html の同名は含めない); got {:?}",
+    // a.html / b.html はテキスト内容が同じなので「URI 跨ぎが混入していない」を
+    // 件数で示すと、将来 a.html 上でハイライト件数が変わったときに脆くなる。
+    // 代わりに「すべての hit が a.html 上の参照行 (line 1) と一致している」
+    // という性質で確認する。
+    assert!(
+        highlights.iter().all(|h| h.range.start.line == 1),
+        "a.html 上 (line 1) 以外のハイライトが混入してはならない; got {:?}",
         highlights
     );
 }

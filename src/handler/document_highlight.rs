@@ -7,7 +7,9 @@
 //! `kind` フィールドの選択ルール:
 //! - 定義位置 (`Symbol`) → [`DocumentHighlightKind::WRITE`]
 //! - 参照位置 (`SymbolReference` / HTML 参照) → [`DocumentHighlightKind::READ`]
-//! - 不明 / 区別が難しいケース (継承された var など) → [`DocumentHighlightKind::TEXT`]
+//!
+//! 継承された var (親テンプレート由来) も「ユーザーから見える定義」が
+//! このファイル上にないため `READ` 扱い。`TEXT` は現状使用しない。
 use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
@@ -136,6 +138,9 @@ impl DocumentHighlightHandler {
             }
         }
 
+        // JS 側のテキスト参照は JS パス (`collect_symbol_highlights_in_uri`)
+        // で `get_all_references` から拾われる。`highlight_from_html` 経路では
+        // 同 URI フィルタで JS ref はどのみち落ちるため、ここでは省略している。
         finalize(highlights)
     }
 
@@ -182,8 +187,8 @@ impl DocumentHighlightHandler {
     ) -> Option<Vec<DocumentHighlight>> {
         let mut highlights = Vec::new();
 
-        // 継承元の定義は別 URI なのでハイライトしない (TEXT 種別で同名を出すケースもある
-        // が、ユーザーから見える「定義」位置ではないため READ にとどめる)。
+        // 継承元の定義は別 URI なのでハイライトしない。
+        // この URI 上には「参照」しか見えないので READ で統一する。
         let inherited_refs = self
             .index
             .templates
@@ -232,6 +237,18 @@ impl DocumentHighlightHandler {
                     && reference.span.start_line >= form_binding.scope_start_line
                     && reference.span.start_line <= form_binding.scope_end_line
                 {
+                    highlights.push(DocumentHighlight {
+                        range: reference.span.to_lsp_range(),
+                        kind: Some(DocumentHighlightKind::READ),
+                    });
+                }
+            }
+
+            // JS 側の `$scope.formName` 参照も拾う (references.rs と同構造)。
+            // 異 URI は同 URI フィルタで落ちるが、HTML/JS 両方から同じ form を
+            // 触るケースで対称性を保つ。
+            for reference in self.index.definitions.get_references(&symbol_name) {
+                if &reference.uri == uri {
                     highlights.push(DocumentHighlight {
                         range: reference.span.to_lsp_range(),
                         kind: Some(DocumentHighlightKind::READ),
@@ -322,10 +339,31 @@ impl DocumentHighlightHandler {
     }
 }
 
-fn finalize(highlights: Vec<DocumentHighlight>) -> Option<Vec<DocumentHighlight>> {
+fn finalize(mut highlights: Vec<DocumentHighlight>) -> Option<Vec<DocumentHighlight>> {
+    // 同じ range が WRITE/READ で重複し得るので、range で de-dup する。
+    // WRITE を優先したいので先にソート (Some(WRITE) < Some(READ) < Some(TEXT) は
+    // LSP enum 値順で 1 < 2 < 3、つまり WRITE が小さい)。
+    highlights.sort_by(|a, b| {
+        let key_a = (a.range.start, a.range.end, a.kind.map(kind_priority));
+        let key_b = (b.range.start, b.range.end, b.kind.map(kind_priority));
+        key_a.cmp(&key_b)
+    });
+    highlights.dedup_by(|a, b| a.range == b.range);
+
     if highlights.is_empty() {
         None
     } else {
         Some(highlights)
+    }
+}
+
+/// 同じ range で重複したとき WRITE > READ > TEXT > None を残すための優先度。
+/// 値が小さいほど優先される (sort 後 `dedup_by` は最初の要素を残す挙動)。
+fn kind_priority(kind: DocumentHighlightKind) -> u8 {
+    match kind {
+        DocumentHighlightKind::WRITE => 0,
+        DocumentHighlightKind::READ => 1,
+        DocumentHighlightKind::TEXT => 2,
+        _ => 3,
     }
 }
