@@ -4246,3 +4246,141 @@ angular.module('app', []).component('userCard', {
         messages
     );
 }
+
+#[test]
+fn test_component_bindings_multiple_components_in_one_html() {
+    // 同一 HTML に複数 component を使用 → それぞれ独立に診断される
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', [])
+    .component('userCard', {
+        bindings: { user: '<' },
+        templateUrl: 'user-card.html'
+    })
+    .component('teamList', {
+        bindings: { teams: '<' },
+        templateUrl: 'team-list.html'
+    });
+"#;
+    let html = r#"
+<user-card user="vm.u" wrong-attr="x"></user-card>
+<team-list teams="vm.t" another-typo="y"></team-list>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+    // userCard 側の typo
+    assert!(
+        messages.iter().any(|m| m.contains("wrong-attr") && m.contains("userCard")),
+        "userCard の typo 'wrong-attr' が警告される (messages: {:?})",
+        messages
+    );
+    // teamList 側の typo
+    assert!(
+        messages.iter().any(|m| m.contains("another-typo") && m.contains("teamList")),
+        "teamList の typo 'another-typo' が警告される (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_no_warn_when_bindings_undefined() {
+    // bindings 未定義のコンポーネント (= 任意の属性が許される) は警告しない
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    templateUrl: 'user-card.html'
+});
+"#;
+    // bindings 定義がない → どんな属性でも警告しない
+    let html = r#"
+<user-card foo="bar" baz="qux"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("userCard")),
+        "bindings 未定義の component は警告対象外 (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_attr_matches_registered_directive() {
+    // 属性が別途 .directive() で登録されている場合は typo 扱いせず警告しない
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', [])
+    .component('userCard', {
+        bindings: { user: '<' },
+        templateUrl: 'user-card.html'
+    })
+    .directive('myHighlight', function() { return {}; });
+"#;
+    // my-highlight は別 directive として登録済みなので typo ではない
+    let html = r#"
+<user-card user="vm.u" my-highlight="red"></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let messages: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("my-highlight")),
+        "他 directive として登録済みの属性は警告対象外 (messages: {:?})",
+        messages
+    );
+}
+
+#[test]
+fn test_component_bindings_multiple_missing_aggregated_into_one() {
+    // 複数の必須 binding が漏れていても 1 件にまとめて出す (#79 review #4)
+    use angularjs_lsp::config::DiagnosticsConfig;
+    use angularjs_lsp::handler::DiagnosticsHandler;
+
+    let js = r#"
+angular.module('app', []).component('userCard', {
+    bindings: { user: '<', age: '<', team: '<' },
+    templateUrl: 'user-card.html'
+});
+"#;
+    // 3 つとも漏れている
+    let html = r#"
+<user-card></user-card>
+"#;
+    let index = analyze_html(js, html);
+    let html_uri = Url::parse("file:///test.html").unwrap();
+
+    let diagnostics = DiagnosticsHandler::new(Arc::clone(&index), DiagnosticsConfig::default())
+        .diagnose_html(&html_uri);
+    let missing_messages: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("Missing required"))
+        .collect();
+    assert_eq!(
+        missing_messages.len(),
+        1,
+        "missing required binding は 1 件にまとめて出す (got: {:?})",
+        missing_messages
+    );
+    let m = missing_messages[0];
+    assert!(m.contains("'user'") && m.contains("'age'") && m.contains("'team'"),
+        "全 missing 名がメッセージに含まれる (got: {})", m);
+}

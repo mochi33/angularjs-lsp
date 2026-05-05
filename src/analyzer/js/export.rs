@@ -823,7 +823,8 @@ impl AngularJsAnalyzer {
                     };
 
                     let full_name = format!("{}.{}", controller_name, binding_name);
-                    let docs = binding_type.map(|t| format!("Component binding: {}", t));
+                    let docs = binding_type
+                        .map(|t| format!("{}{}", crate::model::COMPONENT_BINDING_DOCS_PREFIX, t));
 
                     let span = self.span_of(key);
 

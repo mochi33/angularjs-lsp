@@ -503,6 +503,9 @@ impl DiagnosticsHandler {
                 .map(|a| a.camel_name.clone())
                 .collect();
 
+            // 漏れた binding 名を集めて 1 件にまとめる (#79 review #4: 同じ要素に
+            // 対する N 件の重複警告を避ける)
+            let mut missing: Vec<&str> = Vec::new();
             for b in &bindings_meta {
                 if b.optional {
                     continue;
@@ -519,8 +522,27 @@ impl DiagnosticsHandler {
                 if provided.contains(&b.name) {
                     continue;
                 }
+                missing.push(&b.name);
+            }
 
-                // 要素名トークンの位置に「漏れ」警告を出す
+            if !missing.is_empty() {
+                let message = if missing.len() == 1 {
+                    format!(
+                        "Missing required binding '{}' on component '{}'",
+                        missing[0], usage.component_name
+                    )
+                } else {
+                    let list = missing
+                        .iter()
+                        .map(|m| format!("'{}'", m))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "Missing required bindings on component '{}': {}",
+                        usage.component_name, list
+                    )
+                };
+                // 要素名トークンの位置に「漏れ」警告を 1 件だけ出す
                 diagnostics.push(Diagnostic {
                     range: Range {
                         start: Position {
@@ -536,10 +558,7 @@ impl DiagnosticsHandler {
                     code: None,
                     code_description: None,
                     source: Some("angularjs-lsp".to_string()),
-                    message: format!(
-                        "Missing required binding '{}' on component '{}'",
-                        b.name, usage.component_name
-                    ),
+                    message,
                     related_information: None,
                     tags: None,
                     data: None,
@@ -637,36 +656,28 @@ struct BindingMeta {
 /// (`"Component binding: <"` / `"Component binding: ?<"` 等) を
 /// `(BindingKind, optional)` にパースする。
 ///
-/// docs が `None` または期待形式でない場合は `Unknown` / `false` を返す。
+/// 接頭辞は `crate::model::COMPONENT_BINDING_DOCS_PREFIX` で定数化されており、
+/// 書き手 (analyzer) と読み手 (この関数) が同じ定数を共有している。
+///
+/// docs が `None` または期待形式でない場合は `Unknown` / `false` を返す
+/// (false positive を出さないための保守的フォールバック)。
 fn parse_binding_type(docs: Option<&str>) -> (BindingKind, bool) {
-    let Some(s) = docs else {
-        return (BindingKind::Unknown, false);
-    };
-    let prefix = "Component binding: ";
-    let Some(value) = s.strip_prefix(prefix) else {
+    let Some(value) = docs.and_then(|s| s.strip_prefix(crate::model::COMPONENT_BINDING_DOCS_PREFIX))
+    else {
         return (BindingKind::Unknown, false);
     };
     let value = value.trim();
-    // `<attrName` のような alias 指定 (例: `&onSelected`) があるので、
-    // 先頭の symbol だけ見る
-    let mut chars = value.chars();
-    let mut optional = false;
-    let mut first = match chars.next() {
-        Some(c) => c,
-        None => return (BindingKind::Unknown, false),
+    // `?` プレフィックス (optional) を剥がす
+    let (optional, rest) = match value.strip_prefix('?') {
+        Some(r) => (true, r),
+        None => (false, value),
     };
-    if first == '?' {
-        optional = true;
-        first = match chars.next() {
-            Some(c) => c,
-            None => return (BindingKind::Unknown, true),
-        };
-    }
-    let kind = match first {
-        '<' => BindingKind::OneWay,
-        '=' => BindingKind::TwoWay,
-        '@' => BindingKind::String,
-        '&' => BindingKind::Callback,
+    // 先頭の symbol だけ見る (`&onSelected` のような alias は無視)
+    let kind = match rest.chars().next() {
+        Some('<') => BindingKind::OneWay,
+        Some('=') => BindingKind::TwoWay,
+        Some('@') => BindingKind::String,
+        Some('&') => BindingKind::Callback,
         _ => BindingKind::Unknown,
     };
     (kind, optional)
@@ -677,6 +688,9 @@ fn parse_binding_type(docs: Option<&str>) -> (BindingKind, bool) {
 /// - 標準 HTML 属性 (`class`, `id`, `style` 等) は除外
 /// - AngularJS ビルトイン (`ng-*`, `data-ng-*`) は除外
 /// - `aria-*`, `data-*` も除外 (バインディング名と衝突しない)
+///
+/// 標準 HTML 属性の集合は `analyzer::html::directives::is_standard_html_attribute`
+/// に集約済み (#79 review: 重複定義を避けるためここでは独自リストを持たない)。
 fn should_skip_attribute(attr_name: &str) -> bool {
     let lower = attr_name.to_ascii_lowercase();
 
@@ -690,43 +704,8 @@ fn should_skip_attribute(attr_name: &str) -> bool {
         return true;
     }
 
-    // 標準 HTML 属性
-    is_standard_html_attribute(&lower)
-}
-
-/// 標準 HTML 属性 (グローバル属性 + 一般的な要素固有属性 + イベントハンドラ)
-///
-/// component の `<my-comp class="...">` のような書き方でも警告しないように
-/// 除外用に持つ。`directive_reference.rs` の `STANDARD_HTML_ATTRIBUTES` と
-/// 同等の集合だが、ここからは参照できないため必要最低限を再列挙している。
-/// (頻出のもののみ。漏れた場合は他のディレクティブ判定で捨てられる)
-fn is_standard_html_attribute(name: &str) -> bool {
-    matches!(
-        name,
-        // Global attributes
-        "accesskey" | "autocapitalize" | "autocomplete" | "autofocus" | "class"
-        | "contenteditable" | "dir" | "draggable" | "enterkeyhint" | "hidden" | "id"
-        | "inert" | "inputmode" | "is" | "itemid" | "itemprop" | "itemref" | "itemscope"
-        | "itemtype" | "lang" | "nonce" | "part" | "popover" | "role" | "slot"
-        | "spellcheck" | "style" | "tabindex" | "title" | "translate"
-        // Element-specific (frequent ones)
-        | "abbr" | "accept" | "action" | "alt" | "as" | "async" | "autoplay"
-        | "checked" | "cite" | "color" | "cols" | "colspan" | "content" | "controls"
-        | "coords" | "crossorigin" | "datetime" | "decoding" | "default" | "defer"
-        | "disabled" | "download" | "enctype" | "for" | "form" | "formaction"
-        | "headers" | "height" | "href" | "hreflang" | "kind" | "label" | "list"
-        | "loop" | "max" | "maxlength" | "media" | "method" | "min" | "minlength"
-        | "multiple" | "muted" | "name" | "novalidate" | "open" | "pattern"
-        | "ping" | "placeholder" | "playsinline" | "poster" | "preload" | "readonly"
-        | "rel" | "required" | "reversed" | "rows" | "rowspan" | "sandbox" | "scope"
-        | "selected" | "shape" | "size" | "sizes" | "span" | "src" | "srcdoc"
-        | "srclang" | "srcset" | "start" | "step" | "summary" | "target" | "type"
-        | "usemap" | "value" | "width" | "wrap"
-        // Event handler attributes (頻出)
-        | "onclick" | "onchange" | "onsubmit" | "onfocus" | "onblur" | "onkeydown"
-        | "onkeyup" | "onkeypress" | "onmousedown" | "onmouseup" | "onmouseover"
-        | "onmouseout" | "onmousemove" | "onload" | "onerror" | "oninput"
-    )
+    // 標準 HTML 属性 (analyzer 側と同じ集合を共有)
+    crate::analyzer::html::directives::is_standard_html_attribute(&lower)
 }
 
 #[cfg(test)]
