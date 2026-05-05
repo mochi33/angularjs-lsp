@@ -13,11 +13,6 @@ pub struct DefinitionStore {
     /// `get_definitions_for_uri` 等の URI 逆引きを O(該当ドキュメントのシンボル数)
     /// で行うためのインデックス。重複登録を避けるため HashSet で保持する。
     document_symbols: DashMap<Url, HashSet<String>>,
-    /// `<componentName>` → そのコンポーネントに属する `ComponentBinding` symbol の
-    /// 完全名 (`componentName.bindingName`) 集合。
-    /// `get_component_bindings(name)` を全 definitions スキャンせずに O(該当
-    /// コンポーネントの binding 数) で返すためのインデックス。
-    component_binding_names: DashMap<String, HashSet<String>>,
 }
 
 impl DefinitionStore {
@@ -26,14 +21,12 @@ impl DefinitionStore {
             definitions: DashMap::new(),
             references: DashMap::new(),
             document_symbols: DashMap::new(),
-            component_binding_names: DashMap::new(),
         }
     }
 
     pub fn add_definition(&self, symbol: Symbol) {
         let name = symbol.name.clone();
         let uri = symbol.uri.clone();
-        let kind = symbol.kind;
 
         let mut entry = self.definitions.entry(name.clone()).or_default();
         let is_duplicate = entry.iter().any(|s| {
@@ -43,20 +36,7 @@ impl DefinitionStore {
         });
         if !is_duplicate {
             entry.push(symbol);
-            self.document_symbols
-                .entry(uri)
-                .or_default()
-                .insert(name.clone());
-            // ComponentBinding は逆引き用 index にも登録 (`<comp>.<binding>` の
-            // `<comp>` を抽出してキーに、フルネームを値の集合に追加)
-            if kind == SymbolKind::ComponentBinding {
-                if let Some((component, _)) = name.split_once('.') {
-                    self.component_binding_names
-                        .entry(component.to_string())
-                        .or_default()
-                        .insert(name);
-                }
-            }
+            self.document_symbols.entry(uri).or_default().insert(name);
         }
     }
 
@@ -134,29 +114,6 @@ impl DefinitionStore {
             .iter()
             .flat_map(|entry| entry.value().clone())
             .collect()
-    }
-
-    /// 指定したコンポーネント名 (camelCase) の `SymbolKind::ComponentBinding` を全て取得
-    ///
-    /// bindings は `extract_component_bindings` で `<componentName>.<bindingName>` の形で
-    /// 登録されているため、逆引き index `component_binding_names` でフルネームを
-    /// 引いてから `definitions` を参照する。全 definitions の線形スキャンを避け、
-    /// O(該当コンポーネントの binding 数) で返す。
-    pub fn get_component_bindings(&self, component_name: &str) -> Vec<Symbol> {
-        let Some(names) = self.component_binding_names.get(component_name) else {
-            return Vec::new();
-        };
-        let mut result = Vec::new();
-        for full_name in names.value().iter() {
-            if let Some(symbols) = self.definitions.get(full_name) {
-                for symbol in symbols.value() {
-                    if symbol.kind == SymbolKind::ComponentBinding {
-                        result.push(symbol.clone());
-                    }
-                }
-            }
-        }
-        result
     }
 
     /// 指定した名前がService/Factoryかどうかを判定
@@ -341,16 +298,7 @@ impl DefinitionStore {
     pub fn clear_document(&self, uri: &Url) {
         if let Some((_, symbols)) = self.document_symbols.remove(uri) {
             for symbol_name in symbols {
-                // この URI に紐づく ComponentBinding が全て消えたか判定するため、
-                // 削除前に「他 URI に同名 binding が残るか」を見る
-                let mut had_component_binding = false;
                 let defs_empty = if let Some(mut defs) = self.definitions.get_mut(&symbol_name) {
-                    if defs
-                        .iter()
-                        .any(|s| s.kind == SymbolKind::ComponentBinding && &s.uri == uri)
-                    {
-                        had_component_binding = true;
-                    }
                     defs.retain(|s| &s.uri != uri);
                     defs.is_empty()
                 } else {
@@ -358,18 +306,6 @@ impl DefinitionStore {
                 };
                 if defs_empty {
                     self.definitions.remove_if(&symbol_name, |_, v| v.is_empty());
-                }
-
-                // ComponentBinding の逆引き index も同期 (フルネームが完全に
-                // 消えたときだけエントリを除く)
-                if had_component_binding && defs_empty {
-                    if let Some((component, _)) = symbol_name.split_once('.') {
-                        if let Some(mut entry) = self.component_binding_names.get_mut(component) {
-                            entry.remove(&symbol_name);
-                        }
-                        self.component_binding_names
-                            .remove_if(component, |_, v| v.is_empty());
-                    }
                 }
 
                 let refs_empty = if let Some(mut refs) = self.references.get_mut(&symbol_name) {
@@ -389,7 +325,6 @@ impl DefinitionStore {
         self.definitions.clear();
         self.references.clear();
         self.document_symbols.clear();
-        self.component_binding_names.clear();
     }
 }
 
@@ -492,80 +427,6 @@ mod tests {
         // （これがなければ get_reference_only_names で他の reference-only も誤判定する）
         assert!(!store.has_definition("Ctrl.$scope.mochi"));
         assert!(store.get_reference_only_names().is_empty());
-    }
-
-    fn make_component_binding(full_name: &str, uri: &Url) -> Symbol {
-        let span = Span::new(0, 0, 0, full_name.len() as u32);
-        SymbolBuilder::new(
-            full_name.to_string(),
-            SymbolKind::ComponentBinding,
-            uri.clone(),
-        )
-        .definition_span(span)
-        .name_span(span)
-        .build()
-    }
-
-    #[test]
-    fn get_component_bindings_uses_reverse_index() {
-        // 逆引き index 経由で対象 component の binding だけを返す
-        let store = DefinitionStore::new();
-        let uri = make_uri();
-
-        // userCard の bindings を 2 つ登録
-        store.add_definition(make_component_binding("userCard.user", &uri));
-        store.add_definition(make_component_binding("userCard.onSelect", &uri));
-        // 別 component の binding も登録 (userCard には含まれないこと)
-        store.add_definition(make_component_binding("teamList.teams", &uri));
-        // ComponentBinding 以外の同名前置の symbol は対象外
-        store.add_definition(make_definition("userCard.other", &uri));
-
-        let mut names: Vec<String> = store
-            .get_component_bindings("userCard")
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            vec!["userCard.onSelect".to_string(), "userCard.user".to_string()]
-        );
-
-        // 別 component
-        let team_names: Vec<String> = store
-            .get_component_bindings("teamList")
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert_eq!(team_names, vec!["teamList.teams".to_string()]);
-
-        // 存在しない component は空
-        assert!(store.get_component_bindings("notExist").is_empty());
-    }
-
-    #[test]
-    fn get_component_bindings_invalidates_on_clear_document() {
-        // clear_document 後は逆引き index も同期されている
-        let store = DefinitionStore::new();
-        let uri_a = Url::parse("file:///a.js").unwrap();
-        let uri_b = Url::parse("file:///b.js").unwrap();
-
-        store.add_definition(make_component_binding("userCard.user", &uri_a));
-        store.add_definition(make_component_binding("userCard.age", &uri_b));
-
-        store.clear_document(&uri_a);
-
-        // a.js 由来の `userCard.user` は消え、b.js 由来の `userCard.age` だけ残る
-        let names: Vec<String> = store
-            .get_component_bindings("userCard")
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert_eq!(names, vec!["userCard.age".to_string()]);
-
-        // b.js も clear すると逆引き index 自体が空になる
-        store.clear_document(&uri_b);
-        assert!(store.get_component_bindings("userCard").is_empty());
     }
 
     #[test]
