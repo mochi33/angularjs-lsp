@@ -20,9 +20,10 @@ use crate::analyzer::js::AngularJsAnalyzer;
 use crate::cache::{CacheLoader, CacheWriter};
 use crate::config::{AjsConfig, DiagnosticsConfig, PathMatcher};
 use crate::handler::{
-    CodeLensHandler, CompletionHandler, DefinitionHandler, DiagnosticsHandler,
-    DocumentHighlightHandler, DocumentSymbolHandler, HoverHandler, ReferencesHandler,
-    RenameHandler, SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
+    new_js_tree_cache, CodeLensHandler, CompletionHandler, DefinitionHandler,
+    DiagnosticsHandler, DocumentHighlightHandler, DocumentSymbolHandler, HoverHandler,
+    InlayHintsHandler, JsTreeCache, ReferencesHandler, RenameHandler,
+    SemanticTokensHandler, SignatureHelpHandler, WorkspaceSymbolHandler,
 };
 use crate::index::Index;
 use crate::ts_proxy::TsProxy;
@@ -49,6 +50,9 @@ pub struct Backend {
     /// 待ちの did_change が積まれている)。`ensure_ts_synced` で同期済みかを
     /// 判定し、必要なら request 直前に flush する。
     ts_synced_versions: Arc<DashMap<Url, u64>>,
+    /// Inlay hint 用の JS Tree キャッシュ (URI -> 直近パース結果)。
+    /// `did_close` でエントリを破棄する。
+    inlay_hint_js_tree_cache: Arc<JsTreeCache>,
 }
 
 async fn publish_html_diagnostics(
@@ -528,6 +532,7 @@ impl Backend {
             diagnostics_config: Arc::new(RwLock::new(DiagnosticsConfig::default())),
             debounce_versions: Arc::new(DashMap::new()),
             ts_synced_versions: Arc::new(DashMap::new()),
+            inlay_hint_js_tree_cache: new_js_tree_cache(),
         }
     }
 
@@ -1363,6 +1368,7 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec!["angularjs-lsp.refreshIndex".to_string()],
                     work_done_progress_options: Default::default(),
@@ -1851,6 +1857,9 @@ impl LanguageServer for Backend {
         // 閉じられたファイルの sync 状態は不要、エントリを削除する
         // (再 open 時に ensure_ts_file_opened が新しく初期化する)
         self.ts_synced_versions.remove(uri);
+        // Inlay hint Tree キャッシュも閉じたファイル分は破棄 (再 open 時の
+        // ソースは別物の可能性があり、また長期蓄積を避ける)
+        self.inlay_hint_js_tree_cache.remove(uri);
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -2126,6 +2135,24 @@ impl LanguageServer for Backend {
         .ok()
         .flatten();
         Ok(tokens.map(SemanticTokensResult::Tokens))
+    }
+
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri.clone();
+        let range = Some(params.range);
+        let index = Arc::clone(&self.index);
+        let documents = Arc::clone(&self.documents);
+        let tree_cache = Arc::clone(&self.inlay_hint_js_tree_cache);
+        let hints = tokio::task::spawn_blocking(move || {
+            InlayHintsHandler::new(index, documents, tree_cache).inlay_hints(&uri, range)
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(hints)
     }
 
     async fn symbol(
