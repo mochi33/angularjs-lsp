@@ -327,6 +327,14 @@ impl AngularJsAnalyzer {
             (controller_name.as_ref(), controller_function_node)
         {
             self.extract_controller_methods(func_node, source, uri, name);
+
+            // identifier 参照 (`controller: FooCtrl` / `controller: ['$dep', FooCtrl]`)
+            // の場合、参照先の関数/class 宣言を Controller シンボルとして登録する。
+            // .controller() 経由の登録がない場合でも CodeLens / goto-def が解決できるように。
+            // (route/state/views/modal/dialog 全部このパスを通る)
+            if func_node.kind() == "identifier" {
+                self.register_inline_controller_definition(func_node, source, uri, name);
+            }
         }
 
         // TemplateBinding（双方向ジャンプ用）
