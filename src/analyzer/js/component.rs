@@ -327,6 +327,14 @@ impl AngularJsAnalyzer {
             (controller_name.as_ref(), controller_function_node)
         {
             self.extract_controller_methods(func_node, source, uri, name);
+
+            // identifier 参照 (`controller: FooCtrl` / `controller: ['$dep', FooCtrl]`)
+            // の場合、参照先の関数/class 宣言を Controller シンボルとして登録する。
+            // .controller() 経由の登録がない場合でも CodeLens / goto-def が解決できるように。
+            // (route/state/views/modal/dialog 全部このパスを通る)
+            if func_node.kind() == "identifier" {
+                self.register_inline_controller_definition(func_node, source, uri, name);
+            }
         }
 
         // TemplateBinding（双方向ジャンプ用）
@@ -1043,6 +1051,52 @@ impl AngularJsAnalyzer {
         }
     }
 
+    /// `.component({ controller: Identifier })` の Identifier が指す
+    /// 同一ファイル内の `function Identifier(...)` / `class Identifier {...}` 宣言を
+    /// Controller シンボルとして登録する。
+    ///
+    /// `.controller('Name', Identifier)` 形式は `extract_component_definition` 経由で
+    /// 関数宣言の位置に Controller を登録するが、`.component()` の identifier 参照には
+    /// 同等の登録がなく、CodeLens / goto definition が "(not found)" になっていた。
+    fn register_inline_controller_definition(&self, ident_node: Node, source: &str, uri: &Url, name: &str) {
+        // ルートノードまで遡る (DashMap の同期コストを避けるため、ここで登録は
+        // 1 シンボルに限定する)
+        let mut root = ident_node;
+        while let Some(parent) = root.parent() {
+            root = parent;
+        }
+
+        let (start, end) = if let Some(func_decl) = self.find_function_declaration(root, source, name) {
+            (func_decl.start_position(), func_decl.end_position())
+        } else if let Some(class_decl) = self.find_class_declaration(root, source, name) {
+            // class 宣言の場合は constructor があればその位置、なければ class 全体
+            if let Some(constructor) = self.get_constructor_from_class(class_decl, source) {
+                (constructor.start_position(), constructor.end_position())
+            } else {
+                (class_decl.start_position(), class_decl.end_position())
+            }
+        } else {
+            return;
+        };
+
+        let def_span = Span::new(
+            self.offset_line(start.row as u32),
+            start.column as u32,
+            self.offset_line(end.row as u32),
+            end.column as u32,
+        );
+        let name_span = self.span_of(ident_node);
+        let docs = self.extract_jsdoc_for_line(start.row, source);
+
+        let mut builder = SymbolBuilder::new(name.to_string(), SymbolKind::Controller, uri.clone())
+            .definition_span(def_span)
+            .name_span(name_span);
+        if let Some(docs_str) = docs {
+            builder = builder.docs(docs_str);
+        }
+        self.index.definitions.add_definition(builder.build());
+    }
+
     /// コンポーネント設定オブジェクトから templateUrl, controller, controllerAs, bindings を抽出
     fn extract_component_template_url(&self, config_node: Node, source: &str, uri: &Url, component_name: Option<&str>) {
         let mut template_path: Option<String> = None;
@@ -1076,7 +1130,9 @@ impl AngularJsAnalyzer {
                                 }
                                 // controller: ControllerName (識別子参照)
                                 else if value.kind() == "identifier" {
-                                    controller_name = Some(self.node_text(value, source).to_string());
+                                    let name = self.node_text(value, source).to_string();
+                                    self.register_inline_controller_definition(value, source, uri, &name);
+                                    controller_name = Some(name);
                                 }
                                 // controller: ['$dep1', '$dep2', ControllerName] (DI配列パターン)
                                 else if value.kind() == "array" {
@@ -1090,7 +1146,9 @@ impl AngularJsAnalyzer {
                                     }
                                     if let Some(last) = last_element {
                                         if last.kind() == "identifier" {
-                                            controller_name = Some(self.node_text(last, source).to_string());
+                                            let name = self.node_text(last, source).to_string();
+                                            self.register_inline_controller_definition(last, source, uri, &name);
+                                            controller_name = Some(name);
                                         }
                                         // 最後の要素が function/class の場合はNone（インラインコントローラー）
                                     }
