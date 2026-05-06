@@ -1,5 +1,21 @@
 # Change Log
 
+## [0.4.1] - 2026-05-06
+
+### Fixes
+- `.component('foo', { controller: SomeIdentifier, ... })` で controller が
+  ファイル内の `function SomeIdentifier(...)` / `class SomeIdentifier {...}` を
+  identifier 参照していたとき、CodeLens が `(not found)` を表示する問題を修正
+  (PR #85)
+- 同じ class の問題が `$routeProvider.when` / `$stateProvider.state` /
+  ui-router 名前付き views / `$uibModal.open` / `$mdDialog.show` /
+  `$mdBottomSheet` / `$mdToast` / `$mdPanel.open` / `ngDialog.open` でも
+  起きていたのを `extract_template_binding_from_object` 経路で一括修正
+- `.component({ controller: Identifier, controllerAs: 'foo' })` の HTML 側
+  `foo.X` で誤った "Property is not defined" 診断と goto-definition 失敗が
+  起きていた問題を修正。`vm.X` メソッド登録時の prefix を
+  `ComponentTemplateUrl.controller_name` の決定規則と揃えた
+
 ## [0.4.0] - 2026-05-06
 
 ### Features
