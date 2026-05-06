@@ -1,5 +1,21 @@
 # Change Log
 
+## [0.4.2] - 2026-05-07
+
+### Fixes
+- HTML 編集後にセマンティックトークン位置が実際のシンボル位置からずれる問題を修正 (PR #91)
+  - cross-file dep 変化がない同一ファイル編集でも `semantic_tokens_refresh` を
+    必ず発火するようにした。これがないと VS Code が didChange 直後に取得した
+    旧 position をそのまま新しいバッファに適用し続けてハイライトがずれていた
+- `alias.property` 形式の `HtmlScopeReference` の span を property 部分のみに
+  絞って登録するように変更 (PR #90)。以前は alias + dot + property 全体を
+  覆う長い span が登録されていて、overlap dedup により alias 単独 token が
+  消され METHOD 色が alias 部分まで広がっていた
+- HTML 解析の position を UTF-16 単位に統一 (PR #88)。`<form name="X">` の
+  HtmlFormBinding、ng-controller の SymbolReference、ng-repeat / ng-init の
+  継承ローカル変数で tree-sitter の byte column を直接保存していた箇所を
+  `byte_col_to_utf16_col` 経由に修正
+
 ## [0.4.1] - 2026-05-06
 
 ### Fixes
