@@ -340,22 +340,41 @@ impl HtmlAngularJsAnalyzer {
                             let raw_value = self.node_text(value_node, source);
                             let value = raw_value.trim_matches(|c| c == '"' || c == '\'');
                             let value_start_line = value_node.start_position().row as u32;
-                            let value_start_col = value_node.start_position().column as u32 + 1;
+                            // UTF-16 column 化 (tree-sitter の column は byte)
+                            let value_start_byte_col = value_node.start_position().column + 1;
+                            let value_start_col = self.byte_col_to_utf16_col(
+                                source,
+                                value_start_line as usize,
+                                value_start_byte_col,
+                            );
 
                             // 共通パーサーを使用
                             let parsed_vars = parse_ng_repeat_expression(value);
                             let result: Vec<LocalVariableScope> = parsed_vars
                                 .into_iter()
-                                .map(|var| LocalVariableScope {
-                                    name: var.name,
-                                    source: var.source,
-                                    uri: uri.clone(),
-                                    scope_start_line,
-                                    scope_end_line,
-                                    name_start_line: value_start_line,
-                                    name_start_col: value_start_col + var.offset as u32,
-                                    name_end_line: value_start_line,
-                                    name_end_col: value_start_col + var.offset as u32 + var.len as u32,
+                                .map(|var| {
+                                    // var.offset / var.len は属性値内のバイト単位なので
+                                    // UTF-16 単位に変換する
+                                    let utf16_offset = self
+                                        .byte_offset_to_utf16_offset(value, var.offset);
+                                    let var_text = &value[var.offset..var.offset + var.len];
+                                    let utf16_len: usize = var_text
+                                        .chars()
+                                        .map(|c| c.len_utf16())
+                                        .sum();
+                                    LocalVariableScope {
+                                        name: var.name,
+                                        source: var.source,
+                                        uri: uri.clone(),
+                                        scope_start_line,
+                                        scope_end_line,
+                                        name_start_line: value_start_line,
+                                        name_start_col: value_start_col + utf16_offset as u32,
+                                        name_end_line: value_start_line,
+                                        name_end_col: value_start_col
+                                            + utf16_offset as u32
+                                            + utf16_len as u32,
+                                    }
                                 })
                                 .collect();
 
@@ -393,22 +412,39 @@ impl HtmlAngularJsAnalyzer {
                             let raw_value = self.node_text(value_node, source);
                             let value = raw_value.trim_matches(|c| c == '"' || c == '\'');
                             let value_start_line = value_node.start_position().row as u32;
-                            let value_start_col = value_node.start_position().column as u32 + 1;
+                            // UTF-16 column 化 (tree-sitter の column は byte)
+                            let value_start_byte_col = value_node.start_position().column + 1;
+                            let value_start_col = self.byte_col_to_utf16_col(
+                                source,
+                                value_start_line as usize,
+                                value_start_byte_col,
+                            );
 
                             // 共通パーサーを使用
                             let parsed_vars = parse_ng_init_expression(value);
                             let result: Vec<LocalVariableScope> = parsed_vars
                                 .into_iter()
-                                .map(|var| LocalVariableScope {
-                                    name: var.name,
-                                    source: var.source,
-                                    uri: uri.clone(),
-                                    scope_start_line,
-                                    scope_end_line,
-                                    name_start_line: value_start_line,
-                                    name_start_col: value_start_col + var.offset as u32,
-                                    name_end_line: value_start_line,
-                                    name_end_col: value_start_col + var.offset as u32 + var.len as u32,
+                                .map(|var| {
+                                    let utf16_offset = self
+                                        .byte_offset_to_utf16_offset(value, var.offset);
+                                    let var_text = &value[var.offset..var.offset + var.len];
+                                    let utf16_len: usize = var_text
+                                        .chars()
+                                        .map(|c| c.len_utf16())
+                                        .sum();
+                                    LocalVariableScope {
+                                        name: var.name,
+                                        source: var.source,
+                                        uri: uri.clone(),
+                                        scope_start_line,
+                                        scope_end_line,
+                                        name_start_line: value_start_line,
+                                        name_start_col: value_start_col + utf16_offset as u32,
+                                        name_end_line: value_start_line,
+                                        name_end_col: value_start_col
+                                            + utf16_offset as u32
+                                            + utf16_len as u32,
+                                    }
                                 })
                                 .collect();
 
@@ -468,9 +504,16 @@ impl HtmlAngularJsAnalyzer {
                                 return None;
                             }
 
-                            // 値の位置を計算（クォートの次から）
+                            // 値の位置を計算（クォートの次から、UTF-16 単位）
                             let value_start_line = value_node.start_position().row as u32;
-                            let value_start_col = value_node.start_position().column as u32 + 1; // クォート分
+                            let value_start_byte_col = value_node.start_position().column + 1;
+                            let value_start_col = self.byte_col_to_utf16_col(
+                                source,
+                                value_start_line as usize,
+                                value_start_byte_col,
+                            );
+                            let value_utf16_len: usize =
+                                value.chars().map(|c| c.len_utf16()).sum();
 
                             return Some(FormBindingScope {
                                 name: value.to_string(),
@@ -480,7 +523,7 @@ impl HtmlAngularJsAnalyzer {
                                 name_start_line: value_start_line,
                                 name_start_col: value_start_col,
                                 name_end_line: value_start_line,
-                                name_end_col: value_start_col + value.len() as u32,
+                                name_end_col: value_start_col + value_utf16_len as u32,
                                 controller_depth: 0, // 呼び出し元で設定
                             });
                         }
@@ -489,5 +532,117 @@ impl HtmlAngularJsAnalyzer {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tower_lsp::lsp_types::Url;
+
+    use crate::analyzer::html::HtmlAngularJsAnalyzer;
+    use crate::analyzer::js::AngularJsAnalyzer;
+    use crate::index::Index;
+
+    fn analyze(source: &str) -> (Arc<Index>, Url) {
+        let index = Arc::new(Index::new());
+        let js = Arc::new(AngularJsAnalyzer::new(Arc::clone(&index)));
+        let html = HtmlAngularJsAnalyzer::new(Arc::clone(&index), js);
+        let uri = Url::parse("file:///test.html").unwrap();
+        html.analyze_document(&uri, source);
+        (index, uri)
+    }
+
+    #[test]
+    fn form_binding_position_is_utf16_when_line_has_japanese_before() {
+        // tree-sitter の column は UTF-8 byte なので、同一行に多バイト文字 (日本語等)
+        // が含まれていると UTF-16 変換しないと LSP 側で列がずれる。
+        // 例: <span title="日本語">の右に <form name="myForm"> がある場合、
+        // 日本語 3 文字 (UTF-8: 9 byte / UTF-16: 3 unit) なので byte と utf-16 の差は 6。
+        let source =
+            r#"<div><span title="日本語"></span><form name="myForm"></form></div>"#;
+        let (index, uri) = analyze(source);
+
+        let bindings = index.html.get_all_form_bindings(&uri);
+        assert_eq!(bindings.len(), 1, "form name should be registered");
+        let b = &bindings[0];
+        assert_eq!(b.name, "myForm");
+
+        // 期待される UTF-16 column を実測 (テスト fixture が変わったときの追従用)
+        let line = source;
+        let needle = "myForm";
+        let prefix_byte = line.find(needle).unwrap();
+        let utf16_start: u32 = line[..prefix_byte]
+            .chars()
+            .map(|c| c.len_utf16() as u32)
+            .sum();
+        let utf16_end = utf16_start + needle.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
+
+        assert_eq!(
+            b.name_start_col, utf16_start,
+            "form name の start_col は UTF-16 単位であるべき"
+        );
+        assert_eq!(
+            b.name_end_col, utf16_end,
+            "form name の end_col は UTF-16 単位であるべき"
+        );
+    }
+
+    #[test]
+    fn ng_repeat_inherited_local_variable_position_is_utf16_when_line_has_japanese() {
+        // <div ng-include> 経由で継承する `LocalVariableScope` の name_start_col も
+        // UTF-16 単位でなければ、子テンプレートでの参照解決位置がずれる。
+        let source = r#"<div title="日本語コメント" ng-repeat="item in items" ng-include="'child.html'"></div>"#;
+        let (index, _uri) = analyze(source);
+
+        let parent_uri = Url::parse("file:///test.html").unwrap();
+        // 子側 (child.html) から継承を逆引き
+        let child_uri = Url::parse("file:///child.html").unwrap();
+        let inherited = index
+            .templates
+            .get_inherited_local_variables_for_template(&child_uri);
+        let item = inherited.iter().find(|v| v.name == "item");
+        assert!(item.is_some(), "ng-repeat の item 変数が継承されているはず");
+        let item = item.unwrap();
+
+        // 期待値: 親 source 上の "item" の utf-16 col
+        let prefix_byte = source.find("item in items").unwrap();
+        let utf16_start: u32 = source[..prefix_byte]
+            .chars()
+            .map(|c| c.len_utf16() as u32)
+            .sum();
+
+        assert_eq!(
+            item.name_start_col, utf16_start,
+            "継承された ng-repeat 変数の start_col は UTF-16 単位であるべき"
+        );
+
+        // parent_uri が使われない警告対策のためダミー利用
+        let _ = parent_uri;
+    }
+
+    #[test]
+    fn ng_controller_reference_position_is_utf16_when_line_has_japanese() {
+        // ng-controller のシンボル参照位置も UTF-16 化していないと、
+        // find references / goto definition で controller 名のスパンがずれる。
+        let source = r#"<div title="日本語の説明" ng-controller="MyCtrl"></div>"#;
+        let (index, uri) = analyze(source);
+
+        let refs = index.definitions.get_references("MyCtrl");
+        let r = refs
+            .iter()
+            .find(|r| r.uri == uri)
+            .expect("ng-controller は SymbolReference として登録される");
+
+        let prefix_byte = source.find("MyCtrl").unwrap();
+        let utf16_start: u32 = source[..prefix_byte]
+            .chars()
+            .map(|c| c.len_utf16() as u32)
+            .sum();
+        let utf16_end = utf16_start + "MyCtrl".len() as u32; // ASCII なので byte == utf16
+
+        assert_eq!(r.span.start_col, utf16_start);
+        assert_eq!(r.span.end_col, utf16_end);
     }
 }

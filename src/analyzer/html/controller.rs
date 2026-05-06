@@ -118,11 +118,22 @@ impl HtmlAngularJsAnalyzer {
                                 None
                             };
 
-                            // コントローラー名の位置を計算（クォートの後から）
+                            // コントローラー名の位置を計算（クォートの後から、UTF-16 単位）
+                            // tree-sitter の column は UTF-8 byte なので、同一行に
+                            // 多バイト文字が含まれる場合は変換しないと LSP 側でずれる。
                             let start_line = value_node.start_position().row as u32;
-                            let start_col = value_node.start_position().column as u32 + 1; // クォート分
+                            let start_byte_col = value_node.start_position().column + 1; // クォート分
+                            let start_col = self.byte_col_to_utf16_col(
+                                source,
+                                start_line as usize,
+                                start_byte_col,
+                            );
                             let end_line = start_line;
-                            let end_col = start_col + controller_name.len() as u32;
+                            let end_col = start_col
+                                + controller_name
+                                    .chars()
+                                    .map(|c| c.len_utf16())
+                                    .sum::<usize>() as u32;
 
                             return Some((controller_name, alias, start_line, start_col, end_line, end_col));
                         }
