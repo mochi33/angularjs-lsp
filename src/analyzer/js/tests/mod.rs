@@ -975,6 +975,90 @@ angular.module('app', [])
 }
 
 #[test]
+fn test_component_with_identifier_controller_methods_use_identifier_as_prefix() {
+    // .component('groupSelector', { controller: GroupSelectorController, controllerAs: 'groupSelector' })
+    // のとき、`vm.X` メソッドは `GroupSelectorController.X` として登録されなければならない。
+    //
+    // ComponentTemplateUrl.controller_name は識別子名 ("GroupSelectorController") を
+    // 採用するため、メソッド prefix も同じにしないと
+    // - HTML 側 `groupSelector.X` → alias 解決で "GroupSelectorController" → method lookup
+    //   が `GroupSelectorController.X` に対して走る
+    // - メソッドが component_name 派 ("groupSelector.X") で登録されていると見つからず、
+    //   "Property is not defined" 診断と goto-def 失敗が発生する
+    let index = analyze(
+        r#"
+(function() {
+    angular.module('app', [])
+    .component('groupSelector', {
+        templateUrl: 'group_selector.html',
+        controller: GroupSelectorController,
+        controllerAs: 'groupSelector',
+    });
+
+    function GroupSelectorController() {
+        var vm = this;
+        vm.showSelectGroupDialog = function() {};
+        vm.handleKeydown = function(event) {};
+    }
+}());
+"#,
+    );
+
+    // 識別子名を prefix にしたメソッドが登録されている (resolution が動く側)
+    assert!(
+        has_definition(&index, "GroupSelectorController.showSelectGroupDialog", SymbolKind::Method),
+        "vm.X methods should be registered with the controller identifier as prefix"
+    );
+    assert!(has_definition(&index, "GroupSelectorController.handleKeydown", SymbolKind::Method));
+}
+
+#[test]
+fn test_component_with_anonymous_inline_controller_methods_use_component_name_as_prefix() {
+    // 匿名 inline コントローラーは prefix を component_name にフォールバック
+    // (ComponentTemplateUrl.controller_name も effective_controller_name = component_name)
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.component('myComp', {
+    templateUrl: 'my-comp.html',
+    controller: function() {
+        var vm = this;
+        vm.click = function() {};
+    },
+});
+"#,
+    );
+
+    assert!(
+        has_definition(&index, "myComp.click", SymbolKind::Method),
+        "anonymous inline controller methods should fall back to component_name as prefix"
+    );
+}
+
+#[test]
+fn test_component_with_string_controller_methods_use_string_name_as_prefix() {
+    // controller: 'StringName' のときは文字列名を prefix にする (.controller('StringName', ...) の
+    // メソッド登録と一致させて、両方からアクセス可能に)
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.component('myComp', {
+    templateUrl: 'my-comp.html',
+    controller: 'MyCompCtrl',
+    controllerAs: 'vm',
+});
+
+angular.module('app').controller('MyCompCtrl', function() {
+    var vm = this;
+    vm.title = 'hi';
+});
+"#,
+    );
+
+    assert!(has_definition(&index, "MyCompCtrl.title", SymbolKind::Method));
+}
+
+#[test]
 fn test_component_with_identifier_controller_registers_function_as_controller() {
     // .component({ controller: Identifier }) で identifier が同一ファイル内の
     // function 宣言を指す場合、その関数を Controller シンボルとして登録する。

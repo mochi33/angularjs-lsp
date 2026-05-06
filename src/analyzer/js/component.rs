@@ -1043,11 +1043,55 @@ impl AngularJsAnalyzer {
 
                     if key_name == "controller" {
                         if let Some(value) = child.child_by_field_name("value") {
-                            self.extract_controller_methods(value, source, uri, component_name);
+                            // メソッドの prefix は controller の値から導出する。
+                            // identifier (`controller: FooCtrl`) なら `FooCtrl`、
+                            // 文字列なら文字列、名前付き関数/class ならその名前。
+                            // 匿名 inline 関数や派生不能なときだけ component_name に
+                            // フォールバックする。
+                            //
+                            // これは `ComponentTemplateUrl.controller_name` の決定ルールと
+                            // 揃える必要がある: 揃わないと alias→controller_name で引いた
+                            // controller の `.method` lookup が prefix mismatch で失敗し、
+                            // diagnostic に "Property is not defined" が出たり、
+                            // goto-definition / hover が動かなくなる。
+                            let prefix = self
+                                .derive_controller_name_for_methods(value, source)
+                                .unwrap_or_else(|| component_name.to_string());
+                            self.extract_controller_methods(value, source, uri, &prefix);
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// `controller:` の値ノードから、this.X メソッド登録時に使う prefix 名を導出する。
+    /// `extract_component_template_url` が `ComponentTemplateUrl.controller_name` に
+    /// 入れる名前と同じ規則で計算する。
+    fn derive_controller_name_for_methods(&self, value: Node, source: &str) -> Option<String> {
+        match value.kind() {
+            "string" => Some(self.extract_string_value(value, source)),
+            "identifier" => Some(self.node_text(value, source).to_string()),
+            "function_expression" | "arrow_function" | "class" => value
+                .child_by_field_name("name")
+                .map(|n| self.node_text(n, source).to_string()),
+            "array" => {
+                let mut last_named: Option<Node> = None;
+                let mut cursor = value.walk();
+                for child in value.children(&mut cursor) {
+                    if child.is_named() {
+                        last_named = Some(child);
+                    }
+                }
+                last_named.and_then(|last| match last.kind() {
+                    "identifier" => Some(self.node_text(last, source).to_string()),
+                    "function_expression" | "arrow_function" | "class" => last
+                        .child_by_field_name("name")
+                        .map(|n| self.node_text(n, source).to_string()),
+                    _ => None,
+                })
+            }
+            _ => None,
         }
     }
 
