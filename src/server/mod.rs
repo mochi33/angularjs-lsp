@@ -737,13 +737,18 @@ impl Backend {
                         publish_js_diagnostics(&client, &index, &diagnostics_config, &js_uri).await;
                     }
 
-                    // semantic_tokens_refresh / code_lens_refresh はどちらも workspace
-                    // 全 applicable ファイルに再要求が走る重い操作。cross-file dep の
-                    // 状態変化が無ければスキップする。HTML 自身のスコープ参照変化
-                    // (`{{vm.foo}}` 追加など) は当該 HTML のトークン/lens にしか影響
-                    // せず、それは LSP クライアントが didChange 後に自動再要求する。
+                    // semantic_tokens_refresh は同一ファイル編集でも必ず発火する。
+                    // クライアントは didChange 後に semantic_tokens を自動再要求するが、
+                    // それは「即時」に起きるため、debounce (200ms) 後の再解析が完了する
+                    // 前に走り、stale な position を取得してしまう。サーバー側で再解析
+                    // 完了後に refresh 信号を送らないと、VS Code は古い position を
+                    // 新しいバッファに適用し続けてハイライトがずれる
+                    // (「編集後セマンティックトークンがずれる」症状の原因)。
+                    //
+                    // code_lens_refresh は cross-file 依存が変化したときだけでよい
+                    // (lens は CodeLens のリンク先に依存するため)
+                    let _ = client.semantic_tokens_refresh().await;
                     if before.cross_file_lens_state_changed(&after) {
-                        let _ = client.semantic_tokens_refresh().await;
                         let _ = client.code_lens_refresh().await;
                     }
                 }
