@@ -1,5 +1,30 @@
 # Change Log
 
+## [0.4.0] - 2026-05-06
+
+### Features
+- Inlay hints で DI alias と controller as の隠れた束縛を可視化 (PR #78)
+- Document highlight: カーソル位置の同名シンボルを同ファイル内でハイライト (PR #77, #81)
+- Signature help を実装 (PR #72)
+- Rename refactoring を実装 (PR #71)
+- DI 配列の要素数と関数の引数数の不一致を診断で警告 (PR #73)
+
+### Performance
+- did_open / initialized 後の `semantic_tokens_refresh` を診断発行と並列化 (PR #60)
+- Inlay hints の JS Tree をキャッシュして再パースを省略 (PR #78)
+
+### Refactor
+- `scope_reference.rs` の UTF-16 walker を `position_in_text` に共通化 (PR #50)
+- HTML ハンドラ三兄弟の位置解決ロジックを `HtmlResolution` で統合 (PR #49)
+- `scope_reference.rs` から ui-sref / ng-model 処理を別モジュールへ分離 (PR #48)
+- receiver 判定を `ReceiverMatch` enum で統合 (PR #46)
+- route/state の config 解析を `ConfigKind` enum で統合 (PR #47)
+- `span_of` helper を導入し Node→Span 変換を整理
+
+### Reverted
+- 未登録 directive / component の使用を診断で警告する機能 (PR #75) を revert (PR #83)
+- component bindings と HTML 属性の対応漏れを警告する診断 (PR #79) を revert (PR #82)
+
 ## [0.3.1] - 2026-04-30
 
 ### Fixes
