@@ -974,6 +974,62 @@ angular.module('app', [])
     assert!(has_definition(&index, "userList", SymbolKind::Component));
 }
 
+#[test]
+fn test_component_with_identifier_controller_registers_function_as_controller() {
+    // .component({ controller: Identifier }) で identifier が同一ファイル内の
+    // function 宣言を指す場合、その関数を Controller シンボルとして登録する。
+    // この登録がないと CodeLens が "Component: Foo (not found)" を表示してしまう。
+    let index = analyze(
+        r#"
+(function() {
+    'use strict';
+    angular.module('app', [])
+    .component('formSelector', {
+        templateUrl: 'form_selector.html',
+        controller: FormSelectorController,
+        controllerAs: 'formSelector',
+    });
+
+    function FormSelectorController() {
+        var vm = this;
+        vm.placeholder = '';
+    }
+}());
+"#,
+    );
+
+    assert!(has_definition(&index, "formSelector", SymbolKind::Component));
+    assert!(
+        has_definition(&index, "FormSelectorController", SymbolKind::Controller),
+        "function declaration referenced as `controller: FormSelectorController` should be registered as Controller"
+    );
+}
+
+#[test]
+fn test_component_with_di_array_identifier_controller_registers_class() {
+    // .component({ controller: ['$dep', MyCtrl] }) で末尾識別子が class 宣言を指す場合も
+    // Controller シンボルとして登録する
+    let index = analyze(
+        r#"
+angular.module('app', [])
+.component('myComp', {
+    templateUrl: 'my-comp.html',
+    controller: ['$scope', MyCompController],
+    controllerAs: 'vm',
+});
+
+class MyCompController {
+    constructor($scope) {
+        this.scope = $scope;
+    }
+}
+"#,
+    );
+
+    assert!(has_definition(&index, "myComp", SymbolKind::Component));
+    assert!(has_definition(&index, "MyCompController", SymbolKind::Controller));
+}
+
 // ==========================================================================
 // 複合テスト: sample.js フィクスチャ相当
 // ==========================================================================
