@@ -622,6 +622,68 @@ mod tests {
         let _ = parent_uri;
     }
 
+    /// JS analyzer も合わせて回す版。実環境同様 `groupSelector` を controller alias
+    /// として認識させた上で HTML を解析する。
+    fn analyze_with_js(html_source: &str, js_source: &str) -> (Arc<Index>, Url, Url) {
+        let index = Arc::new(Index::new());
+        let js_analyzer = Arc::new(AngularJsAnalyzer::new(Arc::clone(&index)));
+        let html = HtmlAngularJsAnalyzer::new(Arc::clone(&index), Arc::clone(&js_analyzer));
+        let html_uri = Url::parse("file:///test.html").unwrap();
+        let js_uri = Url::parse("file:///test.js").unwrap();
+
+        // JS 先行解析 (alias 解決のため)
+        js_analyzer.analyze_document(&js_uri, js_source);
+        html.analyze_document(&html_uri, html_source);
+        (index, html_uri, js_uri)
+    }
+
+    #[test]
+    fn alias_dot_property_ref_covers_only_property_span() {
+        // 以前は `alias.property` 形式の参照が **alias + dot + property 全体** を
+        // 覆う position で登録されていた。dedup の overlap ルール (長い token 優先) で
+        // alias 単独 ref が消され、結果として alias 部分まで METHOD 色で塗られていた
+        // (ユーザーから見ると「token がずれている」状態)。
+        //
+        // 修正後は `alias.property` ref の span は **property 部分のみ** を覆い、
+        // `alias` 単独 ref と被らないので両方が semantic token として正しく描画される。
+        let html = "<div ng-click=\"groupSelector.showSelectGroupDialog()\"></div>\n";
+        let js = "angular.module('app', []).component('groupSelector', {\n  templateUrl: 'test.html',\n  controller: function() { var vm = this; vm.showSelectGroupDialog = function() {}; },\n  controllerAs: 'groupSelector',\n});\n";
+        let (index, uri, _) = analyze_with_js(html, js);
+
+        let refs = index.html.get_html_scope_references(&uri);
+        let lines: Vec<&str> = html.lines().collect();
+
+        let alias_ref = refs
+            .iter()
+            .find(|r| r.property_path == "groupSelector")
+            .expect("alias 単独 ref が存在するはず");
+        let combined_ref = refs
+            .iter()
+            .find(|r| r.property_path == "groupSelector.showSelectGroupDialog")
+            .expect("alias.property ref が存在するはず");
+
+        let span_text = |r: &crate::model::HtmlScopeReference| -> String {
+            let line = lines[r.start_line as usize];
+            let line_utf16: Vec<u16> = line.encode_utf16().collect();
+            String::from_utf16_lossy(&line_utf16[r.start_col as usize..r.end_col as usize])
+        };
+
+        assert_eq!(span_text(alias_ref), "groupSelector");
+        // alias.property ref の span は **property のみ** を指していること
+        assert_eq!(
+            span_text(combined_ref),
+            "showSelectGroupDialog",
+            "alias.property ref の span は property のみを覆うべき"
+        );
+
+        // 2つの ref は overlap しないこと (encode_tokens dedup で消されない)
+        assert!(
+            alias_ref.end_col <= combined_ref.start_col
+                || combined_ref.end_col <= alias_ref.start_col,
+            "alias と alias.property の span は overlap してはいけない"
+        );
+    }
+
     #[test]
     fn ng_controller_reference_position_is_utf16_when_line_has_japanese() {
         // ng-controller のシンボル参照位置も UTF-16 化していないと、

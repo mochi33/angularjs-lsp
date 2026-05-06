@@ -144,9 +144,16 @@ impl HtmlAngularJsAnalyzer {
             let positions = self.find_identifier_positions(value, property_path);
 
             for (byte_offset, byte_len) in positions {
-                let identifier_text = &value[byte_offset..byte_offset + byte_len];
+                // alias.property 形式の場合、span は property 部分のみを覆うようにする。
+                // (`alias` は別の単独 ref として登録されるため、両者を別位置にすることで
+                //  semantic tokens の overlap dedup で alias 部分が消えなくなる)
+                let (span_byte_offset, span_byte_len) = match property_path.find('.') {
+                    Some(dot_idx) => (byte_offset + dot_idx + 1, byte_len - dot_idx - 1),
+                    None => (byte_offset, byte_len),
+                };
+                let identifier_text = &value[span_byte_offset..span_byte_offset + span_byte_len];
                 let (start_line, start_col) =
-                    self.position_in_text(value, byte_offset, value_start_line, value_start_col);
+                    self.position_in_text(value, span_byte_offset, value_start_line, value_start_col);
                 let end_line = start_line; // 識別子は1行内と仮定
                 let end_col = start_col + identifier_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
@@ -226,9 +233,15 @@ impl HtmlAngularJsAnalyzer {
                     let positions = self.find_identifier_positions(expr_trimmed, property_path);
 
                     for (byte_offset, byte_len) in positions {
-                        let identifier_text = &expr_trimmed[byte_offset..byte_offset + byte_len];
+                        // alias.property は property 部分のみを span にする
+                        let (span_byte_offset, span_byte_len) = match property_path.find('.') {
+                            Some(dot_idx) => (byte_offset + dot_idx + 1, byte_len - dot_idx - 1),
+                            None => (byte_offset, byte_len),
+                        };
+                        let identifier_text =
+                            &expr_trimmed[span_byte_offset..span_byte_offset + span_byte_len];
                         let (start_line, start_col) =
-                            self.position_in_text(expr_trimmed, byte_offset, expr_line, expr_col);
+                            self.position_in_text(expr_trimmed, span_byte_offset, expr_line, expr_col);
                         let end_line = start_line;
                         let end_col = start_col + identifier_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
@@ -428,9 +441,15 @@ impl HtmlAngularJsAnalyzer {
                     let positions = self.find_identifier_positions(expr_trimmed, &property_path);
 
                     for (byte_offset, byte_len) in positions {
-                        let identifier_text = &expr_trimmed[byte_offset..byte_offset + byte_len];
+                        // alias.property は property 部分のみを span にする
+                        let (span_byte_offset, span_byte_len) = match property_path.find('.') {
+                            Some(dot_idx) => (byte_offset + dot_idx + 1, byte_len - dot_idx - 1),
+                            None => (byte_offset, byte_len),
+                        };
+                        let identifier_text =
+                            &expr_trimmed[span_byte_offset..span_byte_offset + span_byte_len];
                         let (start_line, start_col) =
-                            self.position_in_text(expr_trimmed, byte_offset, expr_line, expr_col);
+                            self.position_in_text(expr_trimmed, span_byte_offset, expr_line, expr_col);
                         let end_line = start_line;
                         let end_col = start_col + identifier_text.chars().map(|c| c.len_utf16()).sum::<usize>() as u32;
 
